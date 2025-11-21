@@ -374,8 +374,14 @@ def window_label_series(end_idx: pd.Index, months: int) -> pd.Series:
 def combine_peer_rolling(funds_df, selected_funds, months, exclude=None):
     """
     Build a 'peer average' rolling series for the selected funds, excluding the focus fund.
-    Robust to different column names (Fund vs Fund name, Date vs month-end, NAV vs nav).
+
+    For each fund:
+      - take its monthly NAV series
+      - compute the N-month rolling CAGR: (NAV_t / NAV_{t-N})**(12/N) - 1
+    Then:
+      - at each date, peer average = simple arithmetic mean of those CAGRs
     """
+
     # Detect column names in the cleaned dataframe
     fund_candidates = ["Fund", "Fund name", "fund", "fund_name"]
     date_candidates = ["date", "Date", "month-end", "nav_date"]
@@ -400,7 +406,7 @@ def combine_peer_rolling(funds_df, selected_funds, months, exclude=None):
         if f == exclude:
             continue
 
-        # One time series per peer fund
+        # One NAV time series per peer fund
         s = (
             df.loc[df[fund_col] == f, [date_col, nav_col]]
               .drop_duplicates(subset=[date_col])
@@ -411,19 +417,19 @@ def combine_peer_rolling(funds_df, selected_funds, months, exclude=None):
         if s.empty:
             continue
 
-        # Keep your original rolling logic
-        r = s.pct_change(months).rolling(months).apply(
-            lambda x: (1 + x).prod() ** (12 / months) - 1,
-            raw=False,
-        )
+        # ✅ Correct rolling CAGR: no extra rolling, no double compounding
+        r = (s / s.shift(months)) ** (12.0 / months) - 1.0
+
         res[f] = r
 
     if not res:
         return None
 
+    # Simple arithmetic average across peer funds at each date
     peer = pd.concat(res, axis=1).mean(axis=1)
     peer.name = "Peer avg"
     return peer
+
 
 
 
