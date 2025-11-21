@@ -675,20 +675,32 @@ except Exception as e:
 
 # Optional: small status line at the top of the app
 # Small status line at the top of the app
-fund_col = "Fund" if "Fund" in funds_df.columns else "Fund name"
-date_col = "month-end" if "month-end" in funds_df.columns else "Date"
+# Small status line at the top of the app – robust to different cleaned column names
+fund_candidates = ["Fund", "Fund name", "fund", "fund_name"]
+fund_col = next((c for c in fund_candidates if c in funds_df.columns), None)
 
+date_candidates = ["month-end", "Date", "date", "nav_date"]
+date_col = next((c for c in date_candidates if c in funds_df.columns), None)
+
+# Latest date string
 latest_str = "N/A"
-if date_col in funds_df.columns:
-    latest_date = funds_df[date_col].max()
+if date_col is not None:
     try:
+        latest_date = funds_df[date_col].max()
         latest_str = latest_date.strftime("%d-%b-%Y")
     except Exception:
         latest_str = str(latest_date)
 
+# Number of funds
+if fund_col is not None:
+    num_funds = funds_df[fund_col].nunique()
+else:
+    num_funds = "N/A"
+
 st.caption(
-    f"Data source: Supabase · Funds: {funds_df[fund_col].nunique()} · Latest NAV date: {latest_str}"
+    f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}"
 )
+
 
 
 
