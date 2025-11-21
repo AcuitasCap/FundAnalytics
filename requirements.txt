@@ -6,3 +6,4 @@ openpyxl
 plotly
 numpy
 Matplotlib
+reportlab
