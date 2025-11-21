@@ -375,7 +375,7 @@ def combine_peer_rolling(funds_df: pd.DataFrame, peer_funds: list, months: int, 
     """Average of peers' rolling series (exclude focus if present)."""
     rolls = []
     for f in peer_funds:
-        s = funds_df.loc[funds_df["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
+        s = funds_df.loc[funds_df["Fund name"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
         r = trailing_cagr(s, months).rename(f)
         rolls.append(r)
     if not rolls:
@@ -446,7 +446,7 @@ def build_actual_returns_table(funds_df: pd.DataFrame, fund_list: list, bench_se
     """Returns (funds_df: rows=funds, cols=years), (bench_row: Series of years)."""
     rows = {}
     for f in fund_list:
-        s = funds_df.loc[funds_df["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
+        s = funds_df.loc[funds_df["Fund name"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
         rows[f] = yearly_returns_strict(s, fy=use_fy)
     df_f = pd.DataFrame(rows).T
     bench_row = None
@@ -674,8 +674,8 @@ except Exception as e:
     bench_df = None
 
 # Optional: small status line at the top of the app
-latest_date = funds_df["Date"].max()
-st.caption(f"Data source: Supabase · Funds: {funds_df['Fund'].nunique()} · Latest NAV date: {latest_date:%d-%b-%Y}")
+latest_date = funds_df["month-end"].max()
+st.caption(f"Data source: Supabase · Funds: {funds_df['Fund name'].nunique()} · Latest NAV date: {latest_date:%d-%b-%Y}")
 
 
 
