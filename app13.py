@@ -371,19 +371,60 @@ def window_label_series(end_idx: pd.Index, months: int) -> pd.Series:
     return pd.Series([f"{s:%b %Y}–{e:%Y}" for s,e in zip(start, end)], index=end_idx)
 
 
-def combine_peer_rolling(funds_df: pd.DataFrame, peer_funds: list, months: int, exclude=None) -> pd.Series:
-    """Average of peers' rolling series (exclude focus if present)."""
-    rolls = []
-    for f in peer_funds:
-        s = funds_df.loc[funds_df["Fund name"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-        r = trailing_cagr(s, months).rename(f)
-        rolls.append(r)
-    if not rolls:
-        return pd.Series(dtype=float)
-    R = pd.concat(rolls, axis=1)
-    if exclude is not None and exclude in R.columns and len(R.columns) > 1:
-        R = R.drop(columns=[exclude])
-    return R.mean(axis=1, skipna=True)
+def combine_peer_rolling(funds_df, selected_funds, months, exclude=None):
+    """
+    Build a 'peer average' rolling series for the selected funds, excluding the focus fund.
+    Robust to different column names (Fund vs Fund name, Date vs month-end, NAV vs nav).
+    """
+    # Detect column names in the cleaned dataframe
+    fund_candidates = ["Fund", "Fund name", "fund", "fund_name"]
+    date_candidates = ["date", "Date", "month-end", "nav_date"]
+    nav_candidates = ["nav", "NAV", "nav_value"]
+
+    def pick(col_list):
+        for c in col_list:
+            if c in funds_df.columns:
+                return c
+        raise KeyError(f"None of {col_list} found in funds_df columns: {list(funds_df.columns)}")
+
+    fund_col = pick(fund_candidates)
+    date_col = pick(date_candidates)
+    nav_col = pick(nav_candidates)
+
+    # Work on a trimmed, clean copy
+    df = funds_df[[fund_col, date_col, nav_col]].dropna(subset=[fund_col, date_col, nav_col]).copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    res = {}
+    for f in selected_funds:
+        if f == exclude:
+            continue
+
+        # One time series per peer fund
+        s = (
+            df.loc[df[fund_col] == f, [date_col, nav_col]]
+              .drop_duplicates(subset=[date_col])
+              .set_index(date_col)[nav_col]
+              .sort_index()
+        )
+
+        if s.empty:
+            continue
+
+        # Keep your original rolling logic
+        r = s.pct_change(months).rolling(months).apply(
+            lambda x: (1 + x).prod() ** (12 / months) - 1,
+            raw=False,
+        )
+        res[f] = r
+
+    if not res:
+        return None
+
+    peer = pd.concat(res, axis=1).mean(axis=1)
+    peer.name = "Peer avg"
+    return peer
+
 
 
 def pick_benchmark(bench_df, mode, sel_caps, sel_styles):
