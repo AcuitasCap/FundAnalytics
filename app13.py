@@ -71,6 +71,79 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
+@st.cache_data(show_spinner="Loading precomputed rolling returns (funds)...")
+def load_fund_rolling(window_months: int, fund_names, start=None, end=None):
+    """
+    Returns a DataFrame with columns: ['asof_date', 'fund_name', 'rolling_cagr']
+    for the given window and list of fund names.
+    """
+    if not fund_names:
+        return pd.DataFrame([])
+
+    # Ensure list
+    fund_names = list(fund_names)
+
+    date_filter = ""
+    params = {"window": window_months, "fund_names": tuple(fund_names)}
+    if start is not None:
+        date_filter += " AND r.asof_date >= :start"
+        params["start"] = start
+    if end is not None:
+        date_filter += " AND r.asof_date <= :end"
+        params["end"] = end
+
+    query = f"""
+        SELECT
+            f.fund_name,
+            r.asof_date,
+            r.rolling_cagr
+        FROM fundlab.fund_rolling_return r
+        JOIN fundlab.fund f
+          ON f.fund_id = r.fund_id
+        WHERE r.window_months = :window
+          AND f.fund_name IN :fund_names
+          {date_filter}
+        ORDER BY r.asof_date, f.fund_name;
+    """
+
+    with engine.begin() as conn:
+        df = pd.read_sql(text(query), conn, params=params, parse_dates=["asof_date"])
+    return df
+
+
+@st.cache_data(show_spinner="Loading precomputed rolling returns (benchmark)...")
+def load_bench_rolling(window_months: int, bench_name: str, start=None, end=None):
+    if bench_name is None:
+        return pd.DataFrame([])
+
+    date_filter = ""
+    params = {"window": window_months, "bench_name": bench_name}
+    if start is not None:
+        date_filter += " AND r.asof_date >= :start"
+        params["start"] = start
+    if end is not None:
+        date_filter += " AND r.asof_date <= :end"
+        params["end"] = end
+
+    query = f"""
+        SELECT
+            b.bench_name,
+            r.asof_date,
+            r.rolling_cagr
+        FROM fundlab.bench_rolling_return r
+        JOIN fundlab.benchmark b
+          ON b.bench_id = r.bench_id
+        WHERE r.window_months = :window
+          AND b.bench_name = :bench_name
+          {date_filter}
+        ORDER BY r.asof_date;
+    """
+
+    with engine.begin() as conn:
+        df = pd.read_sql(text(query), conn, params=params, parse_dates=["asof_date"])
+    return df
+
+
 @st.cache_data(show_spinner="Loading fund NAVs from database...")
 def load_funds_from_db():
     query = """
@@ -544,32 +617,107 @@ def apply_window_mask(r: pd.Series, months: int, start_domain, end_domain) -> pd
 
 
 def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, start_domain, end_domain):
-    """Main rolling chart: focus, peers avg (ex-focus), benchmark. Values in %."""
-    focus_nav = funds_df.loc[funds_df["fund"] == focus_fund, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-    focus_roll = trailing_cagr(focus_nav, months)
-    peer_avg = combine_peer_rolling(funds_df, selected_funds, months, exclude=focus_fund)
-    bench_roll = trailing_cagr(bench_ser, months) if bench_ser is not None and not bench_ser.empty else pd.Series(dtype=float)
+    """
+    Build a DataFrame for rolling charts using precomputed rolling_cagr from DB.
 
-    focus_roll = apply_window_mask(focus_roll, months, start_domain, end_domain)
-    peer_avg   = apply_window_mask(peer_avg,   months, start_domain, end_domain)
-    bench_roll = apply_window_mask(bench_roll, months, start_domain, end_domain)
+    Returns a wide DataFrame indexed by date ('Window') with columns:
+      - focus_fund
+      - selected peers
+      - 'Peer avg'
+      - benchmark (if available)
+    """
 
-    df = pd.concat([focus_roll.rename(focus_fund), peer_avg.rename("Peers Avg"), bench_roll.rename("Benchmark")], axis=1) * 100.0
-    return df.dropna(how="all").sort_index()
-
-
-def make_multi_fund_rolling_df(funds_df, funds_list, months, start_domain, end_domain):
-    """Multi-fund rolling chart: columns = each selected fund. Values in %."""
-    cols = {}
-    for f in funds_list:
-        s = funds_df.loc[funds_df["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-        r = trailing_cagr(s, months)
-        r = apply_window_mask(r, months, start_domain, end_domain)
-        if not r.empty:
-            cols[f] = r * 100.0
-    if not cols:
+    # 1) Load precomputed fund rolling
+    fund_roll = load_fund_rolling(
+        window_months=months,
+        fund_names=selected_funds,
+        start=start_domain,
+        end=end_domain,
+    )
+    if fund_roll.empty:
         return pd.DataFrame()
-    return pd.concat(cols, axis=1).sort_index()
+
+    # Pivot: rows = date, columns = fund_name
+    wide = fund_roll.pivot_table(
+        index="asof_date",
+        columns="fund_name",
+        values="rolling_cagr",
+        aggfunc="first",  # should be unique
+    ).sort_index()
+
+    # 2) Benchmark
+    bench_col_name = None
+    if bench_ser is not None:
+        # bench_ser in the current app was usually a Series with name = bench_label
+        bench_label = bench_ser.name if hasattr(bench_ser, "name") else None
+        if bench_label:
+            bench_roll = load_bench_rolling(
+                window_months=months,
+                bench_name=bench_label,
+                start=start_domain,
+                end=end_domain,
+            )
+            if not bench_roll.empty:
+                bench_pivot = bench_roll.set_index("asof_date")["rolling_cagr"].sort_index()
+                # Align to same date index
+                wide[bench_label] = bench_pivot.reindex(wide.index)
+
+                bench_col_name = bench_label
+
+    # 3) Peer average (exclude focus_fund)
+    peers = [f for f in selected_funds if f != focus_fund and f in wide.columns]
+    if peers:
+        wide["Peer avg"] = wide[peers].mean(axis=1)
+    else:
+        # No peers; just leave Peer avg as NaN or drop
+        wide["Peer avg"] = pd.NA
+
+    # Ensure focus fund is present as a column (it should be)
+    # If not, just let it be — your plotting code will handle missing columns gracefully.
+
+    # 4) Prepare for plotting
+    wide.index.name = "Window"  # your plot_rolling uses this
+    return wide
+
+
+
+def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain):
+    """
+    Build a wide DataFrame of precomputed rolling CAGRs for multiple funds,
+    to be used in the '3Y Rolling — Multiple Selected Funds' and
+    '1Y Rolling — Multiple Selected Funds' tables.
+
+    It uses the precomputed values in fundlab.fund_rolling_return instead of
+    recomputing from NAVs.
+    """
+
+    # 1) Guard: no funds selected
+    if not selected_funds:
+        return pd.DataFrame()
+
+    # 2) Load precomputed rolling from DB
+    roll = load_fund_rolling(
+        window_months=months,
+        fund_names=selected_funds,
+        start=start_domain,
+        end=end_domain,
+    )
+    if roll.empty:
+        return pd.DataFrame()
+
+    # roll columns: ['fund_name', 'asof_date', 'rolling_cagr']
+    # 3) Pivot to wide format: rows = date, columns = fund name
+    wide = roll.pivot_table(
+        index="asof_date",
+        columns="fund_name",
+        values="rolling_cagr",
+        aggfunc="first",
+    ).sort_index()
+
+    # 4) For consistency with the rest of the code
+    wide.index.name = "Window"
+
+    return wide
 
 
 def plot_rolling(df, months, focus_name, bench_label, chart_height=560, include_cols=None):
