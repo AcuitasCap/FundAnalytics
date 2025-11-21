@@ -58,6 +58,63 @@ def check_password():
 if not check_password():
     st.stop()
 
+engine = create_engine(
+    "postgresql+psycopg2://",
+    connect_args={
+        "host": st.secrets["pg"]["host"],
+        "port": st.secrets["pg"]["port"],
+        "user": st.secrets["pg"]["user"],
+        "password": st.secrets["pg"]["password"],
+        "dbname": st.secrets["pg"]["database"],
+        "sslmode": "require",
+    },
+    pool_pre_ping=True,
+)
+
+@st.cache_data(show_spinner="Loading fund NAVs from database...")
+def load_funds_from_db():
+    query = """
+        SELECT
+            f.fund_name      AS "Fund",
+            n.nav_date::date AS "Date",
+            n.nav_value::float AS "NAV",
+            c.category_name  AS "Category",
+            s.style_name     AS "Style"
+        FROM fundlab.fund_nav n
+        JOIN fundlab.fund f
+          ON f.fund_id = n.fund_id
+        LEFT JOIN fundlab.category c
+          ON c.category_id = f.category_id
+        LEFT JOIN fundlab.style s
+          ON s.style_id = f.style_id
+        ORDER BY "Fund", "Date";
+    """
+    with engine.begin() as conn:
+        df = pd.read_sql(query, conn, parse_dates=["Date"])
+    return df
+
+
+@st.cache_data(show_spinner="Loading benchmark NAVs from database...")
+def load_bench_from_db():
+    query = """
+        SELECT
+            b.bench_name     AS "BM name",
+            n.nav_date::date AS "Date",
+            n.nav_value::float AS "NAV",
+            c.category_name  AS "Category",
+            s.style_name     AS "Style"
+        FROM fundlab.bench_nav n
+        JOIN fundlab.benchmark b
+          ON b.bench_id = n.bench_id
+        LEFT JOIN fundlab.category c
+          ON c.category_id = b.category_id
+        LEFT JOIN fundlab.style s
+          ON s.style_id = b.style_id
+        ORDER BY "BM name", "Date";
+    """
+    with engine.begin() as conn:
+        df = pd.read_sql(query, conn, parse_dates=["Date"])
+    return df
 
 
 def to_eom(series):
@@ -576,27 +633,50 @@ def _read_any(uploaded_file):
 
 
 # ------------------------ Inputs ------------------------
-# Accept CSV or Excel for both uploads
-funds_file = st.file_uploader("Upload Funds file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="funds")
-bench_file = st.file_uploader("Upload Benchmarks file (CSV or Excel) — optional but recommended", type=["csv", "xlsx", "xls"], key="bench")
+# Accept CSV or Excel for both uploads - Commented out the excel upload functionality to upload directly from Supabase - 21 Nov 2025
+# funds_file = st.file_uploader("Upload Funds file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="funds")
+# bench_file = st.file_uploader("Upload Benchmarks file (CSV or Excel) — optional but recommended", type=["csv", "xlsx", "xls"], key="bench")
 
-if funds_file is None:
-    st.info("Upload your files to proceed.")
+# if funds_file is None:
+#    st.info("Upload your files to proceed.")
+#    st.stop()
+
+# try:
+#     raw_funds_df = _read_any(funds_file)
+#     funds_df = _clean_funds(raw_funds_df)
+# except Exception as e:
+#     st.error(str(e)); st.stop()
+
+# bench_df = None
+# if bench_file is not None:
+#     try:
+#         raw_bench_df = _read_any(bench_file)
+#         bench_df = _clean_bench(raw_bench_df)
+#     except Exception as e:
+#         st.error(str(e)); st.stop()
+
+
+# 🔄 Load from PostgreSQL instead of file upload
+raw_funds_df = load_funds_from_db()
+if raw_funds_df.empty:
+    st.error("No fund NAV data found in database.")
     st.stop()
 
-try:
-    raw_funds_df = _read_any(funds_file)
-    funds_df = _clean_funds(raw_funds_df)
-except Exception as e:
-    st.error(str(e)); st.stop()
+funds_df = _clean_funds(raw_funds_df.copy())
 
 bench_df = None
-if bench_file is not None:
-    try:
-        raw_bench_df = _read_any(bench_file)
-        bench_df = _clean_bench(raw_bench_df)
-    except Exception as e:
-        st.error(str(e)); st.stop()
+try:
+    raw_bench_df = load_bench_from_db()
+    if not raw_bench_df.empty:
+        bench_df = _clean_bench(raw_bench_df.copy())
+except Exception as e:
+    st.warning(f"Could not load benchmark data from DB: {e}")
+    bench_df = None
+
+# Optional: small status line at the top of the app
+latest_date = funds_df["Date"].max()
+st.caption(f"Data source: Supabase · Funds: {funds_df['Fund'].nunique()} · Latest NAV date: {latest_date:%d-%b-%Y}")
+
 
 
 # --- EOM + numeric normalization for benchmark data ---
