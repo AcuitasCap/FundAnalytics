@@ -75,11 +75,11 @@ engine = create_engine(
 def load_funds_from_db():
     query = """
         SELECT
-            f.fund_name      AS "Fund",
-            n.nav_date::date AS "Date",
+            f.fund_name      AS "Fund name",
+            n.nav_date::date AS "month-end",
             n.nav_value::float AS "NAV",
-            c.category_name  AS "Category",
-            s.style_name     AS "Style"
+            c.category_name  AS "market-cap",
+            s.style_name     AS "style"
         FROM fundlab.fund_nav n
         JOIN fundlab.fund f
           ON f.fund_id = n.fund_id
@@ -87,10 +87,10 @@ def load_funds_from_db():
           ON c.category_id = f.category_id
         LEFT JOIN fundlab.style s
           ON s.style_id = f.style_id
-        ORDER BY "Fund", "Date";
+        ORDER BY "Fund name", "month-end";
     """
     with engine.begin() as conn:
-        df = pd.read_sql(query, conn, parse_dates=["Date"])
+        df = pd.read_sql(query, conn, parse_dates=["month-end"])
     return df
 
 
@@ -98,11 +98,11 @@ def load_funds_from_db():
 def load_bench_from_db():
     query = """
         SELECT
-            b.bench_name     AS "BM name",
-            n.nav_date::date AS "Date",
+            b.bench_name     AS "benchmark_name",
+            n.nav_date::date AS "month-end",
             n.nav_value::float AS "NAV",
-            c.category_name  AS "Category",
-            s.style_name     AS "Style"
+            c.category_name  AS "category_type",
+            s.style_name     AS "category_value"
         FROM fundlab.bench_nav n
         JOIN fundlab.benchmark b
           ON b.bench_id = n.bench_id
@@ -110,10 +110,10 @@ def load_bench_from_db():
           ON c.category_id = b.category_id
         LEFT JOIN fundlab.style s
           ON s.style_id = b.style_id
-        ORDER BY "BM name", "Date";
+        ORDER BY "benchmark_name", "month-end";
     """
     with engine.begin() as conn:
-        df = pd.read_sql(query, conn, parse_dates=["Date"])
+        df = pd.read_sql(query, conn, parse_dates=["month-end"])
     return df
 
 
