@@ -674,8 +674,21 @@ except Exception as e:
     bench_df = None
 
 # Optional: small status line at the top of the app
-latest_date = funds_df["month-end"].max()
-st.caption(f"Data source: Supabase · Funds: {funds_df['Fund name'].nunique()} · Latest NAV date: {latest_date:%d-%b-%Y}")
+# Small status line at the top of the app
+fund_col = "Fund" if "Fund" in funds_df.columns else "Fund name"
+date_col = "month-end" if "month-end" in funds_df.columns else "Date"
+
+latest_str = "N/A"
+if date_col in funds_df.columns:
+    latest_date = funds_df[date_col].max()
+    try:
+        latest_str = latest_date.strftime("%d-%b-%Y")
+    except Exception:
+        latest_str = str(latest_date)
+
+st.caption(
+    f"Data source: Supabase · Funds: {funds_df[fund_col].nunique()} · Latest NAV date: {latest_str}"
+)
 
 
 
