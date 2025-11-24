@@ -618,20 +618,20 @@ def apply_window_mask(r: pd.Series, months: int, start_domain, end_domain) -> pd
 
 def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, start_domain, end_domain):
     """
-    Build a DataFrame for rolling charts using precomputed rolling_cagr from DB.
+    Build a DataFrame for rolling charts using precomputed rolling_cagr from Supabase.
 
     Output columns:
-        - focus fund
-        - peers (all other funds in selected_funds)
+        - focus_fund
+        - other selected funds (peers)
         - 'Peer avg'
-        - benchmark (if available)
+        - benchmark (if bench_ser provided)
 
     Index:
-        - 'Window' (asof_date)
+        - 'Window' (i.e. asof_date)
     """
 
     # ----------------------------
-    # 1) Load precomputed fund rolling returns
+    # 1) Load precomputed FUND rolling returns for all selected funds
     # ----------------------------
     fund_roll = load_fund_rolling(
         window_months=months,
@@ -642,16 +642,19 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
     if fund_roll.empty:
         return pd.DataFrame()
 
-    # Shape into wide format: rows = dates, cols = fund names
-    wide = fund_roll.pivot_table(
-        index="asof_date",
-        columns="fund_name",
-        values="rolling_cagr",
-        aggfunc="first"
-    ).sort_index()
+    # Pivot → wide matrix: rows = dates, columns = fund_name
+    wide = (
+        fund_roll.pivot_table(
+            index="asof_date",
+            columns="fund_name",
+            values="rolling_cagr",
+            aggfunc="first",
+        )
+        .sort_index()
+    )
 
     # ----------------------------
-    # 2) Benchmark (optional)
+    # 2) Add BENCHMARK if provided
     # ----------------------------
     bench_label = None
     if bench_ser is not None and hasattr(bench_ser, "name"):
@@ -666,33 +669,42 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
         )
         if not bench_roll.empty:
             bench_series = (
-                bench_roll.set_index("asof_date")["rolling_cagr"]
+                bench_roll
+                .set_index("asof_date")["rolling_cagr"]
                 .sort_index()
-                .reindex(wide.index)        # align to same dates
+                .reindex(wide.index)  # align with fund windows
             )
             wide[bench_label] = bench_series
 
     # ----------------------------
-    # 3) Peer average (exclude focus fund + benchmark)
+    # 3) Compute PEER AVERAGE
     # ----------------------------
-    # Identify all columns that correspond to funds (exclude benchmark)
-    fund_cols_in_wide = [c for c in wide.columns if c != bench_label]
+    # Fund columns are ALL columns except benchmark.
+    cols_excluding_bench = [
+        c for c in wide.columns
+        if c != bench_label
+    ]
 
-    # Peers = fund columns except the focus fund
-    peer_cols = [c for c in fund_cols_in_wide if c != focus_fund]
+    # Peer columns exclude FOCUS FUND
+    peer_cols = [
+        c for c in cols_excluding_bench
+        if c != focus_fund
+    ]
 
+    # Compute Peer avg
     if peer_cols:
         wide["Peer avg"] = wide[peer_cols].mean(axis=1)
     else:
-        # no peers → drop if exists
+        # If no peers, do NOT include Peer avg at all
         if "Peer avg" in wide.columns:
             wide = wide.drop(columns=["Peer avg"])
 
     # ----------------------------
-    # 4) Format index and return
+    # 4) Final formatting
     # ----------------------------
     wide.index.name = "Window"
     return wide
+
 
 
 
@@ -1194,7 +1206,7 @@ print_items = []  # (caption:str, figure:plotly Figure)
 
 # 3Y main chart
 st.subheader("3Y Rolling — Focus vs Peers Avg vs Benchmark")
-series_opts_3 = [focus_fund, "Peers Avg", bench_label]
+series_opts_3 = [focus_fund, "Peer Avg", bench_label]
 series_selected_3 = st.multiselect("Show series (3Y)", options=series_opts_3, default=series_opts_3, key="series3")
 if not window_ok(start_domain, end_domain, 36):
     st.info("Selected range too short for 3Y windows.")
@@ -1228,7 +1240,7 @@ else:
 
 # 1Y main chart
 st.subheader("1Y Rolling — Focus vs Peers Avg vs Benchmark")
-series_opts_1 = [focus_fund, "Peers Avg", bench_label]
+series_opts_1 = [focus_fund, "Peer Avg", bench_label]
 series_selected_1 = st.multiselect("Show series (1Y)", options=series_opts_1, default=series_opts_1, key="series1")
 if not window_ok(start_domain, end_domain, 12):
     st.info("Selected range too short for 1Y windows.")
