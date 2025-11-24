@@ -1084,31 +1084,6 @@ st.caption(
 
 
 
-# --- EOM + numeric normalization for benchmark data ---
-# --- Build benchmark series safely (works even if no file is uploaded) ---
-try:
-    _tmp_bench = bench_df.copy()  # if bench_df doesn't exist yet, NameError
-except NameError:
-    _tmp_bench = None
-
-if isinstance(_tmp_bench, pd.DataFrame) and not _tmp_bench.empty and "date" in _tmp_bench.columns and "nav" in _tmp_bench.columns:
-    _tmp_bench["date"] = to_eom(_tmp_bench["date"])
-    _tmp_bench["nav"]  = coerce_num(_tmp_bench["nav"])
-    _tmp_bench = (_tmp_bench
-                  .sort_values("date")
-                  .drop_duplicates(subset=["date"], keep="last"))
-    bench_ser = _tmp_bench.set_index("date")["nav"].sort_index()
-else:
-    bench_ser = None  # downstream code should handle this as "no benchmark available"
-
-if "bench_df" in locals() and isinstance(bench_df, pd.DataFrame):
-    if not bench_df.empty and {"date", "nav"} <= set(bench_df.columns):
-        bench_df["date"] = to_eom(bench_df["date"])
-        bench_df["nav"] = coerce_num(bench_df["nav"])
-        bench_df = (bench_df
-                    .sort_values("date")
-                    .drop_duplicates(subset=["date"], keep="last"))
-        bench_ser = bench_df.set_index("date")["nav"].sort_index()
 
 
 # ------------------------ Selectors (stacked with divider) ------------------------
@@ -1122,46 +1097,55 @@ def checkbox_group(title: str, options: list, key_prefix: str) -> list:
                 chosen.append(opt)
     return chosen
 
+
 all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
 # all_styles = sorted(funds_df["style"].dropna().unique().tolist())
 
-# Market-cap
+# Market-cap (checkbox group)
 caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
 st.divider()
-# Style
+# Style removed in favour of benchmark selector
 # styles = checkbox_group("Style (tick multiple as needed)", all_styles, "sty")
 
-# Market-cap filter (keep as-is)
-mc_options = sorted(funds_raw["market-cap"].dropna().unique())
-mc_selected = st.multiselect("Market-cap", options=mc_options, default=mc_options)
-filtered = funds_raw[funds_raw["market-cap"].isin(mc_selected)]
+# Require at least one market-cap
+if not caps:
+    st.warning("Tick at least one Market-cap to continue.")
+    st.stop()
 
-# NEW: Benchmark selector (multi-select across all benchmarks in DB)
-bench_names = sorted(bench_raw["benchmark_name"].dropna().unique().tolist())
+# Filter funds by selected market-caps
+filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
+
+# ---------- Benchmark selector (multi-select from DB) ----------
+if bench_df is not None and not bench_df.empty:
+    bench_names = sorted(bench_df["benchmark_name"].dropna().unique().tolist())
+else:
+    bench_names = []
+
 if not bench_names:
     st.warning("No benchmarks found in database.")
     bench_selected = []
+    bench_label = None
+    bench_ser = None
 else:
     bench_selected = st.multiselect(
         "Benchmarks (multi-select)",
         options=bench_names,
-        default=bench_names[:1],  # pick first as default
+        default=bench_names[:1],  # default = first benchmark
     )
 
-# Primary benchmark for all downstream analytics = first selected benchmark
-bench_label = bench_selected[0] if bench_selected else None
-bench_ser = None
+    bench_label = bench_selected[0] if bench_selected else None
+    bench_ser = None
 
-if bench_label:
-    # Build the NAV series for this benchmark from bench_raw
-    bmask = bench_raw["benchmark_name"] == bench_label
-    bench_ser = (
-        bench_raw.loc[bmask]
-        .drop_duplicates("month-end")
-        .set_index("month-end")["NAV"]
-        .sort_index()
-    )
-    bench_ser.name = bench_label
+    if bench_label:
+        bmask = bench_df["benchmark_name"] == bench_label
+        bench_ser = (
+            bench_df.loc[bmask, ["date", "nav"]]
+            .drop_duplicates("date")
+            .set_index("date")["nav"]
+            .sort_index()
+        )
+        bench_ser.name = bench_label
+
 
 
 
