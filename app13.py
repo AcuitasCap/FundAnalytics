@@ -1123,19 +1123,53 @@ def checkbox_group(title: str, options: list, key_prefix: str) -> list:
     return chosen
 
 all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
-all_styles = sorted(funds_df["style"].dropna().unique().tolist())
+# all_styles = sorted(funds_df["style"].dropna().unique().tolist())
 
 # Market-cap
 caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
 st.divider()
 # Style
-styles = checkbox_group("Style (tick multiple as needed)", all_styles, "sty")
+# styles = checkbox_group("Style (tick multiple as needed)", all_styles, "sty")
 
-if not caps or not styles:
-    st.warning("Tick at least one Market-cap and one Style to continue.")
+# Market-cap filter (keep as-is)
+mc_options = sorted(funds_raw["market-cap"].dropna().unique())
+mc_selected = st.multiselect("Market-cap", options=mc_options, default=mc_options)
+filtered = funds_raw[funds_raw["market-cap"].isin(mc_selected)]
+
+# NEW: Benchmark selector (multi-select across all benchmarks in DB)
+bench_names = sorted(bench_raw["benchmark_name"].dropna().unique().tolist())
+if not bench_names:
+    st.warning("No benchmarks found in database.")
+    bench_selected = []
+else:
+    bench_selected = st.multiselect(
+        "Benchmarks (multi-select)",
+        options=bench_names,
+        default=bench_names[:1],  # pick first as default
+    )
+
+# Primary benchmark for all downstream analytics = first selected benchmark
+bench_label = bench_selected[0] if bench_selected else None
+bench_ser = None
+
+if bench_label:
+    # Build the NAV series for this benchmark from bench_raw
+    bmask = bench_raw["benchmark_name"] == bench_label
+    bench_ser = (
+        bench_raw.loc[bmask]
+        .drop_duplicates("month-end")
+        .set_index("month-end")["NAV"]
+        .sort_index()
+    )
+    bench_ser.name = bench_label
+
+
+
+if not caps:
+    st.warning("Tick at least one Market-cap to continue.")
     st.stop()
 
-filtered = funds_df[(funds_df["market_cap"].isin(caps)) & (funds_df["style"].isin(styles))]
+# filtered = funds_df[(funds_df["market_cap"].isin(caps)) & (funds_df["style"].isin(styles))]
 # Ensure all dates are month-end timestamps
 
 # --- EOM + numeric normalization for funds data ---
@@ -1163,13 +1197,16 @@ if focus_fund == "-- none --":
     st.warning("Pick a Focus fund to compute Peers Avg (we exclude the focus from peers).")
     st.stop()
 
-bench_mode = st.radio("Benchmark", options=["Portfolio (Nifty)","Category"], index=0, horizontal=True)
-bench_name, bench_ser = pick_benchmark(bench_df, bench_mode, caps, styles)
-bench_label = bench_name if (bench_ser is not None and not bench_ser.empty) else "Benchmark"
-if bench_label != "Benchmark":
-    st.caption(f"Using **Benchmark:** {bench_label}")
-else:
-    st.warning("No matching benchmark series found. Upload a Benchmarks CSV or adjust the toggle/filters.")
+
+## Removing radio button selector between Portfolio and Category - 24 Nov 2025
+
+# bench_mode = st.radio("Benchmark", options=["Portfolio (Nifty)","Category"], index=0, horizontal=True)
+# bench_name, bench_ser = pick_benchmark(bench_df, bench_mode, caps, styles)
+# bench_label = bench_name if (bench_ser is not None and not bench_ser.empty) else "Benchmark"
+# if bench_label != "Benchmark":
+#     st.caption(f"Using **Benchmark:** {bench_label}")
+# else:
+#     st.warning("No matching benchmark series found. Upload a Benchmarks CSV or adjust the toggle/filters.")
 
 
 # ------------------------ Rolling Returns ------------------------
