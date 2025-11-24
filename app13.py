@@ -1205,23 +1205,52 @@ def window_ok(start_dt, end_dt, months):
 print_items = []  # (caption:str, figure:plotly Figure)
 
 # 3Y main chart
-st.subheader("3Y Rolling — Focus vs Peers Avg vs Benchmark")
-series_opts_3 = [focus_fund, "Peer Avg", bench_label]
-series_selected_3 = st.multiselect("Show series (3Y)", options=series_opts_3, default=series_opts_3, key="series3")
+st.subheader("3Y Rolling — Focus vs Peer avg vs Benchmark")
+
+# Only include non-empty labels in the options
+series_opts_3 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
+
+series_selected_3 = st.multiselect(
+    "Show series (3Y)",
+    options=series_opts_3,
+    default=series_opts_3,
+    key="series3",
+)
+
 if not window_ok(start_domain, end_domain, 36):
     st.info("Selected range too short for 3Y windows.")
 else:
-    df3 = make_rolling_df(filtered, funds_selected, focus_fund, bench_ser, 36, start_domain, end_domain)
-    fig3 = plot_rolling(df3, 36, focus_fund, bench_label, chart_height=560, include_cols=series_selected_3)
+    df3 = make_rolling_df(
+        filtered,
+        funds_selected,
+        focus_fund,
+        bench_ser,
+        36,
+        start_domain,
+        end_domain,
+    )
+    fig3 = plot_rolling(
+        df3,
+        36,
+        focus_fund,
+        bench_label,
+        chart_height=560,
+        include_cols=series_selected_3,
+    )
     if fig3 is None:
         st.info("Insufficient data or no series selected for 3Y rolling chart.")
     else:
         st.plotly_chart(fig3, use_container_width=True)
         stats3 = rolling_outperf_stats(df3, focus_fund)
         st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-        st.dataframe(stats3.round(2) if stats3 is not None else pd.DataFrame({"info":["Not enough overlapping 3Y windows"]}))
+        st.dataframe(
+            stats3.round(2)
+            if stats3 is not None
+            else pd.DataFrame({"info": ["Not enough overlapping 3Y windows"]})
+        )
         if st.checkbox("To print", key="print_fig3"):
             print_items.append(("3Y Rolling — Focus/Peers/Benchmark", fig3))
+
 
 # 3Y multi-fund
 st.subheader("3Y Rolling — Multiple Selected Funds")
@@ -1239,23 +1268,51 @@ else:
             print_items.append(("3Y Rolling — Multiple funds", fig3m))
 
 # 1Y main chart
-st.subheader("1Y Rolling — Focus vs Peers Avg vs Benchmark")
-series_opts_1 = [focus_fund, "Peer Avg", bench_label]
-series_selected_1 = st.multiselect("Show series (1Y)", options=series_opts_1, default=series_opts_1, key="series1")
+st.subheader("1Y Rolling — Focus vs Peer avg vs Benchmark")
+
+series_opts_1 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
+
+series_selected_1 = st.multiselect(
+    "Show series (1Y)",
+    options=series_opts_1,
+    default=series_opts_1,
+    key="series1",
+)
+
 if not window_ok(start_domain, end_domain, 12):
     st.info("Selected range too short for 1Y windows.")
 else:
-    df1 = make_rolling_df(filtered, funds_selected, focus_fund, bench_ser, 12, start_domain, end_domain)
-    fig1 = plot_rolling(df1, 12, focus_fund, bench_label, chart_height=560, include_cols=series_selected_1)
+    df1 = make_rolling_df(
+        filtered,
+        funds_selected,
+        focus_fund,
+        bench_ser,
+        12,
+        start_domain,
+        end_domain,
+    )
+    fig1 = plot_rolling(
+        df1,
+        12,
+        focus_fund,
+        bench_label,
+        chart_height=560,
+        include_cols=series_selected_1,
+    )
     if fig1 is None:
         st.info("Insufficient data or no series selected for 1Y rolling chart.")
     else:
         st.plotly_chart(fig1, use_container_width=True)
         stats1 = rolling_outperf_stats(df1, focus_fund)
         st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-        st.dataframe(stats1.round(2) if stats1 is not None else pd.DataFrame({"info":["Not enough overlapping 1Y windows"]}))
+        st.dataframe(
+            stats1.round(2)
+            if stats1 is not None
+            else pd.DataFrame({"info": ["Not enough overlapping 1Y windows"]})
+        )
         if st.checkbox("To print", key="print_fig1"):
             print_items.append(("1Y Rolling — Focus/Peers/Benchmark", fig1))
+
 
 # 1Y multi-fund
 st.subheader("1Y Rolling — Multiple Selected Funds")
