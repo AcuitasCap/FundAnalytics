@@ -620,14 +620,19 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
     """
     Build a DataFrame for rolling charts using precomputed rolling_cagr from DB.
 
-    Returns a wide DataFrame indexed by date ('Window') with columns:
-      - focus_fund
-      - selected peers
-      - 'Peer avg'
-      - benchmark (if available)
+    Output columns:
+        - focus fund
+        - peers (all other funds in selected_funds)
+        - 'Peer avg'
+        - benchmark (if available)
+
+    Index:
+        - 'Window' (asof_date)
     """
 
-    # 1) Load precomputed fund rolling
+    # ----------------------------
+    # 1) Load precomputed fund rolling returns
+    # ----------------------------
     fund_roll = load_fund_rolling(
         window_months=months,
         fund_names=selected_funds,
@@ -637,46 +642,56 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
     if fund_roll.empty:
         return pd.DataFrame()
 
-    # Pivot: rows = date, columns = fund_name
+    # Shape into wide format: rows = dates, cols = fund names
     wide = fund_roll.pivot_table(
         index="asof_date",
         columns="fund_name",
         values="rolling_cagr",
-        aggfunc="first",  # should be unique
+        aggfunc="first"
     ).sort_index()
 
-    # 2) Benchmark
-    bench_col_name = None
-    if bench_ser is not None:
-        # bench_ser in the current app was usually a Series with name = bench_label
-        bench_label = bench_ser.name if hasattr(bench_ser, "name") else None
-        if bench_label:
-            bench_roll = load_bench_rolling(
-                window_months=months,
-                bench_name=bench_label,
-                start=start_domain,
-                end=end_domain,
+    # ----------------------------
+    # 2) Benchmark (optional)
+    # ----------------------------
+    bench_label = None
+    if bench_ser is not None and hasattr(bench_ser, "name"):
+        bench_label = bench_ser.name
+
+    if bench_label:
+        bench_roll = load_bench_rolling(
+            window_months=months,
+            bench_name=bench_label,
+            start=start_domain,
+            end=end_domain,
+        )
+        if not bench_roll.empty:
+            bench_series = (
+                bench_roll.set_index("asof_date")["rolling_cagr"]
+                .sort_index()
+                .reindex(wide.index)        # align to same dates
             )
-            if not bench_roll.empty:
-                bench_pivot = bench_roll.set_index("asof_date")["rolling_cagr"].sort_index()
-                # Align to same date index
-                wide[bench_label] = bench_pivot.reindex(wide.index)
+            wide[bench_label] = bench_series
 
-                bench_col_name = bench_label
+    # ----------------------------
+    # 3) Peer average (exclude focus fund + benchmark)
+    # ----------------------------
+    # Identify all columns that correspond to funds (exclude benchmark)
+    fund_cols_in_wide = [c for c in wide.columns if c != bench_label]
 
-    # 3) Peer average (exclude focus_fund)
-    peers = [f for f in selected_funds if f != focus_fund and f in wide.columns]
-    if peers:
-        wide["Peer avg"] = wide[peers].mean(axis=1)
+    # Peers = fund columns except the focus fund
+    peer_cols = [c for c in fund_cols_in_wide if c != focus_fund]
+
+    if peer_cols:
+        wide["Peer avg"] = wide[peer_cols].mean(axis=1)
     else:
-        # No peers; just leave Peer avg as NaN or drop
-        wide["Peer avg"] = pd.NA
+        # no peers → drop if exists
+        if "Peer avg" in wide.columns:
+            wide = wide.drop(columns=["Peer avg"])
 
-    # Ensure focus fund is present as a column (it should be)
-    # If not, just let it be — your plotting code will handle missing columns gracefully.
-
-    # 4) Prepare for plotting
-    wide.index.name = "Window"  # your plot_rolling uses this
+    # ----------------------------
+    # 4) Format index and return
+    # ----------------------------
+    wide.index.name = "Window"
     return wide
 
 
@@ -720,70 +735,228 @@ def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_
     return wide
 
 
+# Backward-compat wrapper: old name → new implementation
+def make_multi_fund_rolling_df(funds_df, selected_funds, months, start_domain, end_domain):
+    return make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain)
+
+
 def plot_rolling(df, months, focus_name, bench_label, chart_height=560, include_cols=None):
+    """
+    Plot rolling CAGR for:
+      - focus fund (black)
+      - peer average (blue, column name: 'Peer avg')
+      - benchmark (red, using bench_label)
+
+    df is expected to have index as dates (from make_rolling_df) and columns including
+    focus_name, optionally 'Peer avg', and optionally a benchmark column named bench_label
+    (or 'Benchmark' in legacy cases).
+    """
     if df.empty:
         return None
+
+    # Build the "Window" label from index and reset index
     labels = window_label_series(df.index, months)
     plot_df = df.copy()
     plot_df["Window"] = labels.values
     plot_df = plot_df.reset_index(drop=True)
 
-    b_name = bench_label if "Benchmark" in plot_df.columns else None
-    if b_name and "Benchmark" in plot_df.columns:
-        plot_df = plot_df.rename(columns={"Benchmark": b_name})
+    # Determine actual benchmark column name in the DataFrame
+    bench_col = None
+    if bench_label:
+        if bench_label in plot_df.columns:
+            bench_col = bench_label
+        elif "Benchmark" in plot_df.columns:
+            # Legacy case: rename 'Benchmark' column to the provided bench_label
+            plot_df = plot_df.rename(columns={"Benchmark": bench_label})
+            bench_col = bench_label
 
-    possible = [focus_name, "Peers Avg"] + ([b_name] if b_name and b_name in plot_df.columns else [])
-    ycols = [c for c in (include_cols or possible) if c in plot_df.columns]
+    # Decide which columns to plot
+    default_cols = []
+    if focus_name in plot_df.columns:
+        default_cols.append(focus_name)
+    if "Peer avg" in plot_df.columns:
+        default_cols.append("Peer avg")
+    if bench_col:
+        default_cols.append(bench_col)
+
+    if include_cols:
+        ycols = [c for c in include_cols if c in plot_df.columns]
+    else:
+        ycols = default_cols
+
     if not ycols:
         return None
 
-    colors = {focus_name: "#d00000", "Peers Avg": "#1f77b4"}
-    if b_name:
-        colors[b_name] = "#000000"
+    # Color mapping:
+    #   - Focus fund: black
+    #   - Benchmark: red
+    #   - Peer avg: blue
+    #   - Any other series: assigned from a qualitative palette
+    palette = (
+        px.colors.qualitative.Dark24
+        + px.colors.qualitative.Alphabet
+        + px.colors.qualitative.Bold
+    )
+    color_map = {}
 
-    fig = px.line(plot_df, x="Window", y=ycols,
-                  labels={"value":"Return (%)", "Window":"Rolling window (start–end)"},
-                  title=f"{months//12}Y Rolling CAGR",
-                  color_discrete_map=colors)
+    # Focus fund
+    if focus_name in ycols:
+        color_map[focus_name] = "#000000"  # black
+
+    # Benchmark
+    if bench_col and bench_col in ycols:
+        color_map[bench_col] = "#d62728"  # red
+
+    # Peer avg
+    if "Peer avg" in ycols:
+        color_map["Peer avg"] = "#1f77b4"  # blue
+
+    # Assign colors for any remaining series
+    palette_idx = 0
+    for col in ycols:
+        if col not in color_map:
+            color_map[col] = palette[palette_idx % len(palette)]
+            palette_idx += 1
+
+    fig = px.line(
+        plot_df,
+        x="Window",
+        y=ycols,
+        labels={"value": "Return (%)", "Window": "Rolling window (start–end)"},
+        title=f"{months // 12}Y Rolling CAGR",
+        color_discrete_map=color_map,
+    )
+
+    # Thicker line for focus fund
     for tr in fig.data:
-        tr.update(line=dict(width=4 if tr.name == focus_name else 3))
-    fig.update_layout(height=chart_height, margin=dict(l=40,r=40,t=60,b=80),
-                      legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
-                      hovermode="x unified")
+        if tr.name == focus_name:
+            tr.update(line=dict(width=4))
+        else:
+            tr.update(line=dict(width=3))
+
+    fig.update_layout(
+        height=chart_height,
+        margin=dict(l=40, r=40, t=60, b=80),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+        ),
+        hovermode="x unified",
+    )
+
     n = len(plot_df["Window"])
-    tickvals = plot_df["Window"].tolist() if n <= 12 else plot_df["Window"].tolist()[::math.ceil(n/12)]
-    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=tickvals, tickangle=-20,
-                     tickfont=dict(size=12), categoryorder="array", categoryarray=plot_df["Window"].tolist(), showgrid=True)
+    tickvals = (
+        plot_df["Window"].tolist()
+        if n <= 12
+        else plot_df["Window"].tolist()[:: math.ceil(n / 12)]
+    )
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=tickvals,
+        tickangle=-20,
+        tickfont=dict(size=12),
+        categoryorder="array",
+        categoryarray=plot_df["Window"].tolist(),
+        showgrid=True,
+    )
     fig.update_yaxes(tickformat=".2f", ticksuffix="%", showgrid=True)
+
     return fig
 
 
+
 def plot_multi_fund_rolling(df, months, focus_name=None, chart_height=560):
+    """
+    Plot rolling CAGR for multiple funds (no benchmark here).
+
+    - Each fund gets a distinct color from a large qualitative palette.
+    - Optional focus fund is highlighted with a thicker black line.
+    """
+
     if df.empty:
         return None
+
     labels = window_label_series(df.index, months)
     plot_df = df.copy()
     plot_df["Window"] = labels.values
     plot_df = plot_df.reset_index(drop=True)
 
-    palette = px.colors.qualitative.Dark24 + px.colors.qualitative.Alphabet + px.colors.qualitative.Bold
-    color_map = {col: palette[i % len(palette)] for i, col in enumerate([c for c in plot_df.columns if c != "Window"])}
+    series_cols = [c for c in plot_df.columns if c != "Window"]
+    if not series_cols:
+        return None
 
-    fig = px.line(plot_df, x="Window", y=[c for c in plot_df.columns if c != "Window"],
-                  labels={"value":"Return (%)", "Window":"Rolling window (start–end)"},
-                  title=f"{months//12}Y Rolling CAGR — Multiple funds",
-                  color_discrete_map=color_map)
+    palette = (
+        px.colors.qualitative.Dark24
+        + px.colors.qualitative.Alphabet
+        + px.colors.qualitative.Bold
+    )
+
+    color_map = {}
+
+    # Focus fund (if any): black
+    if focus_name and focus_name in series_cols:
+        color_map[focus_name] = "#000000"
+
+    # Assign colors for all other series
+    palette_idx = 0
+    for col in series_cols:
+        if col not in color_map:
+            color_map[col] = palette[palette_idx % len(palette)]
+            palette_idx += 1
+
+    fig = px.line(
+        plot_df,
+        x="Window",
+        y=series_cols,
+        labels={"value": "Return (%)", "Window": "Rolling window (start–end)"},
+        title=f"{months // 12}Y Rolling CAGR — Multiple funds",
+        color_discrete_map=color_map,
+    )
+
+    # Thicker line for focus fund, if present
     for tr in fig.data:
-        tr.update(line=dict(width=4 if (focus_name and tr.name == focus_name) else 3))
-    fig.update_layout(height=chart_height, margin=dict(l=40,r=40,t=60,b=80),
-                      legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5),
-                      hovermode="x unified")
+        if focus_name and tr.name == focus_name:
+            tr.update(line=dict(width=4))
+        else:
+            tr.update(line=dict(width=3))
+
+    fig.update_layout(
+        height=chart_height,
+        margin=dict(l=40, r=40, t=60, b=80),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+        ),
+        hovermode="x unified",
+    )
+
     n = len(plot_df["Window"])
-    tickvals = plot_df["Window"].tolist() if n <= 12 else plot_df["Window"].tolist()[::math.ceil(n/12)]
-    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=tickvals, tickangle=-20,
-                     tickfont=dict(size=12), categoryorder="array", categoryarray=plot_df["Window"].tolist(), showgrid=True)
+    tickvals = (
+        plot_df["Window"].tolist()
+        if n <= 12
+        else plot_df["Window"].tolist()[:: math.ceil(n / 12)]
+    )
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=tickvals,
+        ticktext=tickvals,
+        tickangle=-20,
+        tickfont=dict(size=12),
+        categoryorder="array",
+        categoryarray=plot_df["Window"].tolist(),
+        showgrid=True,
+    )
     fig.update_yaxes(tickformat=".2f", ticksuffix="%", showgrid=True)
+
     return fig
+
 
 
 def rolling_outperf_stats(df: pd.DataFrame, focus_name: str):
