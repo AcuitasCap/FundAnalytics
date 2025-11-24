@@ -1115,7 +1115,7 @@ if not caps:
 # Filter funds by selected market-caps
 filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
 
-# ---------- Benchmark selector (multi-select from DB) ----------
+# ---------- Benchmark selector (checkboxes, similar to Market-cap) ----------
 if bench_df is not None and not bench_df.empty:
     bench_names = sorted(bench_df["benchmark_name"].dropna().unique().tolist())
 else:
@@ -1127,16 +1127,12 @@ if not bench_names:
     bench_label = None
     bench_ser = None
 else:
-    bench_selected = st.multiselect(
-        "Benchmarks (multi-select)",
-        options=bench_names,
-        default=bench_names[:1],  # default = first benchmark
-    )
+    st.markdown("**Benchmarks (tick multiple as needed)**")
+    bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
 
-    bench_label = bench_selected[0] if bench_selected else None
-    bench_ser = None
-
-    if bench_label:
+    # Primary benchmark for analytics = first ticked benchmark
+    if bench_selected:
+        bench_label = bench_selected[0]
         bmask = bench_df["benchmark_name"] == bench_label
         bench_ser = (
             bench_df.loc[bmask, ["date", "nav"]]
@@ -1145,6 +1141,10 @@ else:
             .sort_index()
         )
         bench_ser.name = bench_label
+    else:
+        bench_label = None
+        bench_ser = None
+
 
 
 
