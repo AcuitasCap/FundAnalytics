@@ -1040,10 +1040,10 @@ def rolling_outperf_stats(df: pd.DataFrame, focus_name: str, bench_label: str | 
 
     return pd.DataFrame({
         "windows": [int(op.notna().count())],
-        "median (ppt)": [float(np.nanmedian(op) * 100.0)],
-        "mean   (ppt)": [float(np.nanmean(op) * 100.0)],
-        "min    (ppt)": [float(np.nanmin(op) * 100.0)],
-        "max    (ppt)": [float(np.nanmax(op) * 100.0)],
+        "median (ppt)": [float(np.nanmedian(op))],
+        "mean   (ppt)": [float(np.nanmean(op))],
+        "min    (ppt)": [float(np.nanmin(op))],
+        "max    (ppt)": [float(np.nanmax(op))],
         "prob. of outperformance": [float((op > 0).mean() * 100.0)],
     })
 
