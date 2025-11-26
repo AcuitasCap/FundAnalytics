@@ -627,22 +627,31 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
         - benchmark (if bench_ser provided)
 
     Index:
-        - 'Window' (i.e. asof_date)
+        - 'Window' (i.e. asof_date = END of rolling window)
+
+    IMPORTANT:
+    We filter windows so that:
+        start_of_window >= start_domain
+        and
+        end_of_window   <= end_domain
+
+    where:
+        start_of_window = asof_date - months
     """
 
     # ----------------------------
-    # 1) Load precomputed FUND rolling returns for all selected funds
+    # 1) Load precomputed FUND rolling returns for all selected funds (NO date filter here)
     # ----------------------------
     fund_roll = load_fund_rolling(
         window_months=months,
         fund_names=selected_funds,
-        start=start_domain,
-        end=end_domain,
+        start=None,
+        end=None,
     )
     if fund_roll.empty:
         return pd.DataFrame()
 
-    # Pivot → wide matrix: rows = dates, columns = fund_name
+    # Pivot → wide matrix: rows = dates (asof_date), columns = fund_name
     wide = (
         fund_roll.pivot_table(
             index="asof_date",
@@ -654,7 +663,24 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
     )
 
     # ----------------------------
-    # 2) Add BENCHMARK if provided
+    # 2) Apply START/END domain filter at the *window* level
+    # ----------------------------
+    end_idx = pd.to_datetime(wide.index)
+    start_idx = (end_idx - pd.DateOffset(months=months)).to_period("M").to_timestamp("M")
+
+    mask = pd.Series(True, index=end_idx)
+
+    if start_domain is not None:
+        mask &= (start_idx >= start_domain)
+    if end_domain is not None:
+        mask &= (end_idx <= end_domain)
+
+    wide = wide.loc[mask]
+    if wide.empty:
+        return pd.DataFrame()
+
+    # ----------------------------
+    # 3) Add BENCHMARK if provided
     # ----------------------------
     bench_label = None
     if bench_ser is not None and hasattr(bench_ser, "name"):
@@ -664,8 +690,8 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
         bench_roll = load_bench_rolling(
             window_months=months,
             bench_name=bench_label,
-            start=start_domain,
-            end=end_domain,
+            start=None,
+            end=None,
         )
         if not bench_roll.empty:
             bench_series = (
@@ -677,63 +703,51 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
             wide[bench_label] = bench_series
 
     # ----------------------------
-    # 3) Compute PEER AVERAGE
+    # 4) Compute PEER AVERAGE (exclude focus + benchmark)
     # ----------------------------
-    # Fund columns are ALL columns except benchmark.
     cols_excluding_bench = [
         c for c in wide.columns
         if c != bench_label
     ]
 
-    # Peer columns exclude FOCUS FUND
     peer_cols = [
         c for c in cols_excluding_bench
         if c != focus_fund
     ]
 
-    # Compute Peer avg
     if peer_cols:
         wide["Peer avg"] = wide[peer_cols].mean(axis=1)
     else:
-        # If no peers, do NOT include Peer avg at all
         if "Peer avg" in wide.columns:
             wide = wide.drop(columns=["Peer avg"])
 
-    # ----------------------------
-    # 4) Final formatting
-    # ----------------------------
     wide.index.name = "Window"
     return wide
-
 
 
 
 def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain):
     """
     Build a wide DataFrame of precomputed rolling CAGRs for multiple funds,
-    to be used in the '3Y Rolling — Multiple Selected Funds' and
-    '1Y Rolling — Multiple Selected Funds' tables.
+    for the '3Y Rolling — Multiple Selected Funds' and
+    '1Y Rolling — Multiple Selected Funds' charts.
 
-    It uses the precomputed values in fundlab.fund_rolling_return instead of
-    recomputing from NAVs.
+    Uses precomputed fundlab.fund_rolling_return and applies the SAME
+    start/end-domain window logic as make_rolling_df.
     """
 
-    # 1) Guard: no funds selected
     if not selected_funds:
         return pd.DataFrame()
 
-    # 2) Load precomputed rolling from DB
     roll = load_fund_rolling(
         window_months=months,
         fund_names=selected_funds,
-        start=start_domain,
-        end=end_domain,
+        start=None,
+        end=None,
     )
     if roll.empty:
         return pd.DataFrame()
 
-    # roll columns: ['fund_name', 'asof_date', 'rolling_cagr']
-    # 3) Pivot to wide format: rows = date, columns = fund name
     wide = roll.pivot_table(
         index="asof_date",
         columns="fund_name",
@@ -741,15 +755,27 @@ def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_
         aggfunc="first",
     ).sort_index()
 
-    # 4) For consistency with the rest of the code
-    wide.index.name = "Window"
+    end_idx = pd.to_datetime(wide.index)
+    start_idx = (end_idx - pd.DateOffset(months=months)).to_period("M").to_timestamp("M")
 
+    mask = pd.Series(True, index=end_idx)
+    if start_domain is not None:
+        mask &= (start_idx >= start_domain)
+    if end_domain is not None:
+        mask &= (end_idx <= end_domain)
+
+    wide = wide.loc[mask]
+    if wide.empty:
+        return pd.DataFrame()
+
+    wide.index.name = "Window"
     return wide
 
 
 # Backward-compat wrapper: old name → new implementation
 def make_multi_fund_rolling_df(funds_df, selected_funds, months, start_domain, end_domain):
     return make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain)
+
 
 
 def plot_rolling(df, months, focus_name, bench_label, chart_height=560, include_cols=None):
@@ -970,22 +996,49 @@ def plot_multi_fund_rolling(df, months, focus_name=None, chart_height=560):
     return fig
 
 
+def rolling_outperf_stats(df: pd.DataFrame, focus_name: str, bench_label: str | None = None):
+    """
+    Compute stats of focus fund *relative to benchmark* over rolling windows.
 
-def rolling_outperf_stats(df: pd.DataFrame, focus_name: str):
-    if focus_name not in df.columns or "Benchmark" not in df.columns:
+    df columns are expected to be in PERCENT units (e.g. 12.3 for 12.3%),
+    consistent with what we plot.
+
+    We detect the benchmark column as:
+        - bench_label, if provided and present in df; else
+        - 'Benchmark' if present; else
+        - return None.
+    """
+
+    if df is None or df.empty:
         return None
+
+    if focus_name not in df.columns:
+        return None
+
+    # Determine benchmark column
+    bcol = None
+    if bench_label and bench_label in df.columns:
+        bcol = bench_label
+    elif "Benchmark" in df.columns:
+        bcol = "Benchmark"
+    else:
+        return None  # no usable benchmark column
+
+    # Extract series as decimals
     f = df[focus_name] / 100.0
-    b = df["Benchmark"] / 100.0
+    b = df[bcol] / 100.0
+
     op = (f - b).dropna()
     if op.empty:
         return None
+
     return pd.DataFrame({
-        "windows":[int(op.notna().count())],
-        "median (ppt)":[float(np.nanmedian(op)*100.0)],
-        "mean   (ppt)":[float(np.nanmean(op)*100.0)],
-        "min    (ppt)":[float(np.nanmin(op)*100.0)],
-        "max    (ppt)":[float(np.nanmax(op)*100.0)],
-        "prob. of outperformance":[float((op > 0).mean()*100.0)],
+        "windows": [int(op.notna().count())],
+        "median (ppt)": [float(np.nanmedian(op) * 100.0)],
+        "mean   (ppt)": [float(np.nanmean(op) * 100.0)],
+        "min    (ppt)": [float(np.nanmin(op) * 100.0)],
+        "max    (ppt)": [float(np.nanmax(op) * 100.0)],
+        "prob. of outperformance": [float((op > 0).mean() * 100.0)],
     })
 
 
@@ -1127,7 +1180,7 @@ if not bench_names:
     bench_label = None
     bench_ser = None
 else:
-    st.markdown("**Benchmarks (tick multiple as needed)**")
+    #st.markdown("**Benchmarks (tick multiple as needed)**")
     bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
 
     # Primary benchmark for analytics = first ticked benchmark
@@ -1262,7 +1315,7 @@ else:
         st.info("Insufficient data or no series selected for 3Y rolling chart.")
     else:
         st.plotly_chart(fig3, use_container_width=True)
-        stats3 = rolling_outperf_stats(df3, focus_fund)
+        stats3 = rolling_outperf_stats(df3, focus_fund, bench_label)
         st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
         st.dataframe(
             stats3.round(2)
@@ -1324,7 +1377,7 @@ else:
         st.info("Insufficient data or no series selected for 1Y rolling chart.")
     else:
         st.plotly_chart(fig1, use_container_width=True)
-        stats1 = rolling_outperf_stats(df1, focus_fund)
+        stats1 = rolling_outperf_stats(df1, focus_fund, bench_label)
         st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
         st.dataframe(
             stats1.round(2)
