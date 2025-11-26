@@ -307,7 +307,7 @@ from reportlab.lib.utils import ImageReader
 
 # ------------------------ Page Setup ------------------------
 st.set_page_config(page_title="Fund vs Benchmark & Peers Dashboard", layout="wide")
-st.title("Fund Analytics v3.13")
+st.title("Fund Analytics v3.20")
 st.caption("Rolling Start = start-date domain; End = end-date domain.")
 
 
@@ -721,6 +721,9 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
         if "Peer avg" in wide.columns:
             wide = wide.drop(columns=["Peer avg"])
 
+    # 🔹 Convert decimals (0.25) → percents (25.0) for plotting & stats
+    wide = wide * 100.0
+
     wide.index.name = "Window"
     return wide
 
@@ -768,6 +771,9 @@ def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_
     if wide.empty:
         return pd.DataFrame()
 
+    # 🔹 Convert decimals (0.25) → percents (25.0) for plotting & stats
+    wide = wide * 100.0
+    
     wide.index.name = "Window"
     return wide
 
