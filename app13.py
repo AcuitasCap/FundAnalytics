@@ -1025,8 +1025,8 @@ def rolling_outperf_stats(df: pd.DataFrame, focus_name: str, bench_label: str | 
         return None  # no usable benchmark column
 
     # Extract series as decimals
-    f = df[focus_name] / 100.0
-    b = df[bcol] / 100.0
+    f = df[focus_name] 
+    b = df[bcol] 
 
     op = (f - b).dropna()
     if op.empty:
