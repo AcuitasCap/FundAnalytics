@@ -72,21 +72,29 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
-# ------------------------ Page Navigation ------------------------
-page = st.sidebar.radio(
+def get_engine():
+    return engine
+
+st.set_page_config(page_title="Fund Analytics Dashboard", layout="wide")
+
+st.title("Fund Analytics Dashboard")
+
+# Simple top navigation
+page = st.radio(
     "Page",
-    options=["Performance", "Portfolio fundamentals"],
-    index=0,
+    ["Performance", "Portfolio fundamentals"],
+    horizontal=True,
+    key="top_nav",
 )
+st.markdown("---")
+
+
 
 if page == "Portfolio fundamentals":
     portfolio_fundamentals_page()
     st.stop()
 # If page == "Performance", we just continue into the existing performance dashboard code below.
 
-
-def get_engine():
-    return engine
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
     if month == 12:
@@ -1432,21 +1440,22 @@ def _read_any(uploaded_file):
 
 
 # 🔄 Load from PostgreSQL instead of file upload
-raw_funds_df = load_funds_from_db()
-if raw_funds_df.empty:
-    st.error("No fund NAV data found in database.")
-    st.stop()
+def performance_page():
+    raw_funds_df = load_funds_from_db()
+    if raw_funds_df.empty:
+        st.error("No fund NAV data found in database.")
+        st.stop()
 
-funds_df = _clean_funds(raw_funds_df.copy())
+    funds_df = _clean_funds(raw_funds_df.copy())
 
-bench_df = None
-try:
-    raw_bench_df = load_bench_from_db()
-    if not raw_bench_df.empty:
-        bench_df = _clean_bench(raw_bench_df.copy())
-except Exception as e:
-    st.warning(f"Could not load benchmark data from DB: {e}")
     bench_df = None
+    try:
+        raw_bench_df = load_bench_from_db()
+        if not raw_bench_df.empty:
+            bench_df = _clean_bench(raw_bench_df.copy())
+    except Exception as e:
+        st.warning(f"Could not load benchmark data from DB: {e}")
+        bench_df = None
 
 # Optional: small status line at the top of the app
 # Small status line at the top of the app
@@ -2228,3 +2237,10 @@ if st.button("Print charts"):
             )
         except Exception as e:
             st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
+
+
+# ------------------------ Router ------------------------
+if page == "Performance":
+    performance_page()
+elif page == "Portfolio fundamentals":
+    portfolio_fundamentals_page()
