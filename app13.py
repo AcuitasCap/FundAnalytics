@@ -17,11 +17,12 @@ import re
 import math
 import io
 from io import BytesIO
-
+import datetime as dt   
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
+import altair as alt    
 
 def check_password():
     """Return True if the user entered the correct password."""
@@ -70,6 +71,341 @@ engine = create_engine(
     },
     pool_pre_ping=True,
 )
+
+# ------------------------ Page Navigation ------------------------
+page = st.sidebar.radio(
+    "Page",
+    options=["Performance", "Portfolio fundamentals"],
+    index=0,
+)
+
+if page == "Portfolio fundamentals":
+    portfolio_fundamentals_page()
+    st.stop()
+# If page == "Performance", we just continue into the existing performance dashboard code below.
+
+
+def get_engine():
+    return engine
+
+def month_year_to_last_day(year: int, month: int) -> dt.date:
+    if month == 12:
+        return dt.date(year, 12, 31)
+    # first day of next month minus one day
+    first_next = dt.date(year + (month // 12), ((month % 12) + 1), 1)
+    return first_next - dt.timedelta(days=1)
+
+def load_stock_roe_roce():
+    engine = get_engine()
+    query = """
+        SELECT isin, year_end_date, roe, roce
+        FROM fundlab.stock_roe_roce
+        WHERE roe IS NOT NULL OR roce IS NOT NULL
+        ORDER BY isin, year_end_date
+    """
+    df = pd.read_sql(query, engine)
+    df["year_end_date"] = pd.to_datetime(df["year_end_date"]).dt.date
+
+    # group by ISIN for fast lookup
+    grouped = {isin: sub_df.sort_values("year_end_date").reset_index(drop=True)
+               for isin, sub_df in df.groupby("isin")}
+    return grouped
+
+
+def get_median_metric_for_stock(roe_roce_dict, isin, eval_date, is_financial):
+    sub = roe_roce_dict.get(isin)
+    if sub is None or sub.empty:
+        return 0.0
+
+    # take rows strictly before eval_date
+    mask = sub["year_end_date"] < eval_date
+    sub = sub.loc[mask]
+    if sub.empty:
+        return 0.0
+
+    # last 5 periods
+    sub = sub.tail(5)
+
+    if is_financial:
+        metric_series = sub["roe"]
+    else:
+        metric_series = sub["roce"]
+
+    metric_series = metric_series.dropna()
+    if metric_series.empty:
+        return 0.0
+
+    return float(metric_series.median())
+
+
+def fetch_categories():
+    engine = get_engine()
+    # Pull distinct category names
+    query = """
+        SELECT DISTINCT category_name
+        FROM fundlab.category
+        ORDER BY category_name;
+    """
+    df = pd.read_sql(query, engine)
+    if df.empty:
+        return []
+    return df["category_name"].dropna().tolist()
+
+
+
+def fetch_funds_for_categories(categories):
+    if not categories:
+        return pd.DataFrame(columns=["fund_id", "fund_name", "category_name"])
+
+    engine = get_engine()
+    query = text("""
+        SELECT f.fund_id,
+               f.fund_name,
+               c.category_name
+        FROM fundlab.fund f
+        JOIN fundlab.category c
+          ON f.category_id = c.category_id
+        WHERE c.category_name = ANY(:cats)
+        ORDER BY f.fund_name;
+    """)
+    df = pd.read_sql(query, engine, params={"cats": categories})
+    return df
+
+
+
+def fetch_portfolio_raw(fund_ids, start_date, end_date):
+    if not fund_ids:
+        return pd.DataFrame()
+
+    engine = get_engine()
+    query = text("""
+        SELECT
+            fp.fund_id,
+            fm.fund_name,
+            fp.month_end,
+            fp.isin,
+            fp.holding_weight AS weight_pct,
+            fp.asset_type,
+            sm.is_financial
+        FROM fundlab.fund_portfolio fp
+        JOIN fundlab.fund fm
+          ON fp.fund_id = fm.fund_id
+        JOIN fundlab.stock_master sm
+          ON fp.isin = sm.isin
+        WHERE fp.fund_id = ANY(:fund_ids)
+          AND fp.month_end BETWEEN :start_date AND :end_date
+          AND EXTRACT(MONTH FROM fp.month_end) IN (3, 9)
+        ORDER BY fp.fund_id, fp.month_end, fp.isin
+    """)
+
+    df = pd.read_sql(query, engine, params={
+        "fund_ids": fund_ids,
+        "start_date": start_date,
+        "end_date": end_date
+    })
+    if df.empty:
+        return df
+
+    df["month_end"] = pd.to_datetime(df["month_end"]).dt.date
+    return df
+
+
+def compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice):
+    """
+    df_portfolio: columns [fund_id, fund_name, month_end, isin, weight_pct, asset_type, is_financial]
+    roe_roce_dict: dict[isin] -> df of roe/roce history
+    segment_choice: "Financials" | "Non-financials" | "Total"
+    """
+
+    if df_portfolio.empty:
+        return pd.DataFrame(columns=["fund_id", "fund_name", "month_end", "metric"])
+
+    # Only Domestic Equities
+    df = df_portfolio[df_portfolio["asset_type"] == "Domestic Equities"].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["fund_id", "fund_name", "month_end", "metric"])
+
+    # Compute domestic-equity-rebased weights (sum to 1 per fund, date)
+    df["weight_pct"] = df["weight_pct"].astype(float)
+    group_keys = ["fund_id", "fund_name", "month_end"]
+
+    domestic_totals = df.groupby(group_keys)["weight_pct"].transform("sum")
+    df["dom_weight"] = np.where(domestic_totals > 0, df["weight_pct"] / domestic_totals, 0.0)
+
+    # Attach the 5-point median metric per stock
+    metrics = []
+    for idx, row in df.iterrows():
+        m = get_median_metric_for_stock(
+            roe_roce_dict,
+            row["isin"],
+            row["month_end"],
+            bool(row["is_financial"])
+        )
+        metrics.append(m)
+    df["stock_metric"] = metrics   # this is RoE for financials, RoCE for non-financials
+
+    # Now compute portfolio metric for each segment choice
+    records = []
+    for (fund_id, fund_name, month_end), sub in df.groupby(group_keys):
+        if segment_choice == "Financials":
+            sub_seg = sub[sub["is_financial"] == True].copy()
+            if sub_seg.empty:
+                metric = np.nan
+            else:
+                seg_total = sub_seg["dom_weight"].sum()
+                sub_seg["seg_weight"] = np.where(seg_total > 0, sub_seg["dom_weight"] / seg_total, 0.0)
+                sub_seg["metric_contrib"] = sub_seg["seg_weight"] * sub_seg["stock_metric"].fillna(0.0)
+                metric = sub_seg["metric_contrib"].sum()
+
+        elif segment_choice == "Non-financials":
+            sub_seg = sub[sub["is_financial"] == False].copy()
+            if sub_seg.empty:
+                metric = np.nan
+            else:
+                seg_total = sub_seg["dom_weight"].sum()
+                sub_seg["seg_weight"] = np.where(seg_total > 0, sub_seg["dom_weight"] / seg_total, 0.0)
+                sub_seg["metric_contrib"] = sub_seg["seg_weight"] * sub_seg["stock_metric"].fillna(0.0)
+                metric = sub_seg["metric_contrib"].sum()
+
+        else:  # "Total"
+            sub_seg = sub.copy()
+            sub_seg["metric_contrib"] = sub_seg["dom_weight"] * sub_seg["stock_metric"].fillna(0.0)
+            metric = sub_seg["metric_contrib"].sum()
+
+        records.append({
+            "fund_id": fund_id,
+            "fund_name": fund_name,
+            "month_end": month_end,
+            "metric": metric
+        })
+
+    result = pd.DataFrame.from_records(records)
+    result = result.sort_values(["fund_name", "month_end"])
+    return result
+
+
+def portfolio_fundamentals_page():
+    st.header("Portfolio fundamentals – RoE / RoCE")
+
+    # 1) Category selector (checkboxes)
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found in fund_master.")
+        return
+
+    st.subheader("1. Select categories")
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=True, key=f"cat_{cat}"):
+            selected_categories.append(cat)
+
+    if not selected_categories:
+        st.info("Please select at least one category.")
+        return
+
+    # 2) Fund multi-select
+    st.subheader("2. Select funds")
+    funds_df = fetch_funds_for_categories(selected_categories)
+    if funds_df.empty:
+        st.warning("No funds found for selected categories.")
+        return
+
+    fund_options = {
+    f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
+    for _, row in funds_df.iterrows()
+    }
+
+
+    selected_fund_labels = st.multiselect(
+        "Funds",
+        options=list(fund_options.keys()),
+        default=list(fund_options.keys())[:3]  # first few as default
+    )
+    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
+
+    if not selected_fund_ids:
+        st.info("Please select at least one fund.")
+        return
+
+    # 3) Date range selectors (month & year separately)
+    st.subheader("3. Select period (March / September portfolios only)")
+
+    current_year = dt.date.today().year
+    years = list(range(current_year - 15, current_year + 1))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.selectbox("Start year", options=years, index=0, key="pf_start_year")
+        start_month = st.selectbox("Start month", options=list(range(1, 13)), index=2, key="pf_start_month")  # default March
+    with col2:
+        end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="pf_end_year")
+        end_month = st.selectbox("End month", options=list(range(1, 13)), index=8, key="pf_end_month")  # default September
+
+    start_date = month_year_to_last_day(start_year, start_month)
+    end_date = month_year_to_last_day(end_year, end_month)
+
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        return
+
+    # 4) Segment radio buttons
+    st.subheader("4. Segment")
+    segment_choice = st.radio(
+        "Show metrics for:",
+        options=["Financials", "Non-financials", "Total"],
+        horizontal=True
+    )
+
+    # 5) Fetch data & compute
+    with st.spinner("Computing portfolio fundamentals..."):
+        roe_roce_dict = load_stock_roe_roce()
+        df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
+        if df_portfolio.empty:
+            st.warning("No portfolio data found for selected funds and period.")
+            return
+
+        df_result = compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice)
+
+    if df_result.empty:
+        st.warning("No fundamentals could be computed (check data availability).")
+        return
+
+    # 6) Line chart
+    st.subheader("5. RoE / RoCE time series")
+
+    df_chart = df_result.dropna(subset=["metric"]).copy()
+    df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
+
+    chart = (
+        alt.Chart(df_chart)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("month_end:T", title="Period end"),
+            y=alt.Y("metric:Q", title="RoE / RoCE (%)"),
+            color=alt.Color("fund_name:N", title="Fund"),
+            tooltip=["fund_name", "month_end", "metric"]
+        )
+        .properties(height=400)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
+    # 7) Data table
+    st.subheader("6. Underlying data")
+
+    df_table = df_result.copy()
+    df_table["month_end"] = pd.to_datetime(df_table["month_end"])
+    df_table = df_table.pivot_table(
+        index="month_end",
+        columns="fund_name",
+        values="metric"
+    ).sort_index()
+
+    st.dataframe(df_table.style.format("{:.2f}"))
+
+
 
 @st.cache_data(show_spinner="Loading precomputed rolling returns (funds)...")
 def load_fund_rolling(window_months: int, fund_names, start=None, end=None):
