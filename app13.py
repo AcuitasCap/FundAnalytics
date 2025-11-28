@@ -90,12 +90,6 @@ st.markdown("---")
 
 
 
-if page == "Portfolio fundamentals":
-    portfolio_fundamentals_page()
-    st.stop()
-# If page == "Performance", we just continue into the existing performance dashboard code below.
-
-
 def month_year_to_last_day(year: int, month: int) -> dt.date:
     if month == 12:
         return dt.date(year, 12, 31)
@@ -648,11 +642,6 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 
-
-# ------------------------ Page Setup ------------------------
-st.set_page_config(page_title="Fund vs Benchmark & Peers Dashboard", layout="wide")
-st.title("Fund Analytics v3.20")
-st.caption("Rolling Start = start-date domain; End = end-date domain.")
 
 
 # ------------------------ Parsing & Cleaning ------------------------
@@ -1457,786 +1446,786 @@ def performance_page():
         st.warning(f"Could not load benchmark data from DB: {e}")
         bench_df = None
 
-# Optional: small status line at the top of the app
-# Small status line at the top of the app
-# Small status line at the top of the app – robust to different cleaned column names
-fund_candidates = ["Fund", "Fund name", "fund", "fund_name"]
-fund_col = next((c for c in fund_candidates if c in funds_df.columns), None)
+    # Optional: small status line at the top of the app
+    # Small status line at the top of the app
+    # Small status line at the top of the app – robust to different cleaned column names
+    fund_candidates = ["Fund", "Fund name", "fund", "fund_name"]
+    fund_col = next((c for c in fund_candidates if c in funds_df.columns), None)
 
-date_candidates = ["month-end", "Date", "date", "nav_date"]
-date_col = next((c for c in date_candidates if c in funds_df.columns), None)
+    date_candidates = ["month-end", "Date", "date", "nav_date"]
+    date_col = next((c for c in date_candidates if c in funds_df.columns), None)
 
-# Latest date string
-latest_str = "N/A"
-if date_col is not None:
-    try:
-        latest_date = funds_df[date_col].max()
-        latest_str = latest_date.strftime("%d-%b-%Y")
-    except Exception:
-        latest_str = str(latest_date)
+    # Latest date string
+    latest_str = "N/A"
+    if date_col is not None:
+        try:
+            latest_date = funds_df[date_col].max()
+            latest_str = latest_date.strftime("%d-%b-%Y")
+        except Exception:
+            latest_str = str(latest_date)
 
-# Number of funds
-if fund_col is not None:
-    num_funds = funds_df[fund_col].nunique()
-else:
-    num_funds = "N/A"
-
-st.caption(
-    f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}"
-)
-
-
-
-
-
-
-# ------------------------ Selectors (stacked with divider) ------------------------
-def checkbox_group(title: str, options: list, key_prefix: str) -> list:
-    st.markdown(f"**{title}**")
-    cols = st.columns(min(4, max(1, len(options))))
-    chosen = []
-    for i, opt in enumerate(options):
-        with cols[i % len(cols)]:
-            if st.checkbox(opt, value=False, key=f"{key_prefix}_{opt}"):
-                chosen.append(opt)
-    return chosen
-
-
-all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
-# all_styles = sorted(funds_df["style"].dropna().unique().tolist())
-
-# Market-cap (checkbox group)
-caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
-st.divider()
-# Style removed in favour of benchmark selector
-# styles = checkbox_group("Style (tick multiple as needed)", all_styles, "sty")
-
-# Require at least one market-cap
-if not caps:
-    st.warning("Tick at least one Market-cap to continue.")
-    st.stop()
-
-# Filter funds by selected market-caps
-filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
-
-# ---------- Benchmark selector (checkboxes, similar to Market-cap) ----------
-if bench_df is not None and not bench_df.empty:
-    bench_names = sorted(bench_df["benchmark_name"].dropna().unique().tolist())
-else:
-    bench_names = []
-
-if not bench_names:
-    st.warning("No benchmarks found in database.")
-    bench_selected = []
-    bench_label = None
-    bench_ser = None
-else:
-    #st.markdown("**Benchmarks (tick multiple as needed)**")
-    bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
-
-    # Primary benchmark for analytics = first ticked benchmark
-    if bench_selected:
-        bench_label = bench_selected[0]
-        bmask = bench_df["benchmark_name"] == bench_label
-        bench_ser = (
-            bench_df.loc[bmask, ["date", "nav"]]
-            .drop_duplicates("date")
-            .set_index("date")["nav"]
-            .sort_index()
-        )
-        bench_ser.name = bench_label
+    # Number of funds
+    if fund_col is not None:
+        num_funds = funds_df[fund_col].nunique()
     else:
+        num_funds = "N/A"
+
+    st.caption(
+        f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}"
+    )
+
+
+
+
+
+
+    # ------------------------ Selectors (stacked with divider) ------------------------
+    def checkbox_group(title: str, options: list, key_prefix: str) -> list:
+        st.markdown(f"**{title}**")
+        cols = st.columns(min(4, max(1, len(options))))
+        chosen = []
+        for i, opt in enumerate(options):
+            with cols[i % len(cols)]:
+                if st.checkbox(opt, value=False, key=f"{key_prefix}_{opt}"):
+                    chosen.append(opt)
+        return chosen
+
+
+    all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
+    # all_styles = sorted(funds_df["style"].dropna().unique().tolist())
+
+    # Market-cap (checkbox group)
+    caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
+    st.divider()
+    # Style removed in favour of benchmark selector
+    # styles = checkbox_group("Style (tick multiple as needed)", all_styles, "sty")
+
+    # Require at least one market-cap
+    if not caps:
+        st.warning("Tick at least one Market-cap to continue.")
+        st.stop()
+
+    # Filter funds by selected market-caps
+    filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
+
+    # ---------- Benchmark selector (checkboxes, similar to Market-cap) ----------
+    if bench_df is not None and not bench_df.empty:
+        bench_names = sorted(bench_df["benchmark_name"].dropna().unique().tolist())
+    else:
+        bench_names = []
+
+    if not bench_names:
+        st.warning("No benchmarks found in database.")
+        bench_selected = []
         bench_label = None
         bench_ser = None
-
-
-
-
-
-if not caps:
-    st.warning("Tick at least one Market-cap to continue.")
-    st.stop()
-
-# filtered = funds_df[(funds_df["market_cap"].isin(caps)) & (funds_df["style"].isin(styles))]
-# Ensure all dates are month-end timestamps
-
-# --- EOM + numeric normalization for funds data ---
-filtered["date"] = to_eom(filtered["date"])
-filtered["nav"]  = coerce_num(filtered["nav"])
-
-# If the same fund/date appears multiple times, keep the last
-filtered = (filtered
-            .sort_values(["fund", "date"])
-            .drop_duplicates(subset=["fund", "date"], keep="last"))
-
-
-fund_options = sorted(filtered["fund"].unique().tolist())
-
-st.markdown("**Funds (multi-select)**")
-funds_with_all = ["ALL"] + fund_options
-funds_selected = st.multiselect("Choose funds (include 'ALL' for all in list)", options=funds_with_all, default=[])
-if any(str(f).upper()=="ALL" for f in funds_selected):
-    funds_selected = fund_options
-if not funds_selected:
-    st.warning("Select at least one fund."); st.stop()
-
-focus_fund = st.selectbox("Focus fund (vs. peers)", options=["-- none --"] + funds_selected, index=0)
-if focus_fund == "-- none --":
-    st.warning("Pick a Focus fund to compute Peers Avg (we exclude the focus from peers).")
-    st.stop()
-
-
-## Removing radio button selector between Portfolio and Category - 24 Nov 2025
-
-# bench_mode = st.radio("Benchmark", options=["Portfolio (Nifty)","Category"], index=0, horizontal=True)
-# bench_name, bench_ser = pick_benchmark(bench_df, bench_mode, caps, styles)
-# bench_label = bench_name if (bench_ser is not None and not bench_ser.empty) else "Benchmark"
-# if bench_label != "Benchmark":
-#     st.caption(f"Using **Benchmark:** {bench_label}")
-# else:
-#     st.warning("No matching benchmark series found. Upload a Benchmarks CSV or adjust the toggle/filters.")
-
-
-# ------------------------ Rolling Returns ------------------------
-st.header("Rolling Returns")
-
-# Month + Year pickers
-def eom(y: int, m: int) -> pd.Timestamp:
-    return pd.Timestamp(year=y, month=m, day=1).to_period("M").to_timestamp("M")
-
-date_years = sorted(pd.to_datetime(filtered["date"]).dt.year.unique().tolist())
-if not date_years:
-    st.stop()
-min_y, max_y = min(date_years), max(date_years)
-months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-m2n = {m:i+1 for i,m in enumerate(months)}
-
-cA1, cA2, cB1, cB2 = st.columns([1,1,1,1])
-with cA1:
-    start_month = st.selectbox("Start month (start-domain)", months, index=0, key="rr_start_m")
-with cA2:
-    start_year  = st.selectbox("Start year  (start-domain)", list(range(min_y, max_y+1)), index=0, key="rr_start_y")
-with cB1:
-    end_month   = st.selectbox("End month   (end-domain)", months, index=len(months)-1, key="rr_end_m")
-with cB2:
-    end_year    = st.selectbox("End year    (end-domain)", list(range(min_y, max_y+1)), index=len(range(min_y, max_y+1))-1, key="rr_end_y")
-
-start_domain = eom(int(start_year), m2n[start_month])
-end_domain   = eom(int(end_year),   m2n[end_month])
-
-def window_ok(start_dt, end_dt, months):
-    return (start_dt + pd.DateOffset(months=months)) <= end_dt
-
-print_items = []  # (caption:str, figure:plotly Figure)
-
-# 3Y main chart
-st.subheader("3Y Rolling — Focus vs Peer avg vs Benchmark")
-
-# Only include non-empty labels in the options
-series_opts_3 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
-
-series_selected_3 = st.multiselect(
-    "Show series (3Y)",
-    options=series_opts_3,
-    default=series_opts_3,
-    key="series3",
-)
-
-if not window_ok(start_domain, end_domain, 36):
-    st.info("Selected range too short for 3Y windows.")
-else:
-    df3 = make_rolling_df(
-        filtered,
-        funds_selected,
-        focus_fund,
-        bench_ser,
-        36,
-        start_domain,
-        end_domain,
-    )
-    fig3 = plot_rolling(
-        df3,
-        36,
-        focus_fund,
-        bench_label,
-        chart_height=560,
-        include_cols=series_selected_3,
-    )
-    if fig3 is None:
-        st.info("Insufficient data or no series selected for 3Y rolling chart.")
     else:
-        st.plotly_chart(fig3, use_container_width=True)
-        stats3 = rolling_outperf_stats(df3, focus_fund, bench_label)
-        st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-        st.dataframe(
-            stats3.round(2)
-            if stats3 is not None
-            else pd.DataFrame({"info": ["Not enough overlapping 3Y windows"]})
+        #st.markdown("**Benchmarks (tick multiple as needed)**")
+        bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
+
+        # Primary benchmark for analytics = first ticked benchmark
+        if bench_selected:
+            bench_label = bench_selected[0]
+            bmask = bench_df["benchmark_name"] == bench_label
+            bench_ser = (
+                bench_df.loc[bmask, ["date", "nav"]]
+                .drop_duplicates("date")
+                .set_index("date")["nav"]
+                .sort_index()
+            )
+            bench_ser.name = bench_label
+        else:
+            bench_label = None
+            bench_ser = None
+
+
+
+
+
+    if not caps:
+        st.warning("Tick at least one Market-cap to continue.")
+        st.stop()
+
+    # filtered = funds_df[(funds_df["market_cap"].isin(caps)) & (funds_df["style"].isin(styles))]
+    # Ensure all dates are month-end timestamps
+
+    # --- EOM + numeric normalization for funds data ---
+    filtered["date"] = to_eom(filtered["date"])
+    filtered["nav"]  = coerce_num(filtered["nav"])
+
+    # If the same fund/date appears multiple times, keep the last
+    filtered = (filtered
+                .sort_values(["fund", "date"])
+                .drop_duplicates(subset=["fund", "date"], keep="last"))
+
+
+    fund_options = sorted(filtered["fund"].unique().tolist())
+
+    st.markdown("**Funds (multi-select)**")
+    funds_with_all = ["ALL"] + fund_options
+    funds_selected = st.multiselect("Choose funds (include 'ALL' for all in list)", options=funds_with_all, default=[])
+    if any(str(f).upper()=="ALL" for f in funds_selected):
+        funds_selected = fund_options
+    if not funds_selected:
+        st.warning("Select at least one fund."); st.stop()
+
+    focus_fund = st.selectbox("Focus fund (vs. peers)", options=["-- none --"] + funds_selected, index=0)
+    if focus_fund == "-- none --":
+        st.warning("Pick a Focus fund to compute Peers Avg (we exclude the focus from peers).")
+        st.stop()
+
+
+    ## Removing radio button selector between Portfolio and Category - 24 Nov 2025
+
+    # bench_mode = st.radio("Benchmark", options=["Portfolio (Nifty)","Category"], index=0, horizontal=True)
+    # bench_name, bench_ser = pick_benchmark(bench_df, bench_mode, caps, styles)
+    # bench_label = bench_name if (bench_ser is not None and not bench_ser.empty) else "Benchmark"
+    # if bench_label != "Benchmark":
+    #     st.caption(f"Using **Benchmark:** {bench_label}")
+    # else:
+    #     st.warning("No matching benchmark series found. Upload a Benchmarks CSV or adjust the toggle/filters.")
+
+
+    # ------------------------ Rolling Returns ------------------------
+    st.header("Rolling Returns")
+
+    # Month + Year pickers
+    def eom(y: int, m: int) -> pd.Timestamp:
+        return pd.Timestamp(year=y, month=m, day=1).to_period("M").to_timestamp("M")
+
+    date_years = sorted(pd.to_datetime(filtered["date"]).dt.year.unique().tolist())
+    if not date_years:
+        st.stop()
+    min_y, max_y = min(date_years), max(date_years)
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    m2n = {m:i+1 for i,m in enumerate(months)}
+
+    cA1, cA2, cB1, cB2 = st.columns([1,1,1,1])
+    with cA1:
+        start_month = st.selectbox("Start month (start-domain)", months, index=0, key="rr_start_m")
+    with cA2:
+        start_year  = st.selectbox("Start year  (start-domain)", list(range(min_y, max_y+1)), index=0, key="rr_start_y")
+    with cB1:
+        end_month   = st.selectbox("End month   (end-domain)", months, index=len(months)-1, key="rr_end_m")
+    with cB2:
+        end_year    = st.selectbox("End year    (end-domain)", list(range(min_y, max_y+1)), index=len(range(min_y, max_y+1))-1, key="rr_end_y")
+
+    start_domain = eom(int(start_year), m2n[start_month])
+    end_domain   = eom(int(end_year),   m2n[end_month])
+
+    def window_ok(start_dt, end_dt, months):
+        return (start_dt + pd.DateOffset(months=months)) <= end_dt
+
+    print_items = []  # (caption:str, figure:plotly Figure)
+
+    # 3Y main chart
+    st.subheader("3Y Rolling — Focus vs Peer avg vs Benchmark")
+
+    # Only include non-empty labels in the options
+    series_opts_3 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
+
+    series_selected_3 = st.multiselect(
+        "Show series (3Y)",
+        options=series_opts_3,
+        default=series_opts_3,
+        key="series3",
+    )
+
+    if not window_ok(start_domain, end_domain, 36):
+        st.info("Selected range too short for 3Y windows.")
+    else:
+        df3 = make_rolling_df(
+            filtered,
+            funds_selected,
+            focus_fund,
+            bench_ser,
+            36,
+            start_domain,
+            end_domain,
         )
-        if st.checkbox("To print", key="print_fig3"):
-            print_items.append(("3Y Rolling — Focus/Peers/Benchmark", fig3))
-
-
-# 3Y multi-fund
-st.subheader("3Y Rolling — Multiple Selected Funds")
-mf3 = st.multiselect("Pick funds to plot (3Y multi-fund)", options=funds_selected, default=[focus_fund], key="mf3")
-if not window_ok(start_domain, end_domain, 36):
-    st.info("Selected range too short for 3Y windows.")
-else:
-    df3m = make_multi_fund_rolling_df(filtered, mf3, 36, start_domain, end_domain)
-    fig3m = plot_multi_fund_rolling(df3m, 36, focus_name=focus_fund, chart_height=560)
-    if fig3m is None:
-        st.info("Not enough data to plot selected funds (3Y).")
-    else:
-        st.plotly_chart(fig3m, use_container_width=True)
-        if st.checkbox("To print", key="print_fig3m"):
-            print_items.append(("3Y Rolling — Multiple funds", fig3m))
-
-# 1Y main chart
-st.subheader("1Y Rolling — Focus vs Peer avg vs Benchmark")
-
-series_opts_1 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
-
-series_selected_1 = st.multiselect(
-    "Show series (1Y)",
-    options=series_opts_1,
-    default=series_opts_1,
-    key="series1",
-)
-
-if not window_ok(start_domain, end_domain, 12):
-    st.info("Selected range too short for 1Y windows.")
-else:
-    df1 = make_rolling_df(
-        filtered,
-        funds_selected,
-        focus_fund,
-        bench_ser,
-        12,
-        start_domain,
-        end_domain,
-    )
-    fig1 = plot_rolling(
-        df1,
-        12,
-        focus_fund,
-        bench_label,
-        chart_height=560,
-        include_cols=series_selected_1,
-    )
-    if fig1 is None:
-        st.info("Insufficient data or no series selected for 1Y rolling chart.")
-    else:
-        st.plotly_chart(fig1, use_container_width=True)
-        stats1 = rolling_outperf_stats(df1, focus_fund, bench_label)
-        st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-        st.dataframe(
-            stats1.round(2)
-            if stats1 is not None
-            else pd.DataFrame({"info": ["Not enough overlapping 1Y windows"]})
+        fig3 = plot_rolling(
+            df3,
+            36,
+            focus_fund,
+            bench_label,
+            chart_height=560,
+            include_cols=series_selected_3,
         )
-        if st.checkbox("To print", key="print_fig1"):
-            print_items.append(("1Y Rolling — Focus/Peers/Benchmark", fig1))
+        if fig3 is None:
+            st.info("Insufficient data or no series selected for 3Y rolling chart.")
+        else:
+            st.plotly_chart(fig3, use_container_width=True)
+            stats3 = rolling_outperf_stats(df3, focus_fund, bench_label)
+            st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
+            st.dataframe(
+                stats3.round(2)
+                if stats3 is not None
+                else pd.DataFrame({"info": ["Not enough overlapping 3Y windows"]})
+            )
+            if st.checkbox("To print", key="print_fig3"):
+                print_items.append(("3Y Rolling — Focus/Peers/Benchmark", fig3))
 
 
-# 1Y multi-fund
-st.subheader("1Y Rolling — Multiple Selected Funds")
-mf1 = st.multiselect("Pick funds to plot (1Y multi-fund)", options=funds_selected, default=[focus_fund], key="mf1")
-if not window_ok(start_domain, end_domain, 12):
-    st.info("Selected range too short for 1Y windows.")
-else:
-    df1m = make_multi_fund_rolling_df(filtered, mf1, 12, start_domain, end_domain)
-    fig1m = plot_multi_fund_rolling(df1m, 12, focus_name=focus_fund, chart_height=560)
-    if fig1m is None:
-        st.info("Not enough data to plot selected funds (1Y).")
+    # 3Y multi-fund
+    st.subheader("3Y Rolling — Multiple Selected Funds")
+    mf3 = st.multiselect("Pick funds to plot (3Y multi-fund)", options=funds_selected, default=[focus_fund], key="mf3")
+    if not window_ok(start_domain, end_domain, 36):
+        st.info("Selected range too short for 3Y windows.")
     else:
-        st.plotly_chart(fig1m, use_container_width=True)
-        if st.checkbox("To print", key="print_fig1m"):
-            print_items.append(("1Y Rolling — Multiple funds", fig1m))
+        df3m = make_multi_fund_rolling_df(filtered, mf3, 36, start_domain, end_domain)
+        fig3m = plot_multi_fund_rolling(df3m, 36, focus_name=focus_fund, chart_height=560)
+        if fig3m is None:
+            st.info("Not enough data to plot selected funds (3Y).")
+        else:
+            st.plotly_chart(fig3m, use_container_width=True)
+            if st.checkbox("To print", key="print_fig3m"):
+                print_items.append(("3Y Rolling — Multiple funds", fig3m))
 
+    # 1Y main chart
+    st.subheader("1Y Rolling — Focus vs Peer avg vs Benchmark")
 
+    series_opts_1 = [focus_fund, "Peer avg"] + ([bench_label] if bench_label else [])
 
-# ------------------------ Yearly Returns (STRICT) ------------------------
-st.header("Yearly Returns (Strict FY/CY endpoints)")
-
-# Explicit month & year pickers (independent of Rolling)
-months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-m2n = {m:i+1 for i,m in enumerate(months)}
-
-date_years_all = sorted({d.year for d in pd.to_datetime(filtered["date"].unique())}) if not filtered.empty else [2010, 2011]
-
-
-colA, colB, colC, colD = st.columns(4)
-with colA:
-    y_start = st.selectbox("Start Year", options=date_years_all, index=0, key="strict_y_start")
-with colB:
-    m_start = st.selectbox("Start Month", options=months, index=0, key="strict_m_start")
-with colC:
-    y_end = st.selectbox("End Year", options=date_years_all, index=len(date_years_all)-1, key="strict_y_end")
-with colD:
-    m_end = st.selectbox("End Month", options=months, index=len(months)-1, key="strict_m_end")
-
-start_domain = pd.Timestamp(year=int(y_start), month=m2n[m_start], day=1).to_period("M").to_timestamp("M")
-end_domain   = pd.Timestamp(year=int(y_end),   month=m2n[m_end],   day=1).to_period("M").to_timestamp("M")
-
-yr_type_strict = st.radio("Year type", options=["Financial (Apr–Mar)","Calendar (Jan–Dec)"], index=0, horizontal=True, key="strict_year_type")
-use_fy_strict = yr_type_strict.startswith("Financial")
-
-# Compute per-fund yearly returns with trimmed first/last years
-yr_rows = {}
-for f in funds_selected:
-    s = filtered.loc[filtered["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-    yr_rows[f] = yearly_returns_with_custom_domain(s, start_domain, end_domain, fy=use_fy_strict)
-yr_df = pd.DataFrame(yr_rows).T
-
-# Benchmark
-yr_bench = None
-if bench_ser is not None and not bench_ser.empty:
-    yr_bench = yearly_returns_with_custom_domain(bench_ser, start_domain, end_domain, fy=use_fy_strict).rename("Benchmark")
-
-if yr_df.empty:
-    st.info("Not enough data to compute yearly returns for the selected funds.")
-else:
-    # Align columns across funds and benchmark; keep original order
-    cols_order = list(yr_df.columns)
-    if yr_bench is not None and not yr_bench.empty:
-        for c in yr_bench.index:
-            if c not in cols_order: cols_order.append(c)
-    yr_df = yr_df.reindex(columns=cols_order)
-
-    # Actual table
-    st.subheader("Actual yearly returns — Funds (rows) vs Years (columns)")
-
-    # Build table (keep your FY/CY logic above intact)
-    disp_actual = (yr_df.loc[funds_selected, cols_order] * 100.0).copy()
-    disp_actual.insert(0, "Fund", disp_actual.index)
-    disp_actual = disp_actual.reset_index(drop=True)  # remove unnamed index column
-
-    # Round numeric columns to 1 decimal and style with 1-decimal display
-    num_cols = [c for c in disp_actual.columns if c != "Fund"]
-    disp_actual[num_cols] = disp_actual[num_cols].round(1)
-
-    st.dataframe(
-       disp_actual.style
-        .format({c: "{:.1f}" for c in num_cols}, na_rep="—")
-        .set_table_styles([
-            {"selector": "table", "props": "table-layout:fixed"},
-            {"selector": "th.col_heading",
-             "props": "white-space:normal; line-height:1.1; height:56px"}
-        ]),
-       use_container_width=True
+    series_selected_1 = st.multiselect(
+        "Show series (1Y)",
+        options=series_opts_1,
+        default=series_opts_1,
+        key="series1",
     )
-    p_act = st.checkbox("To print", key="print_actual_tbl")
 
-
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-    # Benchmark table
-    st.subheader(f"Benchmark yearly returns — {bench_label}")
-    if yr_bench is None or yr_bench.empty:
-        st.info("Benchmark not available.")
-        bench_df_print = pd.DataFrame()
+    if not window_ok(start_domain, end_domain, 12):
+        st.info("Selected range too short for 1Y windows.")
     else:
-        bench_df_print = ((yr_bench[cols_order] * 100.0).to_frame().T).round(2)
-        bench_df_print.index = [bench_label]
-        bench_df_print = bench_df_print.reset_index().rename(columns={"index":"Benchmark"})
-        st.dataframe(
-            bench_df_print.style
-              .format({c: "{:.1f}" for c in bench_df_print.columns if c != "Benchmark"}, na_rep="—")
-              .set_table_styles([
-                 {"selector": "table", "props": "table-layout:fixed"},
-                 {"selector": "th.col_heading",
-                  "props": "white-space:normal; line-height:1.1; height:56px"}
-              ]),
-            use_container_width=True
+        df1 = make_rolling_df(
+            filtered,
+            funds_selected,
+            focus_fund,
+            bench_ser,
+            12,
+            start_domain,
+            end_domain,
         )
+        fig1 = plot_rolling(
+            df1,
+            12,
+            focus_fund,
+            bench_label,
+            chart_height=560,
+            include_cols=series_selected_1,
+        )
+        if fig1 is None:
+            st.info("Insufficient data or no series selected for 1Y rolling chart.")
+        else:
+            st.plotly_chart(fig1, use_container_width=True)
+            stats1 = rolling_outperf_stats(df1, focus_fund, bench_label)
+            st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
+            st.dataframe(
+                stats1.round(2)
+                if stats1 is not None
+                else pd.DataFrame({"info": ["Not enough overlapping 1Y windows"]})
+            )
+            if st.checkbox("To print", key="print_fig1"):
+                print_items.append(("1Y Rolling — Focus/Peers/Benchmark", fig1))
 
-    p_bench = st.checkbox("To print", key="print_bench_tbl")
 
-    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-    # Relative (ppt) vs benchmark
-    st.subheader("Relative yearly returns (ppt) — Funds (rows) vs Years (columns)")
-    rel_df = pd.DataFrame()
-    if yr_bench is not None and not yr_bench.empty:
-        common = [c for c in cols_order if c in yr_bench.index]
-        if common:
-            rel_df = (yr_df.loc[funds_selected, common].subtract(yr_bench[common], axis=1) * 100.0).round(2)
-    if rel_df.empty:
-        st.info("Not enough overlap to compute relative returns.")
-        disp_rel = pd.DataFrame()
+    # 1Y multi-fund
+    st.subheader("1Y Rolling — Multiple Selected Funds")
+    mf1 = st.multiselect("Pick funds to plot (1Y multi-fund)", options=funds_selected, default=[focus_fund], key="mf1")
+    if not window_ok(start_domain, end_domain, 12):
+        st.info("Selected range too short for 1Y windows.")
     else:
-        disp_rel = rel_df.copy()
-        disp_rel.insert(0, "Fund", disp_rel.index)
-        disp_rel = disp_rel.reset_index(drop=True)   # remove unnamed index column
-        def rel_colors(df):
-            styles = pd.DataFrame("", index=df.index, columns=df.columns)
-            for c in df.columns:
-                if c == "Fund": continue
-                styles[c] = df[c].apply(lambda v: "background-color:#e6f4ea;color:#0b8043" if pd.notna(v) and v>0
-                                                 else "background-color:#fdecea;color:#a50e0e" if pd.notna(v) and v<0
-                                                 else "")
-            return styles
-        st.write(
-           disp_rel.style
-             .apply(rel_colors, axis=None)
-             .format({c: "{:.1f}" for c in disp_rel.columns if c != "Fund"}, na_rep="—")
-             .set_table_styles([
-                {"selector": "table", "props": "table-layout:fixed"},
-                {"selector": "th.col_heading",
-                 "props": "white-space:normal; line-height:1.1; height:56px"}
-             ])
-        )
+        df1m = make_multi_fund_rolling_df(filtered, mf1, 12, start_domain, end_domain)
+        fig1m = plot_multi_fund_rolling(df1m, 12, focus_name=focus_fund, chart_height=560)
+        if fig1m is None:
+            st.info("Not enough data to plot selected funds (1Y).")
+        else:
+            st.plotly_chart(fig1m, use_container_width=True)
+            if st.checkbox("To print", key="print_fig1m"):
+                print_items.append(("1Y Rolling — Multiple funds", fig1m))
 
-    p_rel = st.checkbox("To print", key="print_rel_tbl")
-st.header("Point-to-Point (P2P) Returns — Custom period CAGR")
 
-date_years_all = sorted(pd.to_datetime(filtered["date"]).dt.year.unique().tolist())
-p2p_min_y, p2p_max_y = min(date_years_all), max(date_years_all)
-months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-m2n = {m:i+1 for i,m in enumerate(months)}
 
-cP1, cP2, cP3, cP4 = st.columns([1,1,1,1])
-with cP1: p2p_start_m = st.selectbox("Start month", months, index=0, key="p2p_sm")
-with cP2: p2p_start_y = st.selectbox("Start year", list(range(p2p_min_y, p2p_max_y+1)), index=0, key="p2p_sy")
-with cP3: p2p_end_m   = st.selectbox("End month", months, index=len(months)-1, key="p2p_em")
-with cP4: p2p_end_y   = st.selectbox("End year", list(range(p2p_min_y, p2p_max_y+1)), index=len(range(p2p_min_y, p2p_max_y+1))-1, key="p2p_ey")
+    # ------------------------ Yearly Returns (STRICT) ------------------------
+    st.header("Yearly Returns (Strict FY/CY endpoints)")
 
-p2p_start = eom(int(p2p_start_y), m2n[p2p_start_m])
-p2p_end   = eom(int(p2p_end_y),   m2n[p2p_end_m])
+    # Explicit month & year pickers (independent of Rolling)
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    m2n = {m:i+1 for i,m in enumerate(months)}
 
-def months_between(a: pd.Timestamp, b: pd.Timestamp) -> int:
-    return (b.year - a.year)*12 + (b.month - a.month)
+    date_years_all = sorted({d.year for d in pd.to_datetime(filtered["date"].unique())}) if not filtered.empty else [2010, 2011]
 
-def series_cagr_between(s: pd.Series, start_eom: pd.Timestamp, end_eom: pd.Timestamp):
-    """Exact month-end CAGR (decimal) between two month-ends."""
-    s = s.dropna().sort_index()
-    if start_eom not in s.index or end_eom not in s.index or end_eom <= start_eom:
-        return np.nan
-    m = months_between(start_eom, end_eom)
-    if m <= 0: return np.nan
-    try:
-        return (s.loc[end_eom] / s.loc[start_eom]) ** (12.0/m) - 1.0
-    except Exception:
-        return np.nan
 
-if p2p_end <= p2p_start:
-    st.warning("P2P End must be after Start.")
-else:
-    rows = []
+    colA, colB, colC, colD = st.columns(4)
+    with colA:
+        y_start = st.selectbox("Start Year", options=date_years_all, index=0, key="strict_y_start")
+    with colB:
+        m_start = st.selectbox("Start Month", options=months, index=0, key="strict_m_start")
+    with colC:
+        y_end = st.selectbox("End Year", options=date_years_all, index=len(date_years_all)-1, key="strict_y_end")
+    with colD:
+        m_end = st.selectbox("End Month", options=months, index=len(months)-1, key="strict_m_end")
+
+    start_domain = pd.Timestamp(year=int(y_start), month=m2n[m_start], day=1).to_period("M").to_timestamp("M")
+    end_domain   = pd.Timestamp(year=int(y_end),   month=m2n[m_end],   day=1).to_period("M").to_timestamp("M")
+
+    yr_type_strict = st.radio("Year type", options=["Financial (Apr–Mar)","Calendar (Jan–Dec)"], index=0, horizontal=True, key="strict_year_type")
+    use_fy_strict = yr_type_strict.startswith("Financial")
+
+    # Compute per-fund yearly returns with trimmed first/last years
+    yr_rows = {}
     for f in funds_selected:
         s = filtered.loc[filtered["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-        val = series_cagr_between(s, p2p_start, p2p_end)
-        rows.append({"Fund": f, "Start": f"{p2p_start:%b %Y}", "End": f"{p2p_end:%b %Y}",
-                     "Months": months_between(p2p_start, p2p_end),
-                     "CAGR %": None if np.isnan(val) else round(val*100.0, 2)})
+        yr_rows[f] = yearly_returns_with_custom_domain(s, start_domain, end_domain, fy=use_fy_strict)
+    yr_df = pd.DataFrame(yr_rows).T
+
+    # Benchmark
+    yr_bench = None
     if bench_ser is not None and not bench_ser.empty:
-        bval = series_cagr_between(bench_ser, p2p_start, p2p_end)
-        rows.append({"Fund": bench_label, "Start": f"{p2p_start:%b %Y}", "End": f"{p2p_end:%b %Y}",
-                     "Months": months_between(p2p_start, p2p_end),
-                     "CAGR %": None if np.isnan(bval) else round(bval*100.0, 2)})
+        yr_bench = yearly_returns_with_custom_domain(bench_ser, start_domain, end_domain, fy=use_fy_strict).rename("Benchmark")
 
-    p2p_df = pd.DataFrame(rows)
-# Coerce/round/sort CAGR columns
-for col in list(p2p_df.columns):
-    if isinstance(col, str) and col.endswith('CAGR %'):
-        p2p_df[col] = pd.to_numeric(p2p_df[col], errors='coerce').round(1)
-if 'CAGR %' in p2p_df.columns:
-    p2p_df = p2p_df.sort_values(by='CAGR %', ascending=False)
-# Ensure all % columns are numeric, 1 decimal, and sort by main CAGR % desc
-for col in list(p2p_df.columns):
-    if isinstance(col, str) and col.endswith('CAGR %'):
-        p2p_df[col] = pd.to_numeric(p2p_df[col], errors='coerce').round(1)
-# Round CAGR % to 1 decimal
-if "CAGR %" in p2p_df.columns:
-    p2p_df["CAGR %"] = pd.to_numeric(p2p_df["CAGR %"], errors="coerce").round(1)
-    p2p_df = p2p_df.sort_values(by="CAGR %", ascending=False)
-
-st.dataframe(
-    p2p_df.style.format(
-        {c: "{:.1f}%" for c in p2p_df.columns if c.endswith("CAGR %")},
-        na_rep="—"
-    ),
-    use_container_width=True
-)
-p_p2p = st.checkbox("To print", key="print_p2p_tbl")
-
-
-# ------------------------ Relative Multi-Horizon CAGR vs Benchmark ------------------------
-st.subheader("Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (as of P2P end month)")
-
-def end_aligned_cagr(series: pd.Series, end_eom: pd.Timestamp, months: int) -> float:
-    s = series.dropna().sort_index()
-    if end_eom not in s.index:
-        return np.nan
-    start_eom = (end_eom - pd.DateOffset(months=months)).to_period("M").to_timestamp("M")
-    if start_eom not in s.index or end_eom <= start_eom:
-        return np.nan
-    try:
-        return (s.loc[end_eom] / s.loc[start_eom]) ** (12.0 / months) - 1.0
-    except Exception:
-        return np.nan
-
-horizons = [(12, "1Y"), (36, "3Y"), (60, "5Y"), (84, "7Y")]
-bench_cagrs = {}
-if bench_ser is not None and not bench_ser.empty:
-    for m, lbl in horizons:
-        bench_cagrs[lbl] = end_aligned_cagr(bench_ser, p2p_end, m)
-else:
-    bench_cagrs = {lbl: np.nan for _, lbl in horizons}
-
-rel_rows = []
-for f in funds_selected:
-    s = filtered.loc[filtered["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
-    row = {"Fund": f}
-    for m, lbl in horizons:
-        fc = end_aligned_cagr(s, p2p_end, m)
-        bc = bench_cagrs.get(lbl, np.nan)
-        row[lbl] = None if (np.isnan(fc) or np.isnan(bc)) else round((fc - bc) * 100.0, 2)
-    rel_rows.append(row)
-
-rel_mh_df = pd.DataFrame(rel_rows).set_index("Fund")
-
-def style_rel_mh(df: pd.DataFrame):
-    """
-    Style for Relative (multi-horizon) table:
-    - color positive/negative numbers
-    - format numeric cols to 2 decimals
-    - safe for None/NaN via na_rep
-    """
-    df2 = df.copy()
-
-    # Identify numeric columns (skip label columns like 'Fund')
-    num_cols = [c for c in df2.columns
-                if c != "Fund" and pd.api.types.is_numeric_dtype(df2[c])]
-
-    # If some numeric columns arrived as 'object' (strings), coerce them
-    for c in df2.columns:
-        if c != "Fund" and not pd.api.types.is_numeric_dtype(df2[c]):
-            try:
-                tmp = pd.to_numeric(df2[c], errors="coerce")
-                if tmp.notna().any():
-                    df2[c] = tmp
-            except Exception:
-                pass
-
-    # Recompute numeric columns after coercion
-    num_cols = [c for c in df2.columns
-                if c != "Fund" and pd.api.types.is_numeric_dtype(df2[c])]
-
-    def rel_colors(dfin: pd.DataFrame):
-        styles = pd.DataFrame("", index=dfin.index, columns=dfin.columns)
-        for c in num_cols:
-            styles[c] = dfin[c].apply(
-                lambda v: (
-                    "background-color:#e6f4ea;color:#0b8043" if pd.notna(v) and v > 0 else
-                    "background-color:#fdecea;color:#a50e0e" if pd.notna(v) and v < 0 else
-                    ""
-                )
-            )
-        return styles
-
-    sty = df2.style.apply(rel_colors, axis=None)
-
-    # Format only numeric columns; use na_rep so None/NaN won't crash
-    fmt_map = {c: "{:.2f}" for c in num_cols}
-    sty = sty.format(fmt_map, na_rep="—")
-
-    # Optional: uniform header height / fixed layout
-    sty = sty.set_table_styles([
-        {"selector": "table", "props": "table-layout:fixed"},
-        {"selector": "th.col_heading",
-         "props": "white-space:normal; line-height:1.1; height:56px"}
-    ])
-
-    return sty
-
-
-if rel_mh_df.empty:
-    st.info("Not enough data to compute relative multi-horizon returns.")
-    rel_mh_disp = pd.DataFrame()
-else:
-    st.dataframe(style_rel_mh(rel_mh_df), use_container_width=True)
-    rel_mh_disp = rel_mh_df.copy()
-
-p_relmh = st.checkbox("To print", key="print_rel_mh")
-
-
-# ------------------------ Printing to PDF ------------------------
-st.markdown("---")
-
-def df_to_table_figure(df: pd.DataFrame, title: str, fill=None):
-    """Render a DataFrame to a Plotly table figure with optional cell fills."""
-    if df.empty:
-        return None
-    df_print = df.copy()
-    df_print = df_print.reset_index()  # first column becomes visible index
-    headers = list(df_print.columns)
-    cells = [df_print[c].astype(object).astype(str).tolist() for c in headers]
-
-    # Fills: either single color or column-wise list of lists
-    if fill is None:
-        cell_fill = "white"
+    if yr_df.empty:
+        st.info("Not enough data to compute yearly returns for the selected funds.")
     else:
-        # Expecting fill to be a list of lists per column; if given as rows, transpose-ish:
-        if isinstance(fill, list) and fill and isinstance(fill[0], list):
-            # fill currently built as [index_col, col1, col2, ...] -> matches our cells already
-            cell_fill = fill
+        # Align columns across funds and benchmark; keep original order
+        cols_order = list(yr_df.columns)
+        if yr_bench is not None and not yr_bench.empty:
+            for c in yr_bench.index:
+                if c not in cols_order: cols_order.append(c)
+        yr_df = yr_df.reindex(columns=cols_order)
+
+        # Actual table
+        st.subheader("Actual yearly returns — Funds (rows) vs Years (columns)")
+
+        # Build table (keep your FY/CY logic above intact)
+        disp_actual = (yr_df.loc[funds_selected, cols_order] * 100.0).copy()
+        disp_actual.insert(0, "Fund", disp_actual.index)
+        disp_actual = disp_actual.reset_index(drop=True)  # remove unnamed index column
+
+        # Round numeric columns to 1 decimal and style with 1-decimal display
+        num_cols = [c for c in disp_actual.columns if c != "Fund"]
+        disp_actual[num_cols] = disp_actual[num_cols].round(1)
+
+        st.dataframe(
+        disp_actual.style
+            .format({c: "{:.1f}" for c in num_cols}, na_rep="—")
+            .set_table_styles([
+                {"selector": "table", "props": "table-layout:fixed"},
+                {"selector": "th.col_heading",
+                "props": "white-space:normal; line-height:1.1; height:56px"}
+            ]),
+        use_container_width=True
+        )
+        p_act = st.checkbox("To print", key="print_actual_tbl")
+
+
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+
+        # Benchmark table
+        st.subheader(f"Benchmark yearly returns — {bench_label}")
+        if yr_bench is None or yr_bench.empty:
+            st.info("Benchmark not available.")
+            bench_df_print = pd.DataFrame()
         else:
-            cell_fill = "white"
+            bench_df_print = ((yr_bench[cols_order] * 100.0).to_frame().T).round(2)
+            bench_df_print.index = [bench_label]
+            bench_df_print = bench_df_print.reset_index().rename(columns={"index":"Benchmark"})
+            st.dataframe(
+                bench_df_print.style
+                .format({c: "{:.1f}" for c in bench_df_print.columns if c != "Benchmark"}, na_rep="—")
+                .set_table_styles([
+                    {"selector": "table", "props": "table-layout:fixed"},
+                    {"selector": "th.col_heading",
+                    "props": "white-space:normal; line-height:1.1; height:56px"}
+                ]),
+                use_container_width=True
+            )
 
-    fig = go.Figure(data=[go.Table(
-        header=dict(values=headers, fill_color="#f0f0f0", align="left", font=dict(size=12, color="black")),
-        cells=dict(values=cells, align="left", fill_color=cell_fill, font=dict(size=11, color="black"))
-    )])
-    fig.update_layout(title=title, template="plotly_white", margin=dict(l=20,r=20,t=60,b=20), height=560)
-    return fig
+        p_bench = st.checkbox("To print", key="print_bench_tbl")
 
-def build_rel_fill(df_with_fund_col: pd.DataFrame, fund_col="Fund", misaligned=None):
-    """Green/red/white fill matrix for relative tables. Expects Fund column present."""
-    misaligned = set(misaligned or [])
-    # Ensure the Fund column exists as a data column
-    if fund_col not in df_with_fund_col.columns:
-        tmp = df_with_fund_col.copy()
-        tmp.insert(0, fund_col, tmp.index)
-        df_with_fund_col = tmp
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
-    headers = df_with_fund_col.columns.tolist()
-    fills = []
-    # Build fill per column to match df_to_table_figure() cells order
-    for c in headers:
-        col_fill = []
-        for v in df_with_fund_col[c].tolist():
-            if c == fund_col:
-                col_fill.append("#FFF59D" if (v in misaligned) else "white")
-            else:
-                if v is None or (isinstance(v, str) and v.strip()==""):
-                    col_fill.append("white")
-                else:
-                    try:
-                        fv = float(v)
-                        if fv > 0:   col_fill.append("#e6f4ea")  # light green
-                        elif fv < 0: col_fill.append("#fdecea")  # light red
-                        else:        col_fill.append("white")
-                    except Exception:
-                        col_fill.append("white")
-        fills.append(col_fill)
-    return fills
+        # Relative (ppt) vs benchmark
+        st.subheader("Relative yearly returns (ppt) — Funds (rows) vs Years (columns)")
+        rel_df = pd.DataFrame()
+        if yr_bench is not None and not yr_bench.empty:
+            common = [c for c in cols_order if c in yr_bench.index]
+            if common:
+                rel_df = (yr_df.loc[funds_selected, common].subtract(yr_bench[common], axis=1) * 100.0).round(2)
+        if rel_df.empty:
+            st.info("Not enough overlap to compute relative returns.")
+            disp_rel = pd.DataFrame()
+        else:
+            disp_rel = rel_df.copy()
+            disp_rel.insert(0, "Fund", disp_rel.index)
+            disp_rel = disp_rel.reset_index(drop=True)   # remove unnamed index column
+            def rel_colors(df):
+                styles = pd.DataFrame("", index=df.index, columns=df.columns)
+                for c in df.columns:
+                    if c == "Fund": continue
+                    styles[c] = df[c].apply(lambda v: "background-color:#e6f4ea;color:#0b8043" if pd.notna(v) and v>0
+                                                    else "background-color:#fdecea;color:#a50e0e" if pd.notna(v) and v<0
+                                                    else "")
+                return styles
+            st.write(
+            disp_rel.style
+                .apply(rel_colors, axis=None)
+                .format({c: "{:.1f}" for c in disp_rel.columns if c != "Fund"}, na_rep="—")
+                .set_table_styles([
+                    {"selector": "table", "props": "table-layout:fixed"},
+                    {"selector": "th.col_heading",
+                    "props": "white-space:normal; line-height:1.1; height:56px"}
+                ])
+            )
 
-if st.button("Print charts"):
-    if not print_items:
-        st.warning("Nothing selected. Tick “To print” under the charts/tables you want.")
-    else:
+        p_rel = st.checkbox("To print", key="print_rel_tbl")
+    st.header("Point-to-Point (P2P) Returns — Custom period CAGR")
+
+    date_years_all = sorted(pd.to_datetime(filtered["date"]).dt.year.unique().tolist())
+    p2p_min_y, p2p_max_y = min(date_years_all), max(date_years_all)
+    months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    m2n = {m:i+1 for i,m in enumerate(months)}
+
+    cP1, cP2, cP3, cP4 = st.columns([1,1,1,1])
+    with cP1: p2p_start_m = st.selectbox("Start month", months, index=0, key="p2p_sm")
+    with cP2: p2p_start_y = st.selectbox("Start year", list(range(p2p_min_y, p2p_max_y+1)), index=0, key="p2p_sy")
+    with cP3: p2p_end_m   = st.selectbox("End month", months, index=len(months)-1, key="p2p_em")
+    with cP4: p2p_end_y   = st.selectbox("End year", list(range(p2p_min_y, p2p_max_y+1)), index=len(range(p2p_min_y, p2p_max_y+1))-1, key="p2p_ey")
+
+    p2p_start = eom(int(p2p_start_y), m2n[p2p_start_m])
+    p2p_end   = eom(int(p2p_end_y),   m2n[p2p_end_m])
+
+    def months_between(a: pd.Timestamp, b: pd.Timestamp) -> int:
+        return (b.year - a.year)*12 + (b.month - a.month)
+
+    def series_cagr_between(s: pd.Series, start_eom: pd.Timestamp, end_eom: pd.Timestamp):
+        """Exact month-end CAGR (decimal) between two month-ends."""
+        s = s.dropna().sort_index()
+        if start_eom not in s.index or end_eom not in s.index or end_eom <= start_eom:
+            return np.nan
+        m = months_between(start_eom, end_eom)
+        if m <= 0: return np.nan
         try:
-            pdf_bytes = BytesIO()
-            c = canvas.Canvas(pdf_bytes, pagesize=landscape(A4))
-            W, H = landscape(A4)
+            return (s.loc[end_eom] / s.loc[start_eom]) ** (12.0/m) - 1.0
+        except Exception:
+            return np.nan
 
-            # Title page
-            c.setFont("Helvetica-Bold", 18)
-            c.drawString(40, H - 40, f"Performance charts & metrics - {focus_fund}")
-            c.setFont("Helvetica", 10)
-            c.drawString(40, H - 58, f"Benchmark: {bench_label}")
-            c.showPage()
+    if p2p_end <= p2p_start:
+        st.warning("P2P End must be after Start.")
+    else:
+        rows = []
+        for f in funds_selected:
+            s = filtered.loc[filtered["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
+            val = series_cagr_between(s, p2p_start, p2p_end)
+            rows.append({"Fund": f, "Start": f"{p2p_start:%b %Y}", "End": f"{p2p_end:%b %Y}",
+                        "Months": months_between(p2p_start, p2p_end),
+                        "CAGR %": None if np.isnan(val) else round(val*100.0, 2)})
+        if bench_ser is not None and not bench_ser.empty:
+            bval = series_cagr_between(bench_ser, p2p_start, p2p_end)
+            rows.append({"Fund": bench_label, "Start": f"{p2p_start:%b %Y}", "End": f"{p2p_end:%b %Y}",
+                        "Months": months_between(p2p_start, p2p_end),
+                        "CAGR %": None if np.isnan(bval) else round(bval*100.0, 2)})
 
-            # Pre-selected plotly figures (rolling charts, etc.)
-            for caption, fig in print_items:
-                c.setFont("Helvetica-Bold", 14)
-                c.drawString(40, H - 40, caption)
-                png = fig.to_image(format="png", scale=2)  # kaleido
-                img = ImageReader(BytesIO(png))
-                max_w, max_h = W - 80, H - 100
-                iw, ih = img.getSize()
-                scale = min(max_w/iw, max_h/ih)
-                c.drawImage(img, 40 + (max_w - iw*scale)/2, 40, width=iw*scale, height=ih*scale)
+        p2p_df = pd.DataFrame(rows)
+    # Coerce/round/sort CAGR columns
+    for col in list(p2p_df.columns):
+        if isinstance(col, str) and col.endswith('CAGR %'):
+            p2p_df[col] = pd.to_numeric(p2p_df[col], errors='coerce').round(1)
+    if 'CAGR %' in p2p_df.columns:
+        p2p_df = p2p_df.sort_values(by='CAGR %', ascending=False)
+    # Ensure all % columns are numeric, 1 decimal, and sort by main CAGR % desc
+    for col in list(p2p_df.columns):
+        if isinstance(col, str) and col.endswith('CAGR %'):
+            p2p_df[col] = pd.to_numeric(p2p_df[col], errors='coerce').round(1)
+    # Round CAGR % to 1 decimal
+    if "CAGR %" in p2p_df.columns:
+        p2p_df["CAGR %"] = pd.to_numeric(p2p_df["CAGR %"], errors="coerce").round(1)
+        p2p_df = p2p_df.sort_values(by="CAGR %", ascending=False)
+
+    st.dataframe(
+        p2p_df.style.format(
+            {c: "{:.1f}%" for c in p2p_df.columns if c.endswith("CAGR %")},
+            na_rep="—"
+        ),
+        use_container_width=True
+    )
+    p_p2p = st.checkbox("To print", key="print_p2p_tbl")
+
+
+    # ------------------------ Relative Multi-Horizon CAGR vs Benchmark ------------------------
+    st.subheader("Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (as of P2P end month)")
+
+    def end_aligned_cagr(series: pd.Series, end_eom: pd.Timestamp, months: int) -> float:
+        s = series.dropna().sort_index()
+        if end_eom not in s.index:
+            return np.nan
+        start_eom = (end_eom - pd.DateOffset(months=months)).to_period("M").to_timestamp("M")
+        if start_eom not in s.index or end_eom <= start_eom:
+            return np.nan
+        try:
+            return (s.loc[end_eom] / s.loc[start_eom]) ** (12.0 / months) - 1.0
+        except Exception:
+            return np.nan
+
+    horizons = [(12, "1Y"), (36, "3Y"), (60, "5Y"), (84, "7Y")]
+    bench_cagrs = {}
+    if bench_ser is not None and not bench_ser.empty:
+        for m, lbl in horizons:
+            bench_cagrs[lbl] = end_aligned_cagr(bench_ser, p2p_end, m)
+    else:
+        bench_cagrs = {lbl: np.nan for _, lbl in horizons}
+
+    rel_rows = []
+    for f in funds_selected:
+        s = filtered.loc[filtered["fund"] == f, ["date","nav"]].drop_duplicates("date").set_index("date")["nav"]
+        row = {"Fund": f}
+        for m, lbl in horizons:
+            fc = end_aligned_cagr(s, p2p_end, m)
+            bc = bench_cagrs.get(lbl, np.nan)
+            row[lbl] = None if (np.isnan(fc) or np.isnan(bc)) else round((fc - bc) * 100.0, 2)
+        rel_rows.append(row)
+
+    rel_mh_df = pd.DataFrame(rel_rows).set_index("Fund")
+
+    def style_rel_mh(df: pd.DataFrame):
+        """
+        Style for Relative (multi-horizon) table:
+        - color positive/negative numbers
+        - format numeric cols to 2 decimals
+        - safe for None/NaN via na_rep
+        """
+        df2 = df.copy()
+
+        # Identify numeric columns (skip label columns like 'Fund')
+        num_cols = [c for c in df2.columns
+                    if c != "Fund" and pd.api.types.is_numeric_dtype(df2[c])]
+
+        # If some numeric columns arrived as 'object' (strings), coerce them
+        for c in df2.columns:
+            if c != "Fund" and not pd.api.types.is_numeric_dtype(df2[c]):
+                try:
+                    tmp = pd.to_numeric(df2[c], errors="coerce")
+                    if tmp.notna().any():
+                        df2[c] = tmp
+                except Exception:
+                    pass
+
+        # Recompute numeric columns after coercion
+        num_cols = [c for c in df2.columns
+                    if c != "Fund" and pd.api.types.is_numeric_dtype(df2[c])]
+
+        def rel_colors(dfin: pd.DataFrame):
+            styles = pd.DataFrame("", index=dfin.index, columns=dfin.columns)
+            for c in num_cols:
+                styles[c] = dfin[c].apply(
+                    lambda v: (
+                        "background-color:#e6f4ea;color:#0b8043" if pd.notna(v) and v > 0 else
+                        "background-color:#fdecea;color:#a50e0e" if pd.notna(v) and v < 0 else
+                        ""
+                    )
+                )
+            return styles
+
+        sty = df2.style.apply(rel_colors, axis=None)
+
+        # Format only numeric columns; use na_rep so None/NaN won't crash
+        fmt_map = {c: "{:.2f}" for c in num_cols}
+        sty = sty.format(fmt_map, na_rep="—")
+
+        # Optional: uniform header height / fixed layout
+        sty = sty.set_table_styles([
+            {"selector": "table", "props": "table-layout:fixed"},
+            {"selector": "th.col_heading",
+            "props": "white-space:normal; line-height:1.1; height:56px"}
+        ])
+
+        return sty
+
+
+    if rel_mh_df.empty:
+        st.info("Not enough data to compute relative multi-horizon returns.")
+        rel_mh_disp = pd.DataFrame()
+    else:
+        st.dataframe(style_rel_mh(rel_mh_df), use_container_width=True)
+        rel_mh_disp = rel_mh_df.copy()
+
+    p_relmh = st.checkbox("To print", key="print_rel_mh")
+
+
+    # ------------------------ Printing to PDF ------------------------
+    st.markdown("---")
+
+    def df_to_table_figure(df: pd.DataFrame, title: str, fill=None):
+        """Render a DataFrame to a Plotly table figure with optional cell fills."""
+        if df.empty:
+            return None
+        df_print = df.copy()
+        df_print = df_print.reset_index()  # first column becomes visible index
+        headers = list(df_print.columns)
+        cells = [df_print[c].astype(object).astype(str).tolist() for c in headers]
+
+        # Fills: either single color or column-wise list of lists
+        if fill is None:
+            cell_fill = "white"
+        else:
+            # Expecting fill to be a list of lists per column; if given as rows, transpose-ish:
+            if isinstance(fill, list) and fill and isinstance(fill[0], list):
+                # fill currently built as [index_col, col1, col2, ...] -> matches our cells already
+                cell_fill = fill
+            else:
+                cell_fill = "white"
+
+        fig = go.Figure(data=[go.Table(
+            header=dict(values=headers, fill_color="#f0f0f0", align="left", font=dict(size=12, color="black")),
+            cells=dict(values=cells, align="left", fill_color=cell_fill, font=dict(size=11, color="black"))
+        )])
+        fig.update_layout(title=title, template="plotly_white", margin=dict(l=20,r=20,t=60,b=20), height=560)
+        return fig
+
+    def build_rel_fill(df_with_fund_col: pd.DataFrame, fund_col="Fund", misaligned=None):
+        """Green/red/white fill matrix for relative tables. Expects Fund column present."""
+        misaligned = set(misaligned or [])
+        # Ensure the Fund column exists as a data column
+        if fund_col not in df_with_fund_col.columns:
+            tmp = df_with_fund_col.copy()
+            tmp.insert(0, fund_col, tmp.index)
+            df_with_fund_col = tmp
+
+        headers = df_with_fund_col.columns.tolist()
+        fills = []
+        # Build fill per column to match df_to_table_figure() cells order
+        for c in headers:
+            col_fill = []
+            for v in df_with_fund_col[c].tolist():
+                if c == fund_col:
+                    col_fill.append("#FFF59D" if (v in misaligned) else "white")
+                else:
+                    if v is None or (isinstance(v, str) and v.strip()==""):
+                        col_fill.append("white")
+                    else:
+                        try:
+                            fv = float(v)
+                            if fv > 0:   col_fill.append("#e6f4ea")  # light green
+                            elif fv < 0: col_fill.append("#fdecea")  # light red
+                            else:        col_fill.append("white")
+                        except Exception:
+                            col_fill.append("white")
+            fills.append(col_fill)
+        return fills
+
+    if st.button("Print charts"):
+        if not print_items:
+            st.warning("Nothing selected. Tick “To print” under the charts/tables you want.")
+        else:
+            try:
+                pdf_bytes = BytesIO()
+                c = canvas.Canvas(pdf_bytes, pagesize=landscape(A4))
+                W, H = landscape(A4)
+
+                # Title page
+                c.setFont("Helvetica-Bold", 18)
+                c.drawString(40, H - 40, f"Performance charts & metrics - {focus_fund}")
+                c.setFont("Helvetica", 10)
+                c.drawString(40, H - 58, f"Benchmark: {bench_label}")
                 c.showPage()
 
-            # Yearly — Actual (Funds vs Years)
-            if 'p_act' in locals() and p_act and 'disp_actual' in locals() and not disp_actual.empty:
-                figA = df_to_table_figure(disp_actual.round(2), "Actual yearly returns — Funds vs Years", fill="white")
-                if figA is not None:
-                    png = figA.to_image(format="png", scale=2)
-                    img = ImageReader(BytesIO(png))
+                # Pre-selected plotly figures (rolling charts, etc.)
+                for caption, fig in print_items:
                     c.setFont("Helvetica-Bold", 14)
-                    c.drawString(40, H - 40, "Actual yearly returns — Funds vs Years")
+                    c.drawString(40, H - 40, caption)
+                    png = fig.to_image(format="png", scale=2)  # kaleido
+                    img = ImageReader(BytesIO(png))
                     max_w, max_h = W - 80, H - 100
                     iw, ih = img.getSize()
                     scale = min(max_w/iw, max_h/ih)
-                    c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                    c.drawImage(img, 40 + (max_w - iw*scale)/2, 40, width=iw*scale, height=ih*scale)
                     c.showPage()
 
-            # Yearly — Benchmark
-            if 'p_bmk' in locals() and p_bmk and 'bench_df_print' in locals() and not bench_df_print.empty:
-                figB = df_to_table_figure(bench_df_print.round(2), f"Benchmark yearly returns — {bench_label}", fill="white")
-                if figB is not None:
-                    png = figB.to_image(format="png", scale=2)
-                    img = ImageReader(BytesIO(png))
-                    c.setFont("Helvetica-Bold", 14)
-                    c.drawString(40, H - 40, f"Benchmark yearly returns — {bench_label}")
-                    max_w, max_h = W - 80, H - 100
-                    iw, ih = img.getSize()
-                    scale = min(max_w/iw, max_h/ih)
-                    c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
-                    c.showPage()
+                # Yearly — Actual (Funds vs Years)
+                if 'p_act' in locals() and p_act and 'disp_actual' in locals() and not disp_actual.empty:
+                    figA = df_to_table_figure(disp_actual.round(2), "Actual yearly returns — Funds vs Years", fill="white")
+                    if figA is not None:
+                        png = figA.to_image(format="png", scale=2)
+                        img = ImageReader(BytesIO(png))
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(40, H - 40, "Actual yearly returns — Funds vs Years")
+                        max_w, max_h = W - 80, H - 100
+                        iw, ih = img.getSize()
+                        scale = min(max_w/iw, max_h/ih)
+                        c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                        c.showPage()
 
-            # Yearly — Relative (ppt)
-            if 'p_rel' in locals() and p_rel and 'disp_rel' in locals() and not disp_rel.empty:
-                fills_rel = build_rel_fill(disp_rel, fund_col="Fund", misaligned=locals().get('misaligned_funds', []))
-                figR = df_to_table_figure(disp_rel.round(2), "Relative yearly returns (ppt)", fill=fills_rel)
-                if figR is not None:
-                    png = figR.to_image(format="png", scale=2)
-                    img = ImageReader(BytesIO(png))
-                    c.setFont("Helvetica-Bold", 14)
-                    c.drawString(40, H - 40, "Relative yearly returns (ppt)")
-                    max_w, max_h = W - 80, H - 100
-                    iw, ih = img.getSize()
-                    scale = min(max_w/iw, max_h/ih)
-                    c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
-                    c.showPage()
+                # Yearly — Benchmark
+                if 'p_bmk' in locals() and p_bmk and 'bench_df_print' in locals() and not bench_df_print.empty:
+                    figB = df_to_table_figure(bench_df_print.round(2), f"Benchmark yearly returns — {bench_label}", fill="white")
+                    if figB is not None:
+                        png = figB.to_image(format="png", scale=2)
+                        img = ImageReader(BytesIO(png))
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(40, H - 40, f"Benchmark yearly returns — {bench_label}")
+                        max_w, max_h = W - 80, H - 100
+                        iw, ih = img.getSize()
+                        scale = min(max_w/iw, max_h/ih)
+                        c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                        c.showPage()
 
-            # P2P table
-            if 'p_p2p' in locals() and p_p2p and 'p2p_df' in locals() and not p2p_df.empty:
-                figP = df_to_table_figure(p2p_df, "Point-to-Point (P2P) Returns", fill="white")
-                if figP is not None:
-                    png = figP.to_image(format="png", scale=2)
-                    img = ImageReader(BytesIO(png))
-                    c.setFont("Helvetica-Bold", 14)
-                    c.drawString(40, H - 40, "Point-to-Point (P2P) Returns")
-                    max_w, max_h = W - 80, H - 100
-                    iw, ih = img.getSize()
-                    scale = min(max_w/iw, max_h/ih)
-                    c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
-                    c.showPage()
+                # Yearly — Relative (ppt)
+                if 'p_rel' in locals() and p_rel and 'disp_rel' in locals() and not disp_rel.empty:
+                    fills_rel = build_rel_fill(disp_rel, fund_col="Fund", misaligned=locals().get('misaligned_funds', []))
+                    figR = df_to_table_figure(disp_rel.round(2), "Relative yearly returns (ppt)", fill=fills_rel)
+                    if figR is not None:
+                        png = figR.to_image(format="png", scale=2)
+                        img = ImageReader(BytesIO(png))
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(40, H - 40, "Relative yearly returns (ppt)")
+                        max_w, max_h = W - 80, H - 100
+                        iw, ih = img.getSize()
+                        scale = min(max_w/iw, max_h/ih)
+                        c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                        c.showPage()
 
-            # Relative multi-horizon table
-            if 'p_relmh' in locals() and p_relmh and 'rel_mh_disp' in locals() and not rel_mh_disp.empty:
-                # Build sign-based fills (no misalignment concept here)
-                dfmh = rel_mh_disp.copy()
-                dfmh = dfmh.reset_index()  # Fund becomes column
-                # Fill: index first (Fund), then 1Y/3Y/5Y/7Y
-                fills_mh = build_rel_fill(dfmh, fund_col="Fund", misaligned=None)
-                figMH = df_to_table_figure(dfmh.set_index("Fund"), "Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (ppt)", fill=fills_mh)
-                if figMH is not None:
-                    png = figMH.to_image(format="png", scale=2)
-                    img = ImageReader(BytesIO(png))
-                    c.setFont("Helvetica-Bold", 14)
-                    c.drawString(40, H - 40, "Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (ppt)")
-                    max_w, max_h = W - 80, H - 100
-                    iw, ih = img.getSize()
-                    scale = min(max_w/iw, max_h/ih)
-                    c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
-                    c.showPage()
+                # P2P table
+                if 'p_p2p' in locals() and p_p2p and 'p2p_df' in locals() and not p2p_df.empty:
+                    figP = df_to_table_figure(p2p_df, "Point-to-Point (P2P) Returns", fill="white")
+                    if figP is not None:
+                        png = figP.to_image(format="png", scale=2)
+                        img = ImageReader(BytesIO(png))
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(40, H - 40, "Point-to-Point (P2P) Returns")
+                        max_w, max_h = W - 80, H - 100
+                        iw, ih = img.getSize()
+                        scale = min(max_w/iw, max_h/ih)
+                        c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                        c.showPage()
 
-            c.save()
-            pdf_bytes.seek(0)
-            st.download_button(
-                label="Download PDF",
-                file_name=f"Performance_{focus_fund.replace(' ','_')}.pdf",
-                mime="application/pdf",
-                data=pdf_bytes.getvalue(),
-            )
-        except Exception as e:
-            st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
+                # Relative multi-horizon table
+                if 'p_relmh' in locals() and p_relmh and 'rel_mh_disp' in locals() and not rel_mh_disp.empty:
+                    # Build sign-based fills (no misalignment concept here)
+                    dfmh = rel_mh_disp.copy()
+                    dfmh = dfmh.reset_index()  # Fund becomes column
+                    # Fill: index first (Fund), then 1Y/3Y/5Y/7Y
+                    fills_mh = build_rel_fill(dfmh, fund_col="Fund", misaligned=None)
+                    figMH = df_to_table_figure(dfmh.set_index("Fund"), "Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (ppt)", fill=fills_mh)
+                    if figMH is not None:
+                        png = figMH.to_image(format="png", scale=2)
+                        img = ImageReader(BytesIO(png))
+                        c.setFont("Helvetica-Bold", 14)
+                        c.drawString(40, H - 40, "Relative CAGR vs Benchmark — 1Y / 3Y / 5Y / 7Y (ppt)")
+                        max_w, max_h = W - 80, H - 100
+                        iw, ih = img.getSize()
+                        scale = min(max_w/iw, max_h/ih)
+                        c.drawImage(img, 40, 40, width=iw*scale, height=ih*scale)
+                        c.showPage()
+
+                c.save()
+                pdf_bytes.seek(0)
+                st.download_button(
+                    label="Download PDF",
+                    file_name=f"Performance_{focus_fund.replace(' ','_')}.pdf",
+                    mime="application/pdf",
+                    data=pdf_bytes.getvalue(),
+                )
+            except Exception as e:
+                st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
 
 
 # ------------------------ Router ------------------------
