@@ -338,13 +338,28 @@ def portfolio_fundamentals_page():
     current_year = dt.date.today().year
     years = list(range(current_year - 15, current_year + 1))
 
+    month_options = [3, 9]  # Mar, Sep
+
     col1, col2 = st.columns(2)
     with col1:
         start_year = st.selectbox("Start year", options=years, index=0, key="pf_start_year")
-        start_month = st.selectbox("Start month", options=list(range(1, 13)), index=2, key="pf_start_month")  # default March
+        start_month = st.selectbox(
+            "Start month",
+            options=month_options,
+            index=0,  # default: Mar
+            key="pf_start_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
     with col2:
         end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="pf_end_year")
-        end_month = st.selectbox("End month", options=list(range(1, 13)), index=8, key="pf_end_month")  # default September
+        end_month = st.selectbox(
+            "End month",
+            options=month_options,
+            index=1,  # default: Sep
+            key="pf_end_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
+
 
     start_date = month_year_to_last_day(start_year, start_month)
     end_date = month_year_to_last_day(end_year, end_month)
@@ -426,16 +441,21 @@ def portfolio_fundamentals_page():
 
     df_table = df_result.copy()
     df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-    df_table["period"] = df_table["month_end"].dt.strftime("%b %Y")
 
-    # Funds as rows, periods as columns
+    # Use the actual date for column ordering
+    df_table["period_date"] = df_table["month_end"]
+
     df_pivot = df_table.pivot_table(
         index="fund_name",
-        columns="period",
+        columns="period_date",
         values="metric"
     ).sort_index(axis=0).sort_index(axis=1)
 
+    # After sorting, relabel columns as "Mar 2018", "Sep 2018", etc.
+    df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
+
     st.dataframe(df_pivot.style.format("{:.2f}"))
+
 
     
 
