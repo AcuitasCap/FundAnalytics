@@ -146,6 +146,7 @@ def fetch_categories():
     query = """
         SELECT DISTINCT category_name
         FROM fundlab.category
+        WHERE LOWER(category_name) <> 'portfolio'
         ORDER BY category_name;
     """
     df = pd.read_sql(query, engine)
@@ -300,7 +301,7 @@ def portfolio_fundamentals_page():
     cols = st.columns(min(4, len(categories)))
     for i, cat in enumerate(categories):
         col = cols[i % len(cols)]
-        if col.checkbox(cat, value=True, key=f"cat_{cat}"):
+        if col.checkbox(cat, value=False, key=f"cat_{cat}"):
             selected_categories.append(cat)
 
     if not selected_categories:
@@ -323,7 +324,7 @@ def portfolio_fundamentals_page():
     selected_fund_labels = st.multiselect(
         "Funds",
         options=list(fund_options.keys()),
-        default=list(fund_options.keys())[:3]  # first few as default
+        default=[]  # Default none selected
     )
     selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
 
@@ -380,33 +381,63 @@ def portfolio_fundamentals_page():
     df_chart = df_result.dropna(subset=["metric"]).copy()
     df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
 
-    chart = (
-        alt.Chart(df_chart)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("month_end:T", title="Period end"),
-            y=alt.Y("metric:Q", title="RoE / RoCE (%)"),
-            color=alt.Color("fund_name:N", title="Fund"),
-            tooltip=["fund_name", "month_end", "metric"]
+    if df_chart.empty:
+        st.info("No data to plot for selected filters.")
+    else:
+        # Robust y-axis domain so differences are clearly visible
+        y_min = float(df_chart["metric"].min())
+        y_max = float(df_chart["metric"].max())
+        if y_min == y_max:
+            padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
+            domain = (y_min - padding, y_max + padding)
+        else:
+            padding = (y_max - y_min) * 0.1
+            domain = (y_min - padding, y_max + padding)
+
+        chart = (
+            alt.Chart(df_chart)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(
+                    "month_end:T",
+                    title="Period",
+                    axis=alt.Axis(format="%b %Y", labelAngle=-45),  # e.g., "Mar 2018"
+                ),
+                y=alt.Y(
+                    "metric:Q",
+                    title="RoE / RoCE (%)",
+                    scale=alt.Scale(domain=domain),
+                ),
+                color=alt.Color("fund_name:N", title="Fund"),
+                tooltip=[
+                    alt.Tooltip("fund_name:N", title="Fund"),
+                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                    alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
+                ],
+            )
+            .properties(height=400)
         )
-        .properties(height=400)
-    )
 
-    st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, use_container_width=True)
 
+    
     # 7) Data table
     st.subheader("6. Underlying data")
 
     df_table = df_result.copy()
     df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-    df_table = df_table.pivot_table(
-        index="month_end",
-        columns="fund_name",
+    df_table["period"] = df_table["month_end"].dt.strftime("%b %Y")
+
+    # Funds as rows, periods as columns
+    df_pivot = df_table.pivot_table(
+        index="fund_name",
+        columns="period",
         values="metric"
-    ).sort_index()
+    ).sort_index(axis=0).sort_index(axis=1)
 
-    st.dataframe(df_table.style.format("{:.2f}"))
+    st.dataframe(df_pivot.style.format("{:.2f}"))
 
+    
 
 
 @st.cache_data(show_spinner="Loading precomputed rolling returns (funds)...")
