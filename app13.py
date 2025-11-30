@@ -63,7 +63,8 @@ def home_button():
     """Render a Home button that jumps back to the Home page."""
     if st.button("🏠 Home"):
         st.session_state["page"] = "Home"
-        st.experimental_run()
+        st.rerun()
+
 
 
 
@@ -83,7 +84,7 @@ engine = create_engine(
 def get_engine():
     return engine
 
-st.set_page_config(page_title="Fund Analytics Dashboard", layout="wide")
+#st.set_page_config(page_title="Fund Analytics Dashboard", layout="wide")
 
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
@@ -2461,17 +2462,27 @@ def portfolio_page():
         if latest_period in pivot.columns:
             pivot = pivot.sort_values(by=latest_period, ascending=False)
 
+        # Add serial number column
+        df_display = pivot.reset_index()  # company_name becomes a normal column
+        df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
+
         st.subheader("5. Portfolio holdings")
         st.caption(
             f"Rows: stocks · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
 
         def format_weight(x):
-            if pd.isna(x) or x == 0:
+            if pd.isna(x) or abs(x) < 0.0001:
                 return "-"
             return f"{x:.1f}"
 
-        st.dataframe(pivot.style.format(format_weight))
+        # Format only the weight columns; leave S.No. and company_name as-is
+        weight_cols = [c for c in df_display.columns if c not in ["S.No.", "company_name"]]
+
+        styler = df_display.style
+        styler = styler.format(format_weight, subset=weight_cols)
+
+        st.dataframe(styler)
 
 
 
