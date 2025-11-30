@@ -62,8 +62,9 @@ if not check_password():
 def home_button():
     """Render a Home button that jumps back to the Home page."""
     if st.button("🏠 Home"):
-        st.session_state["top_nav"] = "Home"
+        st.session_state["page"] = "Home"
         st.experimental_rerun()
+
 
 
 engine = create_engine(
@@ -2341,11 +2342,12 @@ def portfolio_page():
         return
 
     st.subheader("1. Select categories")
-    selected_categories = st.multiselect(
-        "Categories",
-        options=categories,
-        default=[],
-    )
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=False, key=f"port_cat_{cat}"):
+            selected_categories.append(cat)
 
     if not selected_categories:
         st.info("Select at least one category to continue.")
@@ -2463,7 +2465,14 @@ def portfolio_page():
         st.caption(
             f"Rows: stocks · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
-        st.dataframe(pivot.style.format("{:.2f}"))
+
+        def format_weight(x):
+            if pd.isna(x) or x == 0:
+                return "-"
+            return f"{x:.1f}"
+
+        st.dataframe(pivot.style.format(format_weight))
+
 
 
 def home_page():
@@ -2484,28 +2493,27 @@ def home_page():
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("📈 Performance"):
-            st.session_state["top_nav"] = "Performance"
+            st.session_state["page "] = "Performance"
             st.experimental_rerun()
     with col2:
         if st.button("📊 Fundamentals"):
-            st.session_state["top_nav"] = "Fundamentals"
+            st.session_state["page"] = "Fundamentals"
             st.experimental_rerun()
     with col3:
         if st.button("📂 Portfolio"):
-            st.session_state["top_nav"] = "Portfolio"
+            st.session_state["page"] = "Portfolio"
             st.experimental_rerun()
 
 
 
 def main():
-    st.title("Fund Analytics Dashboard")
+    # default page on first load
+    if "page" not in st.session_state:
+        st.session_state["page"] = "Home"
 
-    page = st.radio(
-        "Page",
-        ["Home", "Performance", "Fundamentals", "Portfolio"],
-        horizontal=True,
-        key="top_nav",
-    )
+    page = st.session_state["page"]
+
+    st.title("Fund Analytics Dashboard")
     st.markdown("---")
 
     if page == "Home":
