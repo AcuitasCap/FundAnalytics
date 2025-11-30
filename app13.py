@@ -59,6 +59,13 @@ def check_password():
 if not check_password():
     st.stop()
 
+def home_button():
+    """Render a Home button that jumps back to the Home page."""
+    if st.button("🏠 Home"):
+        st.session_state["top_nav"] = "Home"
+        st.experimental_rerun()
+
+
 engine = create_engine(
     "postgresql+psycopg2://",
     connect_args={
@@ -76,18 +83,6 @@ def get_engine():
     return engine
 
 st.set_page_config(page_title="Fund Analytics Dashboard", layout="wide")
-
-st.title("Fund Analytics Dashboard")
-
-# Simple top navigation
-page = st.radio(
-    "Page",
-    ["Performance", "Portfolio fundamentals"],
-    horizontal=True,
-    key="top_nav",
-)
-st.markdown("---")
-
 
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
@@ -287,7 +282,55 @@ def compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice):
     return result
 
 
+def fetch_fund_portfolio_timeseries(fund_id, start_date, end_date, freq):
+    """
+    Fetch portfolio holdings for a single fund between start_date and end_date.
+
+    freq: "Monthly", "Quarterly", "Yearly"
+    """
+    engine = get_engine()
+    query = text("""
+        SELECT
+            fp.month_end,
+            fp.isin,
+            fp.holding_weight AS weight_pct,
+            sm.company_name
+        FROM fundlab.fund_portfolio fp
+        JOIN fundlab.stock_master sm
+          ON fp.isin = sm.isin
+        WHERE fp.fund_id = :fund_id
+          AND fp.month_end BETWEEN :start_date AND :end_date
+        ORDER BY fp.month_end, sm.company_name;
+    """)
+
+    df = pd.read_sql(
+        query,
+        engine,
+        params={
+            "fund_id": fund_id,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    )
+
+    if df.empty:
+        return df
+
+    df["month_end"] = pd.to_datetime(df["month_end"]).dt.date
+
+    # Apply frequency filter
+    if freq == "Quarterly":
+        df = df[df["month_end"].apply(lambda d: d.month in (3, 6, 9, 12))]
+    elif freq == "Yearly":
+        # Use the same month as end_date for yearly snapshots (e.g. every Mar or every Sep)
+        end_month = end_date.month
+        df = df[df["month_end"].apply(lambda d: d.month == end_month)]
+
+    return df
+
+
 def portfolio_fundamentals_page():
+    home_button()
     st.header("Portfolio fundamentals – RoE / RoCE")
 
     # 1) Category selector (checkboxes)
@@ -1481,6 +1524,7 @@ def _read_any(uploaded_file):
 
 # 🔄 Load from PostgreSQL instead of file upload
 def performance_page():
+    home_button()
     raw_funds_df = load_funds_from_db()
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")
@@ -2279,8 +2323,203 @@ def performance_page():
                 st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
 
 
+def portfolio_page():
+    home_button()
+    st.header("Portfolio explorer")
+
+    # Mode selector
+    mode = st.selectbox("Mode", ["View portfolio", "Active share"])
+
+    if mode == "Active share":
+        st.info("Active share view will be implemented next.")
+        return
+
+    # === View portfolio ===
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found.")
+        return
+
+    st.subheader("1. Select categories")
+    selected_categories = st.multiselect(
+        "Categories",
+        options=categories,
+        default=[],
+    )
+
+    if not selected_categories:
+        st.info("Select at least one category to continue.")
+        return
+
+    funds_df = fetch_funds_for_categories(selected_categories)
+    if funds_df.empty:
+        st.warning("No funds found for the selected categories.")
+        return
+
+    st.subheader("2. Select fund")
+
+    # Handle either 'category_name' or 'category' depending on your fetch_funds_for_categories
+    cat_col = "category_name" if "category_name" in funds_df.columns else "category"
+
+    fund_options = {
+        f"{row['fund_name']} ({row[cat_col]})": row["fund_id"]
+        for _, row in funds_df.iterrows()
+    }
+
+    fund_label = st.selectbox("Fund", options=list(fund_options.keys()))
+    fund_id = fund_options[fund_label]
+
+    # 3. Period selection
+    st.subheader("3. Select period")
+
+    current_year = dt.date.today().year
+    years = list(range(current_year - 15, current_year + 1))
+    month_options = list(range(1, 13))
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.selectbox(
+            "Start year",
+            options=years,
+            index=0,
+            key="port_start_year",
+        )
+        start_month = st.selectbox(
+            "Start month",
+            options=month_options,
+            index=0,
+            key="port_start_month",
+            format_func=lambda m: month_names[m - 1],
+        )
+    with col2:
+        end_year = st.selectbox(
+            "End year",
+            options=years,
+            index=len(years) - 1,
+            key="port_end_year",
+        )
+        end_month = st.selectbox(
+            "End month",
+            options=month_options,
+            index=11,
+            key="port_end_month",
+            format_func=lambda m: month_names[m - 1],
+        )
+
+    start_date = month_year_to_last_day(start_year, start_month)
+    end_date = month_year_to_last_day(end_year, end_month)
+
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        return
+
+    # 4. Frequency selection
+    st.subheader("4. Frequency")
+    freq = st.radio(
+        "Aggregation",
+        options=["Monthly", "Quarterly", "Yearly"],
+        horizontal=True,
+    )
+
+    # 5. Action button
+    if st.button("Show portfolio"):
+        with st.spinner("Loading portfolio..."):
+            df = fetch_fund_portfolio_timeseries(fund_id, start_date, end_date, freq)
+
+        if df.empty:
+            st.warning("No portfolio data found for this fund and period.")
+            return
+
+        # Build pivot table: rows = stock names, columns = periods, values = weights
+        df["period"] = pd.to_datetime(df["month_end"]).dt.strftime("%b %Y")
+
+        # Ensure column order is chronological
+        period_order_df = (
+            df[["period", "month_end"]]
+            .drop_duplicates()
+            .sort_values("month_end")
+        )
+        period_order = period_order_df["period"].tolist()
+
+        pivot = df.pivot_table(
+            index="company_name",
+            columns="period",
+            values="weight_pct",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+
+        # Align columns to chronological order
+        pivot = pivot.reindex(columns=period_order)
+
+        # Sort rows by latest period weight (desc)
+        latest_period = period_order[-1]
+        if latest_period in pivot.columns:
+            pivot = pivot.sort_values(by=latest_period, ascending=False)
+
+        st.subheader("5. Portfolio holdings")
+        st.caption(
+            f"Rows: stocks · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
+        )
+        st.dataframe(pivot.style.format("{:.2f}"))
+
+
+def home_page():
+    st.subheader("Welcome to the Fund Analytics Dashboard")
+
+    st.markdown(
+        """
+        This app currently has three main sections:
+
+        - **Performance** – NAV-based rolling returns, yearly returns, P2P, and PDF export.
+        - **Fundamentals** – Portfolio-level RoE / RoCE using stock-level metrics and portfolios.
+        - **Portfolio** – Holdings explorer (and soon, Active Share).
+
+        Use the links below to jump directly to a section.
+                """
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("📈 Performance"):
+            st.session_state["top_nav"] = "Performance"
+            st.experimental_rerun()
+    with col2:
+        if st.button("📊 Fundamentals"):
+            st.session_state["top_nav"] = "Fundamentals"
+            st.experimental_rerun()
+    with col3:
+        if st.button("📂 Portfolio"):
+            st.session_state["top_nav"] = "Portfolio"
+            st.experimental_rerun()
+
+
+
+def main():
+    st.title("Fund Analytics Dashboard")
+
+    page = st.radio(
+        "Page",
+        ["Home", "Performance", "Fundamentals", "Portfolio"],
+        horizontal=True,
+        key="top_nav",
+    )
+    st.markdown("---")
+
+    if page == "Home":
+        home_page()
+    elif page == "Performance":
+        performance_page()
+    elif page == "Fundamentals":
+        portfolio_fundamentals_page()
+    elif page == "Portfolio":
+        portfolio_page()
+
+
+
 # ------------------------ Router ------------------------
-if page == "Performance":
-    performance_page()
-elif page == "Portfolio fundamentals":
-    portfolio_fundamentals_page()
+if  __name__ == "__main__":
+    main()
+    
