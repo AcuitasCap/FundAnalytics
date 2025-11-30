@@ -63,7 +63,7 @@ def home_button():
     """Render a Home button that jumps back to the Home page."""
     if st.button("🏠 Home"):
         st.session_state["page"] = "Home"
-        st.experimental_rerun()
+        st.experimental_run()
 
 
 
@@ -2494,15 +2494,15 @@ def home_page():
     with col1:
         if st.button("📈 Performance"):
             st.session_state["page "] = "Performance"
-            st.experimental_rerun()
+            st.rerun()
     with col2:
         if st.button("📊 Fundamentals"):
             st.session_state["page"] = "Fundamentals"
-            st.experimental_rerun()
+            st.rerun()
     with col3:
         if st.button("📂 Portfolio"):
             st.session_state["page"] = "Portfolio"
-            st.experimental_rerun()
+            st.rerun()
 
 
 
