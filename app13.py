@@ -2504,7 +2504,7 @@ def home_page():
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("📈 Performance"):
-            st.session_state["page "] = "Performance"
+            st.session_state["page"] = "Performance"
             st.rerun()
     with col2:
         if st.button("📊 Fundamentals"):
@@ -2518,13 +2518,13 @@ def home_page():
 
 
 def main():
-    # default page on first load
+    # Initialise page once
     if "page" not in st.session_state:
         st.session_state["page"] = "Home"
 
     page = st.session_state["page"]
 
-    #st.title("Fund Analytics Dashboard")
+    st.title("Fund Analytics Dashboard")
     st.markdown("---")
 
     if page == "Home":
@@ -2535,6 +2535,7 @@ def main():
         portfolio_fundamentals_page()
     elif page == "Portfolio":
         portfolio_page()
+
 
 
 
