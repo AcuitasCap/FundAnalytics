@@ -403,9 +403,20 @@ def validate_fund_portfolios(df_raw: pd.DataFrame):
     return df, summary
 
 def upload_fund_portfolios(df: pd.DataFrame):
+    """
+    Upload cleaned fund portfolio data into fundlab.fund_portfolio.
+
+    Expected canonical columns in df:
+      - scheme_name
+      - month_end      (python date)
+      - holding_pct    (0–100)
+      - asset_type
+      - isin
+      - instrument     (used for instrument_name in DB)
+    """
     engine = get_engine()
     with engine.begin() as conn:
-        # Ensure funds exist
+        # 1) Ensure funds exist
         schemes = sorted(set(df["scheme_name"]))
         if schemes:
             conn.execute(
@@ -417,29 +428,43 @@ def upload_fund_portfolios(df: pd.DataFrame):
                 {"names": schemes},
             )
 
-        # Upsert portfolios
+        # 2) Upsert portfolios
         ins = text("""
             INSERT INTO fundlab.fund_portfolio (
-                fund_id, month_end, instrument, holding_weight, asset_type, isin
+                fund_id,
+                month_end,
+                instrument_name,
+                holding_weight,
+                asset_type,
+                isin
             )
-            SELECT f.fund_id, :d, :instr, :w, :asset, :isin
+            SELECT
+                f.fund_id,
+                :d,
+                :instr,
+                :w,
+                :asset,
+                :isin
             FROM fundlab.fund f
             WHERE f.fund_name = :name
-            ON CONFLICT (fund_id, month_end, isin, asset_type) DO UPDATE
+            ON CONFLICT (fund_id, month_end, instrument_name, asset_type)
+            DO UPDATE
             SET holding_weight = EXCLUDED.holding_weight
         """)
+
         for _, r in df.iterrows():
             conn.execute(
                 ins,
                 {
                     "name": r["scheme_name"],
                     "d": r["month_end"],
-                    "instr": r["instrument"],
+                    "instr": r["instrument"],         # <- mapped to instrument_name column
                     "w": float(r["holding_pct"]),
                     "asset": r["asset_type"],
                     "isin": r["isin"],
                 },
             )
+
 
 
 #Update Supabase with Stock ISIN, industry, financial/non-financial
