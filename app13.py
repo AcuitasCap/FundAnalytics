@@ -66,7 +66,7 @@ def home_button():
         st.rerun()
 
 
-
+st.set_page_config(page_title="", layout="wide")
 
 engine = create_engine(
     "postgresql+psycopg2://",
@@ -84,7 +84,6 @@ engine = create_engine(
 def get_engine():
     return engine
 
-#st.set_page_config(page_title="Fund Analytics Dashboard", layout="wide")
 
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
