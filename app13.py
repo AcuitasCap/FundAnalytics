@@ -356,6 +356,7 @@ ALLOWED_EQUITY_ASSET_TYPES = {
     "overseas equities",
     "others equities",
     "adrs & gdrs",
+    "cash"
 }
 
 def validate_fund_portfolios(df_raw: pd.DataFrame):
