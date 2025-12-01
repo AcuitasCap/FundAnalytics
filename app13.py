@@ -22,7 +22,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-import altair as alt    
+import altair as alt
+from sqlalchemy.exc import SQLAlchemyError
+import plotly.express as px
+import plotly.graph_objects as go
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.utils import ImageReader
+
 
 def check_password():
     """Return True if the user entered the correct password."""
@@ -84,7 +91,7 @@ engine = create_engine(
 def get_engine():
     return engine
 
-
+##### HELPER FUNCTIONS RESIDE IN THIS BLOCK, <BEFORE>! THE PAGE FUNCTIONS #####
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
     if month == 12:
@@ -108,6 +115,464 @@ def load_stock_roe_roce():
     grouped = {isin: sub_df.sort_values("year_end_date").reset_index(drop=True)
                for isin, sub_df in df.groupby("isin")}
     return grouped
+
+
+def map_headers(df: pd.DataFrame, mapping: dict, required: set):
+    """
+    df: raw DataFrame from Excel
+    mapping: { logical_col: [alias1, alias2, ...] }
+    required: set of logical columns that must be present
+
+    Returns: new_df with canonical column names
+    Raises: ValueError with a clear message if missing required columns
+    """
+    clean_cols = {c: c.strip().lower() for c in df.columns}
+    col_map = {}  # physical -> logical
+
+    for logical, aliases in mapping.items():
+        found = None
+        for phys, clean in clean_cols.items():
+            if clean in aliases:
+                found = phys
+                break
+        if found:
+            col_map[found] = logical
+        elif logical in required:
+            raise ValueError(f"Missing required column for role '{logical}' (expected one of: {aliases})")
+
+    # Apply renames
+    df = df.rename(columns=col_map)
+
+    # Ensure required logical columns exist
+    missing_after = [col for col in required if col not in df.columns]
+    if missing_after:
+        raise ValueError(f"Missing required columns after mapping: {missing_after}")
+
+    return df
+
+
+def show_expected_format(upload_type: str):
+    if upload_type == "Fund NAVs":
+        st.markdown("**Expected format (Fund NAV update.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "Fund": ["ABC Flexi Cap Fund", "ABC Flexi Cap Fund"],
+                "Date": ["2024-01-31", "2024-02-29"],
+                "NAV": [145.32, 147.10],
+                "Category": ["Flexi Cap Fund", "Flexi Cap Fund"],
+                "Style": ["Growth", "Growth"],
+            }
+        )
+        st.dataframe(sample)
+    elif upload_type == "Benchmark NAVs":
+        st.markdown("**Expected format (BM NAV update.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "Benchmark": ["Nifty 50 TRI", "Nifty 50 TRI"],
+                "Date": ["2024-01-31", "2024-02-29"],
+                "NAV": [24857.23, 25210.11],
+                "Category": ["Index", "Index"],
+                "Style": ["Blend", "Blend"],
+            }
+        )
+        st.dataframe(sample)
+    elif upload_type == "Fund portfolios":
+        st.markdown("**Expected format (Fund portfolios.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "Scheme Name": ["ABC Flexi Cap Fund"],
+                "Month-end (yyyymm)": [202401],
+                "Instrument": ["Reliance Industries"],
+                "Holding (%)": [8.12],
+                "Asset type": ["Domestic Equities"],
+                "ISIN": ["INE002A01018"],
+            }
+        )
+        st.dataframe(sample)
+        st.info(
+            "Note: In 'Asset type', anything other than "
+            "'Domestic Equities', 'Overseas Equities', 'Others Equities', "
+            "and 'ADRs & GDRs' will be treated as cash and uploads with other values will be aborted."
+        )
+    elif upload_type == "Stock ISIN, industry, financial/non-financial":
+        st.markdown("**Expected format (Stock industry.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "ISIN": ["INE002A01018"],
+                "Company name": ["Reliance Industries"],
+                "Industry": ["Petroleum"],
+                "Financial?": [False],
+            }
+        )
+        st.dataframe(sample)
+    elif upload_type == "Company RoE / RoCE":
+        st.markdown("**Expected format (Stock RoE.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "ISIN": ["INE002A01018"],
+                "Company name": ["Reliance Industries"],
+                "Year-end (YYYYMM)": [202303],
+                "RoE": [10.2],
+                "RoCE": [12.8],
+            }
+        )
+        st.dataframe(sample)
+
+# Update Supabase with fund NAVs
+FUND_NAV_COLS = {
+    "fund_name": ["fund", "scheme", "scheme name", "fund_name"],
+    "nav_date": ["date", "nav date", "month_end", "month-end"],
+    "nav_value": ["nav", "nav value"],
+    "fund_category": ["category", "fund category"],
+    "fund_style": ["style", "style name"],
+}
+
+def validate_fund_navs(df_raw: pd.DataFrame):
+    required = {"fund_name", "nav_date", "nav_value"}
+    df = map_headers(df_raw.copy(), FUND_NAV_COLS, required)
+
+    # Parse dates
+    df["nav_date"] = pd.to_datetime(df["nav_date"]).dt.date
+    df["nav_value"] = pd.to_numeric(df["nav_value"], errors="coerce")
+
+    if df["nav_value"].isna().any():
+        raise ValueError("Some NAV values could not be parsed as numbers.")
+
+    # In-file duplicate check
+    dup_keys = df.groupby(["fund_name", "nav_date"]).size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(
+            f"Duplicate (fund_name, nav_date) rows found in file: {len(dups)} duplicates."
+        )
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_fund_dates": int(len(dup_keys)),
+    }
+    return df, summary
+
+def upload_fund_navs(df: pd.DataFrame):
+    engine = get_engine()
+    with engine.begin() as conn:
+        # Ensure fund names exist
+        funds = sorted(set(df["fund_name"]))
+        if funds:
+            conn.execute(
+                text("""
+                    INSERT INTO fundlab.fund (fund_name)
+                    SELECT unnest(:names)
+                    ON CONFLICT (fund_name) DO NOTHING
+                """),
+                {"names": funds},
+            )
+
+        # Upsert NAVs
+        ins = text("""
+            INSERT INTO fundlab.fund_nav (fund_id, nav_date, nav_value)
+            SELECT f.fund_id, :d, :v FROM fundlab.fund f WHERE f.fund_name = :n
+            ON CONFLICT (fund_id, nav_date) DO UPDATE
+            SET nav_value = EXCLUDED.nav_value
+        """)
+        for _, r in df.iterrows():
+            conn.execute(
+                ins,
+                {"n": r["fund_name"], "d": r["nav_date"], "v": float(r["nav_value"])},
+            )
+
+
+
+#Update Supabase with benchmark NAVs
+
+BENCH_NAV_COLS = {
+    "benchmark_name": ["benchmark", "benchmark name", "index name"],
+    "nav_date": ["date", "nav date", "month_end", "month-end"],
+    "nav_value": ["nav", "nav value"],
+    "bench_category": ["category", "index category"],
+    "bench_style": ["style", "style name"],
+}
+
+def validate_bench_navs(df_raw: pd.DataFrame):
+    required = {"benchmark_name", "nav_date", "nav_value"}
+    df = map_headers(df_raw.copy(), BENCH_NAV_COLS, required)
+
+    df["nav_date"] = pd.to_datetime(df["nav_date"]).dt.date
+    df["nav_value"] = pd.to_numeric(df["nav_value"], errors="coerce")
+    if df["nav_value"].isna().any():
+        raise ValueError("Some NAV values could not be parsed as numbers.")
+
+    dup_keys = df.groupby(["benchmark_name", "nav_date"]).size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(
+            f"Duplicate (benchmark_name, nav_date) rows found in file: {len(dups)} duplicates."
+        )
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_bench_dates": int(len(dup_keys)),
+    }
+    return df, summary
+
+def upload_bench_navs(df: pd.DataFrame):
+    engine = get_engine()
+    with engine.begin() as conn:
+        benches = sorted(set(df["benchmark_name"]))
+        if benches:
+            conn.execute(
+                text("""
+                    INSERT INTO fundlab.benchmark (benchmark_name)
+                    SELECT unnest(:names)
+                    ON CONFLICT (benchmark_name) DO NOTHING
+                """),
+                {"names": benches},
+            )
+
+        ins = text("""
+            INSERT INTO fundlab.bench_nav (bench_id, nav_date, nav_value)
+            SELECT b.bench_id, :d, :v FROM fundlab.benchmark b WHERE b.benchmark_name = :n
+            ON CONFLICT (bench_id, nav_date) DO UPDATE
+            SET nav_value = EXCLUDED.nav_value
+        """)
+        for _, r in df.iterrows():
+            conn.execute(
+                ins,
+                {"n": r["benchmark_name"], "d": r["nav_date"], "v": float(r["nav_value"])},
+            )
+
+
+#Update Supabase with fund portfolios
+PORT_COLS = {
+    "scheme_name": ["scheme name", "fund", "scheme", "fund_name"],
+    "month_end": ["month-end", "month end", "month-end (yyyymm)", "month-end (yyyymm)", "monthend", "month_end"],
+    "instrument": ["instrument", "security", "stock name"],
+    "holding_pct": ["holding (%)", "holding %", "weight (%)", "weight"],
+    "asset_type": ["asset type", "asset_type"],
+    "isin": ["isin"],
+}
+
+ALLOWED_EQUITY_ASSET_TYPES = {
+    "domestic equities",
+    "overseas equities",
+    "others equities",
+    "adrs & gdrs",
+}
+
+def validate_fund_portfolios(df_raw: pd.DataFrame):
+    required = {"scheme_name", "month_end", "instrument", "holding_pct", "asset_type", "isin"}
+    df = map_headers(df_raw.copy(), PORT_COLS, required)
+
+    # Month-end as YYYYMM → last day of month
+    df["month_end"] = pd.to_numeric(df["month_end"], errors="coerce").astype("Int64")
+    if df["month_end"].isna().any():
+        raise ValueError("Some 'Month-end' values could not be parsed as YYYYMM.")
+
+    df["month_end"] = df["month_end"].astype(int).astype(str)
+    df["month_end"] = pd.to_datetime(df["month_end"] + "01", format="%Y%m%d") + pd.offsets.MonthEnd(0)
+    df["month_end"] = df["month_end"].dt.date
+
+    df["holding_pct"] = pd.to_numeric(df["holding_pct"], errors="coerce")
+    if df["holding_pct"].isna().any():
+        raise ValueError("Some holding percentages could not be parsed as numbers.")
+
+    # Asset type check
+    invalid_asset_types = set(
+        a for a in df["asset_type"].dropna().str.strip()
+        if a.lower() not in ALLOWED_EQUITY_ASSET_TYPES
+    )
+    if invalid_asset_types:
+        raise ValueError(
+            "Invalid asset type(s) detected: "
+            + ", ".join(sorted(invalid_asset_types))
+            + ". Only Domestic Equities, Overseas Equities, Others Equities and ADRs & GDRs are allowed; others must be tagged as cash in the source file."
+        )
+
+    # In-file duplicate check
+    dup_keys = df.groupby(["scheme_name", "month_end", "isin"]).size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(
+            f"Duplicate (scheme_name, month_end, isin) rows found in file: {len(dups)} duplicates."
+        )
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_scheme_month_isin": int(len(dup_keys)),
+    }
+    return df, summary
+
+def upload_fund_portfolios(df: pd.DataFrame):
+    engine = get_engine()
+    with engine.begin() as conn:
+        # Ensure funds exist
+        schemes = sorted(set(df["scheme_name"]))
+        if schemes:
+            conn.execute(
+                text("""
+                    INSERT INTO fundlab.fund (fund_name)
+                    SELECT unnest(:names)
+                    ON CONFLICT (fund_name) DO NOTHING
+                """),
+                {"names": schemes},
+            )
+
+        # Upsert portfolios
+        ins = text("""
+            INSERT INTO fundlab.fund_portfolio (
+                fund_id, month_end, instrument, holding_weight, asset_type, isin
+            )
+            SELECT f.fund_id, :d, :instr, :w, :asset, :isin
+            FROM fundlab.fund f
+            WHERE f.fund_name = :name
+            ON CONFLICT (fund_id, month_end, isin, asset_type) DO UPDATE
+            SET holding_weight = EXCLUDED.holding_weight
+        """)
+        for _, r in df.iterrows():
+            conn.execute(
+                ins,
+                {
+                    "name": r["scheme_name"],
+                    "d": r["month_end"],
+                    "instr": r["instrument"],
+                    "w": float(r["holding_pct"]),
+                    "asset": r["asset_type"],
+                    "isin": r["isin"],
+                },
+            )
+
+
+#Update Supabase with Stock ISIN, industry, financial/non-financial
+STOCK_MASTER_COLS = {
+    "isin": ["isin"],
+    "company_name": ["company name", "company_name", "name"],
+    "industry": ["industry", "sector"],
+    "financial_flag": ["financial?", "financial", "is_financial"],
+}
+
+FINANCIAL_INDUSTRIES = {
+    "finance - stock broking",
+    "finance - housing",
+    "finance - nbfc",
+    "finance - asset management",
+    "finance - investment",
+    "bank - public",
+    "finance - others",
+    "bank - private",
+    "insurance",
+    "finance term lending",
+    "fintech",
+}
+
+def validate_stock_master(df_raw: pd.DataFrame):
+    required = {"isin", "company_name", "industry"}
+    df = map_headers(df_raw.copy(), STOCK_MASTER_COLS, required)
+
+    df["isin"] = df["isin"].astype(str).str.strip()
+    df["company_name"] = df["company_name"].astype(str).str.strip()
+    df["industry"] = df["industry"].astype(str).str.strip()
+
+    # Force financial flag based on industry
+    df["is_financial"] = df["industry"].str.lower().isin(FINANCIAL_INDUSTRIES)
+
+    dup_keys = df.groupby("isin").size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(f"Duplicate ISINs found in file: {len(dups)} duplicates.")
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_isins": int(len(dup_keys)),
+        "financial_true": int(df["is_financial"].sum()),
+    }
+    return df, summary
+
+def upload_stock_master(df: pd.DataFrame):
+    engine = get_engine()
+    with engine.begin() as conn:
+        ins = text("""
+            INSERT INTO fundlab.stock_master (isin, company_name, industry, is_financial)
+            VALUES (:isin, :name, :industry, :fin)
+            ON CONFLICT (isin) DO UPDATE
+            SET company_name = EXCLUDED.company_name,
+                industry = EXCLUDED.industry,
+                is_financial = EXCLUDED.is_financial
+        """)
+        for _, r in df.iterrows():
+            conn.execute(
+                ins,
+                {
+                    "isin": r["isin"],
+                    "name": r["company_name"],
+                    "industry": r.get("industry"),
+                    "fin": bool(r["is_financial"]),
+                },
+            )
+
+
+#Update Supabase with Company RoE / RoCE
+ROE_ROCE_COLS = {
+    "isin": ["isin"],
+    "company_name": ["company name", "company_name", "name"],
+    "year_end": ["year-end (yyyymm)", "year end (yyyymm)", "year_end", "yearend", "yyyymm"],
+    "roe": ["roe"],
+    "roce": ["roce"],
+}
+
+def validate_roe_roce(df_raw: pd.DataFrame):
+    required = {"isin", "year_end"}
+    df = map_headers(df_raw.copy(), ROE_ROCE_COLS, required)
+
+    df["isin"] = df["isin"].astype(str).str.strip()
+
+    df["year_end"] = pd.to_numeric(df["year_end"], errors="coerce").astype("Int64")
+    if df["year_end"].isna().any():
+        raise ValueError("Some year-end values could not be parsed as YYYYMM.")
+
+    # Convert YYYYMM to date (last day of month)
+    df["year_end"] = df["year_end"].astype(int).astype(str)
+    df["year_end_date"] = pd.to_datetime(df["year_end"] + "01", format="%Y%m%d") + pd.offsets.MonthEnd(0)
+    df["year_end_date"] = df["year_end_date"].dt.date
+
+    for col in ("roe", "roce"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = pd.NA
+
+    dup_keys = df.groupby(["isin", "year_end_date"]).size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(f"Duplicate (isin, year_end_date) rows found in file: {len(dups)} duplicates.")
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_isin_year": int(len(dup_keys)),
+    }
+    return df, summary
+
+def upload_roe_roce(df: pd.DataFrame):
+    engine = get_engine()
+    with engine.begin() as conn:
+        ins = text("""
+            INSERT INTO fundlab.stock_roe_roce (isin, year_end_date, roe, roce, company_name)
+            VALUES (:isin, :d, :roe, :roce, :name)
+            ON CONFLICT (isin, year_end_date) DO UPDATE
+            SET roe = COALESCE(EXCLUDED.roe, stock_roe_roce.roe),
+                roce = COALESCE(EXCLUDED.roce, stock_roe_roce.roce),
+                company_name = COALESCE(EXCLUDED.company_name, stock_roe_roce.company_name)
+        """)
+        for _, r in df.iterrows():
+            conn.execute(
+                ins,
+                {
+                    "isin": r["isin"],
+                    "d": r["year_end_date"],
+                    "roe": None if pd.isna(r.get("roe")) else float(r["roe"]),
+                    "roce": None if pd.isna(r.get("roce")) else float(r["roce"]),
+                    "name": r.get("company_name"),
+                },
+            )
+
 
 
 def get_median_metric_for_stock(roe_roce_dict, isin, eval_date, is_financial):
@@ -454,181 +919,7 @@ def compute_active_share_series(df_all, fund_props_A, fund_props_B):
     df = pd.DataFrame.from_records(records)
     df = df.sort_values("period_date")
     return df
-
-
-
-def portfolio_fundamentals_page():
-    home_button()
-    st.header("Portfolio fundamentals – RoE / RoCE")
-
-    # 1) Category selector (checkboxes)
-    categories = fetch_categories()
-    if not categories:
-        st.warning("No categories found in fund_master.")
-        return
-
-    st.subheader("1. Select categories")
-    selected_categories = []
-    cols = st.columns(min(4, len(categories)))
-    for i, cat in enumerate(categories):
-        col = cols[i % len(cols)]
-        if col.checkbox(cat, value=False, key=f"cat_{cat}"):
-            selected_categories.append(cat)
-
-    if not selected_categories:
-        st.info("Please select at least one category.")
-        return
-
-    # 2) Fund multi-select
-    st.subheader("2. Select funds")
-    funds_df = fetch_funds_for_categories(selected_categories)
-    if funds_df.empty:
-        st.warning("No funds found for selected categories.")
-        return
-
-    fund_options = {
-    f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
-    for _, row in funds_df.iterrows()
-    }
-
-
-    selected_fund_labels = st.multiselect(
-        "Funds",
-        options=list(fund_options.keys()),
-        default=[]  # Default none selected
-    )
-    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
-
-    if not selected_fund_ids:
-        st.info("Please select at least one fund.")
-        return
-
-    # 3) Date range selectors (month & year separately)
-    st.subheader("3. Select period (March / September portfolios only)")
-
-    current_year = dt.date.today().year
-    years = list(range(current_year - 15, current_year + 1))
-
-    month_options = [3, 9]  # Mar, Sep
-
-    col1, col2 = st.columns(2)
-    with col1:
-        start_year = st.selectbox("Start year", options=years, index=0, key="pf_start_year")
-        start_month = st.selectbox(
-            "Start month",
-            options=month_options,
-            index=0,  # default: Mar
-            key="pf_start_month",
-            format_func=lambda m: "Mar" if m == 3 else "Sep",
-        )
-    with col2:
-        end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="pf_end_year")
-        end_month = st.selectbox(
-            "End month",
-            options=month_options,
-            index=1,  # default: Sep
-            key="pf_end_month",
-            format_func=lambda m: "Mar" if m == 3 else "Sep",
-        )
-
-
-    start_date = month_year_to_last_day(start_year, start_month)
-    end_date = month_year_to_last_day(end_year, end_month)
-
-    if start_date > end_date:
-        st.error("Start date must be earlier than end date.")
-        return
-
-    # 4) Segment radio buttons
-    st.subheader("4. Segment")
-    segment_choice = st.radio(
-        "Show metrics for:",
-        options=["Financials", "Non-financials", "Total"],
-        horizontal=True
-    )
-
-    # 5) Fetch data & compute
-    with st.spinner("Computing portfolio fundamentals..."):
-        roe_roce_dict = load_stock_roe_roce()
-        df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
-        if df_portfolio.empty:
-            st.warning("No portfolio data found for selected funds and period.")
-            return
-
-        df_result = compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice)
-
-    if df_result.empty:
-        st.warning("No fundamentals could be computed (check data availability).")
-        return
-
-    # 6) Line chart
-    st.subheader("5. RoE / RoCE time series")
-
-    df_chart = df_result.dropna(subset=["metric"]).copy()
-    df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
-
-    if df_chart.empty:
-        st.info("No data to plot for selected filters.")
-    else:
-        # Robust y-axis domain so differences are clearly visible
-        y_min = float(df_chart["metric"].min())
-        y_max = float(df_chart["metric"].max())
-        if y_min == y_max:
-            padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
-            domain = (y_min - padding, y_max + padding)
-        else:
-            padding = (y_max - y_min) * 0.1
-            domain = (y_min - padding, y_max + padding)
-
-        chart = (
-            alt.Chart(df_chart)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X(
-                    "month_end:T",
-                    title="Period",
-                    axis=alt.Axis(format="%b %Y", labelAngle=-45),  # e.g., "Mar 2018"
-                ),
-                y=alt.Y(
-                    "metric:Q",
-                    title="RoE / RoCE (%)",
-                    scale=alt.Scale(domain=domain),
-                ),
-                color=alt.Color("fund_name:N", title="Fund"),
-                tooltip=[
-                    alt.Tooltip("fund_name:N", title="Fund"),
-                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                    alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
-                ],
-            )
-            .properties(height=400)
-        )
-
-        st.altair_chart(chart, use_container_width=True)
-
-    
-    # 7) Data table
-    st.subheader("6. Underlying data")
-
-    df_table = df_result.copy()
-    df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-
-    # Use the actual date for column ordering
-    df_table["period_date"] = df_table["month_end"]
-
-    df_pivot = df_table.pivot_table(
-        index="fund_name",
-        columns="period_date",
-        values="metric"
-    ).sort_index(axis=0).sort_index(axis=1)
-
-    # After sorting, relabel columns as "Mar 2018", "Sep 2018", etc.
-    df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
-
-    st.dataframe(df_pivot.style.format("{:.2f}"))
-
-
-    
+ 
 
 
 @st.cache_data(show_spinner="Loading precomputed rolling returns (funds)...")
@@ -858,11 +1149,6 @@ def yearly_returns_with_custom_domain(
 
     return pd.Series(out_vals, index=out_idx, dtype=float)
 
-import plotly.express as px
-import plotly.graph_objects as go
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.utils import ImageReader
 
 
 
@@ -2451,6 +2737,177 @@ def performance_page():
                 st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
 
 
+def portfolio_fundamentals_page():
+    home_button()
+    st.header("Portfolio fundamentals – RoE / RoCE")
+
+    # 1) Category selector (checkboxes)
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found in fund_master.")
+        return
+
+    st.subheader("1. Select categories")
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=False, key=f"cat_{cat}"):
+            selected_categories.append(cat)
+
+    if not selected_categories:
+        st.info("Please select at least one category.")
+        return
+
+    # 2) Fund multi-select
+    st.subheader("2. Select funds")
+    funds_df = fetch_funds_for_categories(selected_categories)
+    if funds_df.empty:
+        st.warning("No funds found for selected categories.")
+        return
+
+    fund_options = {
+    f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
+    for _, row in funds_df.iterrows()
+    }
+
+
+    selected_fund_labels = st.multiselect(
+        "Funds",
+        options=list(fund_options.keys()),
+        default=[]  # Default none selected
+    )
+    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
+
+    if not selected_fund_ids:
+        st.info("Please select at least one fund.")
+        return
+
+    # 3) Date range selectors (month & year separately)
+    st.subheader("3. Select period (March / September portfolios only)")
+
+    current_year = dt.date.today().year
+    years = list(range(current_year - 15, current_year + 1))
+
+    month_options = [3, 9]  # Mar, Sep
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.selectbox("Start year", options=years, index=0, key="pf_start_year")
+        start_month = st.selectbox(
+            "Start month",
+            options=month_options,
+            index=0,  # default: Mar
+            key="pf_start_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
+    with col2:
+        end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="pf_end_year")
+        end_month = st.selectbox(
+            "End month",
+            options=month_options,
+            index=1,  # default: Sep
+            key="pf_end_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
+
+
+    start_date = month_year_to_last_day(start_year, start_month)
+    end_date = month_year_to_last_day(end_year, end_month)
+
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        return
+
+    # 4) Segment radio buttons
+    st.subheader("4. Segment")
+    segment_choice = st.radio(
+        "Show metrics for:",
+        options=["Financials", "Non-financials", "Total"],
+        horizontal=True
+    )
+
+    # 5) Fetch data & compute
+    with st.spinner("Computing portfolio fundamentals..."):
+        roe_roce_dict = load_stock_roe_roce()
+        df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
+        if df_portfolio.empty:
+            st.warning("No portfolio data found for selected funds and period.")
+            return
+
+        df_result = compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice)
+
+    if df_result.empty:
+        st.warning("No fundamentals could be computed (check data availability).")
+        return
+
+    # 6) Line chart
+    st.subheader("5. RoE / RoCE time series")
+
+    df_chart = df_result.dropna(subset=["metric"]).copy()
+    df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
+
+    if df_chart.empty:
+        st.info("No data to plot for selected filters.")
+    else:
+        # Robust y-axis domain so differences are clearly visible
+        y_min = float(df_chart["metric"].min())
+        y_max = float(df_chart["metric"].max())
+        if y_min == y_max:
+            padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
+            domain = (y_min - padding, y_max + padding)
+        else:
+            padding = (y_max - y_min) * 0.1
+            domain = (y_min - padding, y_max + padding)
+
+        chart = (
+            alt.Chart(df_chart)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(
+                    "month_end:T",
+                    title="Period",
+                    axis=alt.Axis(format="%b %Y", labelAngle=-45),  # e.g., "Mar 2018"
+                ),
+                y=alt.Y(
+                    "metric:Q",
+                    title="RoE / RoCE (%)",
+                    scale=alt.Scale(domain=domain),
+                ),
+                color=alt.Color("fund_name:N", title="Fund"),
+                tooltip=[
+                    alt.Tooltip("fund_name:N", title="Fund"),
+                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                    alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
+                ],
+            )
+            .properties(height=400)
+        )
+
+        st.altair_chart(chart, use_container_width=True)
+
+    
+    # 7) Data table
+    st.subheader("6. Underlying data")
+
+    df_table = df_result.copy()
+    df_table["month_end"] = pd.to_datetime(df_table["month_end"])
+
+    # Use the actual date for column ordering
+    df_table["period_date"] = df_table["month_end"]
+
+    df_pivot = df_table.pivot_table(
+        index="fund_name",
+        columns="period_date",
+        values="metric"
+    ).sort_index(axis=0).sort_index(axis=1)
+
+    # After sorting, relabel columns as "Mar 2018", "Sep 2018", etc.
+    df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
+
+    st.dataframe(df_pivot.style.format("{:.2f}"))
+
+
 def portfolio_page():
     home_button()
     st.header("Portfolio explorer")
@@ -2885,6 +3342,107 @@ def active_share_subpage():
         st.dataframe(df_horizontal.style.format("{:.1f}"))
 
 
+def update_db_page():
+    home_button()
+    st.header("Update underlying data")
+
+    upload_type = st.selectbox(
+        "What would you like to update?",
+        [
+            "Fund NAVs",
+            "Benchmark NAVs",
+            "Fund portfolios",
+            "Stock ISIN, industry, financial/non-financial",
+            "Company RoE / RoCE",
+            "Stock prices and market cap (stub)",
+            "Company sales, book value, PAT (stub)",
+        ],
+    )
+
+    # Single file upload for the chosen type
+    uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], key=f"upload_{upload_type}")
+
+    # Show expected format preview
+    show_expected_format(upload_type)
+
+    if not uploaded:
+        st.info("Please upload the appropriate Excel file to continue.")
+        return
+
+    # Read the file into a DataFrame
+    try:
+        df_raw = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Could not read Excel file: {e}")
+        return
+
+    # Dry-run + upload pipeline
+    if upload_type in ("Stock prices and market cap (stub)", "Company sales, book value, PAT (stub)"):
+        st.warning("This uploader is a stub. Format and ingestion are not yet implemented.")
+        return
+
+    # State keys to remember validated data
+    state_key_df = f"validated_df_{upload_type}"
+    state_key_ok = f"validated_ok_{upload_type}"
+
+    # Dry run button
+    if st.button("Validate (dry run)"):
+        try:
+            if upload_type == "Fund NAVs":
+                df_clean, summary = validate_fund_navs(df_raw)
+            elif upload_type == "Benchmark NAVs":
+                df_clean, summary = validate_bench_navs(df_raw)
+            elif upload_type == "Fund portfolios":
+                df_clean, summary = validate_fund_portfolios(df_raw)
+            elif upload_type == "Stock ISIN, industry, financial/non-financial":
+                df_clean, summary = validate_stock_master(df_raw)
+            elif upload_type == "Company RoE / RoCE":
+                df_clean, summary = validate_roe_roce(df_raw)
+            else:
+                st.error("Unsupported upload type.")
+                return
+
+            st.session_state[state_key_df] = df_clean
+            st.session_state[state_key_ok] = True
+
+            st.success("Dry run successful. No critical format errors detected.")
+            st.write("Summary:")
+            st.json(summary)
+
+        except ValueError as ve:
+            st.error(f"Validation error: {ve}")
+            st.session_state[state_key_ok] = False
+            return
+        except Exception as e:
+            st.error(f"Unexpected error during validation: {e}")
+            st.session_state[state_key_ok] = False
+            return
+
+    # Upload button (only if validation passed)
+    if st.session_state.get(state_key_ok):
+        if st.button("Confirm upload to database"):
+            df_clean = st.session_state.get(state_key_df)
+            if df_clean is None:
+                st.error("No validated data found in session. Please run validation again.")
+                return
+
+            try:
+                if upload_type == "Fund NAVs":
+                    upload_fund_navs(df_clean)
+                elif upload_type == "Benchmark NAVs":
+                    upload_bench_navs(df_clean)
+                elif upload_type == "Fund portfolios":
+                    upload_fund_portfolios(df_clean)
+                elif upload_type == "Stock ISIN, industry, financial/non-financial":
+                    upload_stock_master(df_clean)
+                elif upload_type == "Company RoE / RoCE":
+                    upload_roe_roce(df_clean)
+                st.success("✅ Upload completed successfully.")
+            except SQLAlchemyError as e:
+                st.error(f"Database error while uploading: {e.__class__.__name__}: {getattr(e, 'orig', e)}")
+            except Exception as e:
+                st.error(f"Unexpected error during upload: {e}")
+
 
 
 def home_page():
@@ -2915,6 +3473,10 @@ def home_page():
         if st.button("📂 Portfolio"):
             st.session_state["page"] = "Portfolio"
             st.rerun()
+    with col4:
+        if st.button("🛠️ Update DB"):
+            st.session_state["page"] = "Update DB"
+            st.rerun()
 
 
 
@@ -2936,6 +3498,9 @@ def main():
         portfolio_fundamentals_page()
     elif page == "Portfolio":
         portfolio_page()
+    elif page == "Update DB":
+        update_db_page()
+    
 
 
 
