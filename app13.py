@@ -447,9 +447,8 @@ def upload_fund_portfolios(df: pd.DataFrame):
                 :isin
             FROM fundlab.fund f
             WHERE f.fund_name = :name
-            ON CONFLICT (fund_id, month_end, instrument_name, asset_type)
-            DO UPDATE
-            SET holding_weight = EXCLUDED.holding_weight
+            ON CONFLICT (fund_id, month_end, instrument_name, asset_type, holding_weight)
+            DO NOTHING
         """)
 
         for _, r in df.iterrows():
