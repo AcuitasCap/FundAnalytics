@@ -2896,7 +2896,7 @@ def home_page():
 
         - **Performance** – NAV-based rolling returns, yearly returns, P2P, and PDF export.
         - **Fundamentals** – Portfolio-level RoE / RoCE using stock-level metrics and portfolios.
-        - **Portfolio** – Holdings explorer (and soon, Active Share).
+        - **Portfolio** – Holdings explorer, active share, look-through.
 
         Use the links below to jump directly to a section.
                 """
