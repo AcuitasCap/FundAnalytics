@@ -330,6 +330,133 @@ def fetch_fund_portfolio_timeseries(fund_id, start_date, end_date, freq):
 
     return df
 
+# helper for active share calculations
+def fetch_multi_fund_portfolios(fund_ids, start_date, end_date, freq):
+    """
+    Fetch portfolio holdings for multiple funds between start_date and end_date.
+
+    Returns: DataFrame with columns:
+      fund_id, month_end, isin, weight_pct
+    freq: "Monthly", "Quarterly", "Yearly"
+    """
+    if not fund_ids:
+        return pd.DataFrame()
+
+    engine = get_engine()
+    query = text("""
+        SELECT
+            fp.fund_id,
+            fp.month_end,
+            fp.isin,
+            fp.holding_weight AS weight_pct
+        FROM fundlab.fund_portfolio fp
+        WHERE fp.fund_id = ANY(:fund_ids)
+          AND fp.month_end BETWEEN :start_date AND :end_date
+        ORDER BY fp.fund_id, fp.month_end, fp.isin;
+    """)
+
+    df = pd.read_sql(
+        query,
+        engine,
+        params={
+            "fund_ids": fund_ids,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    )
+
+    if df.empty:
+        return df
+
+    df["month_end"] = pd.to_datetime(df["month_end"]).dt.date
+
+    # Apply frequency filter
+    if freq == "Quarterly":
+        df = df[df["month_end"].apply(lambda d: d.month in (3, 6, 9, 12))]
+    elif freq == "Yearly":
+        # Use the same month as end_date for yearly snapshots (e.g. every Mar or every Sep)
+        end_month = end_date.month
+        df = df[df["month_end"].apply(lambda d: d.month == end_month)]
+
+    return df
+
+
+# Build composite portfolio to compute active share
+def build_composite_portfolio(df_all, fund_prop_dict, date):
+    """
+    Build a composite portfolio for a given date.
+
+    df_all: DataFrame with columns [fund_id, month_end, isin, weight_pct]
+    fund_prop_dict: {fund_id: normalized weight (sum to 1.0)}
+    date: datetime.date
+
+    Returns: Series indexed by isin with weights summing to 1.0, or None if no data.
+    """
+    # Filter to selected funds and the given date
+    fund_ids = list(fund_prop_dict.keys())
+    sub = df_all[(df_all["fund_id"].isin(fund_ids)) & (df_all["month_end"] == date)].copy()
+
+    if sub.empty:
+        return None
+
+    sub["fund_prop"] = sub["fund_id"].map(fund_prop_dict).astype(float)
+    # raw allocation: fund weight * fund_prop
+    sub["alloc"] = sub["weight_pct"].astype(float) * sub["fund_prop"]
+
+    grouped = sub.groupby("isin")["alloc"].sum()
+    total = grouped.sum()
+    if total == 0:
+        return None
+
+    weights = grouped / total
+    return weights
+
+# Compute active share time series between two composite portfolios
+def compute_active_share_series(df_all, fund_props_A, fund_props_B):
+    """
+    df_all: DataFrame with [fund_id, month_end, isin, weight_pct]
+    fund_props_A/B: {fund_id: normalized weight (sum to 1.0)}
+
+    Returns: DataFrame with columns:
+      period_date, period_label, active_share_pct
+    """
+    if df_all.empty:
+        return pd.DataFrame(columns=["period_date", "period_label", "active_share_pct"])
+
+    dates = sorted(df_all["month_end"].unique())
+
+    records = []
+    for dt_ in dates:
+        wA = build_composite_portfolio(df_all, fund_props_A, dt_)
+        wB = build_composite_portfolio(df_all, fund_props_B, dt_)
+
+        if wA is None or wB is None:
+            active_share_pct = np.nan
+        else:
+            # union of ISINs
+            union_isins = wA.index.union(wB.index)
+            overlap = 0.0
+            for isin in union_isins:
+                wa = float(wA.get(isin, 0.0))
+                wb = float(wB.get(isin, 0.0))
+                overlap += min(wa, wb)
+
+            active_share = 1.0 - overlap  # weights are in fractions (0–1)
+            active_share_pct = active_share * 100.0
+
+        records.append(
+            {
+                "period_date": pd.to_datetime(dt_),
+                "period_label": pd.to_datetime(dt_).strftime("%b %Y"),
+                "active_share_pct": active_share_pct,
+            }
+        )
+
+    df = pd.DataFrame.from_records(records)
+    df = df.sort_values("period_date")
+    return df
+
+
 
 def portfolio_fundamentals_page():
     home_button()
@@ -2332,10 +2459,12 @@ def portfolio_page():
     # Mode selector
     mode = st.selectbox("Mode", ["View portfolio", "Active share"])
 
-    if mode == "Active share":
-        st.info("Active share view will be implemented next.")
-        return
+    if mode == "View portfolio":
+        portfolio_view_subpage()
+    else:
+        active_share_subpage()
 
+def portfolio_view_subpage():
     # === View portfolio ===
     categories = fetch_categories()
     if not categories:
@@ -2483,6 +2612,209 @@ def portfolio_page():
         styler = styler.format(format_weight, subset=weight_cols)
 
         st.dataframe(styler)
+
+
+def active_share_subpage():
+    st.subheader("Active share between two portfolios")
+
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found.")
+        return
+
+    # 1. Category selector (checkboxes, like elsewhere)
+    st.subheader("1. Select categories")
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=False, key=f"as_cat_{cat}"):
+            selected_categories.append(cat)
+
+    if not selected_categories:
+        st.info("Select at least one category to continue.")
+        return
+
+    funds_df = fetch_funds_for_categories(selected_categories)
+    if funds_df.empty:
+        st.warning("No funds found for the selected categories.")
+        return
+
+    cat_col = "category_name" if "category_name" in funds_df.columns else "category"
+
+    # Build labels
+    fund_labels = [
+        f"{row['fund_name']} ({row[cat_col]})"
+        for _, row in funds_df.iterrows()
+    ]
+    fund_label_to_id = {
+        f"{row['fund_name']} ({row[cat_col]})": row["fund_id"]
+        for _, row in funds_df.iterrows()
+    }
+
+    # 2. Two portfolio selections
+    st.subheader("2. Select funds for each portfolio")
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.markdown("**Portfolio A – Funds**")
+        selected_labels_A = st.multiselect(
+            "Funds A",
+            options=fund_labels,
+            default=[],
+            key="as_funds_A",
+        )
+    with colB:
+        st.markdown("**Portfolio B – Funds**")
+        selected_labels_B = st.multiselect(
+            "Funds B",
+            options=fund_labels,
+            default=[],
+            key="as_funds_B",
+        )
+
+    if not selected_labels_A or not selected_labels_B:
+        st.info("Select at least one fund for each portfolio to continue.")
+        return
+
+    fund_ids_A = [fund_label_to_id[label] for label in selected_labels_A]
+    fund_ids_B = [fund_label_to_id[label] for label in selected_labels_B]
+
+    # 3. Proportion tables side by side
+    st.subheader("3. Set fund proportions (%) in each portfolio")
+
+    colA, colB = st.columns(2)
+
+    props_A = {}
+    props_B = {}
+
+    with colA:
+        st.markdown("**Portfolio A composition**")
+        for label in selected_labels_A:
+            fund_id = fund_label_to_id[label]
+            props_A[fund_id] = st.number_input(
+                label,
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+                key=f"asA_{fund_id}",
+            )
+
+    with colB:
+        st.markdown("**Portfolio B composition**")
+        for label in selected_labels_B:
+            fund_id = fund_label_to_id[label]
+            props_B[fund_id] = st.number_input(
+                label,
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=1.0,
+                key=f"asB_{fund_id}",
+            )
+
+    sum_A = sum(props_A.values())
+    sum_B = sum(props_B.values())
+
+    if sum_A == 0 or sum_B == 0:
+        st.info("Please assign positive proportions to both portfolios.")
+        return
+
+    # They *should* sum to 100; enforce and show error if not close
+    if abs(sum_A - 100.0) > 0.01:
+        st.error(f"Portfolio A proportions must sum to 100. Currently: {sum_A:.1f}")
+        return
+
+    if abs(sum_B - 100.0) > 0.01:
+        st.error(f"Portfolio B proportions must sum to 100. Currently: {sum_B:.1f}")
+        return
+
+    # Normalize to 1.0
+    norm_props_A = {fid: val / 100.0 for fid, val in props_A.items()}
+    norm_props_B = {fid: val / 100.0 for fid, val in props_B.items()}
+
+    # 4. Period selection
+    st.subheader("4. Select period")
+
+    current_year = dt.date.today().year
+    years = list(range(current_year - 15, current_year + 1))
+    month_options = list(range(1, 13))
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.selectbox(
+            "Start year",
+            options=years,
+            index=0,
+            key="as_start_year",
+        )
+        start_month = st.selectbox(
+            "Start month",
+            options=month_options,
+            index=0,
+            key="as_start_month",
+            format_func=lambda m: month_names[m - 1],
+        )
+    with col2:
+        end_year = st.selectbox(
+            "End year",
+            options=years,
+            index=len(years) - 1,
+            key="as_end_year",
+        )
+        end_month = st.selectbox(
+            "End month",
+            options=month_options,
+            index=11,
+            key="as_end_month",
+            format_func=lambda m: month_names[m - 1],
+        )
+
+    start_date = month_year_to_last_day(start_year, start_month)
+    end_date = month_year_to_last_day(end_year, end_month)
+
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        return
+
+    # 5. Frequency & button
+    st.subheader("5. Frequency")
+    freq = st.radio(
+        "Aggregation",
+        options=["Monthly", "Quarterly", "Yearly"],
+        horizontal=True,
+        key="as_freq",
+    )
+
+    if st.button("Calculate active share"):
+        with st.spinner("Calculating active share..."):
+            all_fund_ids = list(set(fund_ids_A + fund_ids_B))
+            df_all = fetch_multi_fund_portfolios(all_fund_ids, start_date, end_date, freq)
+
+            if df_all.empty:
+                st.warning("No portfolio data found for the selected funds and period.")
+                return
+
+            df_as = compute_active_share_series(df_all, norm_props_A, norm_props_B)
+
+        if df_as.empty:
+            st.warning("Could not compute active share for any period.")
+            return
+
+        st.subheader("6. Active share time series")
+        df_show = df_as[["period_label", "active_share_pct"]].copy()
+        df_show = df_show.rename(
+            columns={
+                "period_label": "Period",
+                "active_share_pct": "Active share (%)",
+            }
+        )
+
+        st.dataframe(df_show.style.format({"Active share (%)": "{:.1f}"}))
 
 
 
