@@ -2925,7 +2925,7 @@ def main():
 
     page = st.session_state["page"]
 
-    st.title("Fund Analytics Dashboard")
+    #st.title("Fund Analytics Dashboard")
     st.markdown("---")
 
     if page == "Home":
