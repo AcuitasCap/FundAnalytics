@@ -2622,7 +2622,7 @@ def active_share_subpage():
         st.warning("No categories found.")
         return
 
-    # 1. Category selector (checkboxes, like elsewhere)
+    # 1. Category selector (checkboxes)
     st.subheader("1. Select categories")
     selected_categories = []
     cols = st.columns(min(4, len(categories)))
@@ -2642,7 +2642,7 @@ def active_share_subpage():
 
     cat_col = "category_name" if "category_name" in funds_df.columns else "category"
 
-    # Build labels
+    # Build labels and id map
     fund_labels = [
         f"{row['fund_name']} ({row[cat_col]})"
         for _, row in funds_df.iterrows()
@@ -2655,9 +2655,9 @@ def active_share_subpage():
     # 2. Two portfolio selections
     st.subheader("2. Select funds for each portfolio")
 
-    colA, colB = st.columns(2)
+    colA_sel, colB_sel = st.columns(2)
 
-    with colA:
+    with colA_sel:
         st.markdown("**Portfolio A – Funds**")
         selected_labels_A = st.multiselect(
             "Funds A",
@@ -2665,7 +2665,7 @@ def active_share_subpage():
             default=[],
             key="as_funds_A",
         )
-    with colB:
+    with colB_sel:
         st.markdown("**Portfolio B – Funds**")
         selected_labels_B = st.multiselect(
             "Funds B",
@@ -2681,7 +2681,7 @@ def active_share_subpage():
     fund_ids_A = [fund_label_to_id[label] for label in selected_labels_A]
     fund_ids_B = [fund_label_to_id[label] for label in selected_labels_B]
 
-    # 3. Proportion tables side by side
+    # 3. Proportion tables side by side (inputs beside names + live totals)
     st.subheader("3. Set fund proportions (%) in each portfolio")
 
     colA, colB = st.columns(2)
@@ -2693,47 +2693,64 @@ def active_share_subpage():
         st.markdown("**Portfolio A composition**")
         for label in selected_labels_A:
             fund_id = fund_label_to_id[label]
-            props_A[fund_id] = st.number_input(
-                label,
-                min_value=0.0,
-                max_value=100.0,
-                value=0.0,
-                step=1.0,
-                key=f"asA_{fund_id}",
-            )
+            row_col1, row_col2 = st.columns([4, 1])
+            with row_col1:
+                # Fixed-width, ellipsis for long names, full name on hover
+                st.markdown(
+                    f"""
+                    <div style="
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        width: 100%;
+                    " title="{label}">
+                        {label}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with row_col2:
+                props_A[fund_id] = st.number_input(
+                    "",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f"asA_{fund_id}",
+                )
+        sum_A = sum(props_A.values())
+        st.markdown(f"**Total A: {sum_A:.1f}%**")
 
     with colB:
         st.markdown("**Portfolio B composition**")
         for label in selected_labels_B:
             fund_id = fund_label_to_id[label]
-            props_B[fund_id] = st.number_input(
-                label,
-                min_value=0.0,
-                max_value=100.0,
-                value=0.0,
-                step=1.0,
-                key=f"asB_{fund_id}",
-            )
-
-    sum_A = sum(props_A.values())
-    sum_B = sum(props_B.values())
-
-    if sum_A == 0 or sum_B == 0:
-        st.info("Please assign positive proportions to both portfolios.")
-        return
-
-    # They *should* sum to 100; enforce and show error if not close
-    if abs(sum_A - 100.0) > 0.01:
-        st.error(f"Portfolio A proportions must sum to 100. Currently: {sum_A:.1f}")
-        return
-
-    if abs(sum_B - 100.0) > 0.01:
-        st.error(f"Portfolio B proportions must sum to 100. Currently: {sum_B:.1f}")
-        return
-
-    # Normalize to 1.0
-    norm_props_A = {fid: val / 100.0 for fid, val in props_A.items()}
-    norm_props_B = {fid: val / 100.0 for fid, val in props_B.items()}
+            row_col1, row_col2 = st.columns([4, 1])
+            with row_col1:
+                st.markdown(
+                    f"""
+                    <div style="
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        width: 100%;
+                    " title="{label}">
+                        {label}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with row_col2:
+                props_B[fund_id] = st.number_input(
+                    "",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=1.0,
+                    key=f"asB_{fund_id}",
+                )
+        sum_B = sum(props_B.values())
+        st.markdown(f"**Total B: {sum_B:.1f}%**")
 
     # 4. Period selection
     st.subheader("4. Select period")
@@ -2749,7 +2766,7 @@ def active_share_subpage():
         start_year = st.selectbox(
             "Start year",
             options=years,
-            index=0,
+            index=0,    
             key="as_start_year",
         )
         start_month = st.selectbox(
@@ -2790,7 +2807,24 @@ def active_share_subpage():
         key="as_freq",
     )
 
+    # 6. Calculate active share (heavy work is ONLY inside this button)
     if st.button("Calculate active share"):
+        # Check sums here (not earlier), and bail out if not 100
+        sum_A = sum(props_A.values())
+        sum_B = sum(props_B.values())
+
+        if abs(sum_A - 100.0) > 0.01:
+            st.error(f"Portfolio A proportions must sum to 100. Currently: {sum_A:.1f}%")
+            return
+
+        if abs(sum_B - 100.0) > 0.01:
+            st.error(f"Portfolio B proportions must sum to 100. Currently: {sum_B:.1f}%")
+            return
+
+        # Normalize to 1.0
+        norm_props_A = {fid: val / 100.0 for fid, val in props_A.items()}
+        norm_props_B = {fid: val / 100.0 for fid, val in props_B.items()}
+
         with st.spinner("Calculating active share..."):
             all_fund_ids = list(set(fund_ids_A + fund_ids_B))
             df_all = fetch_multi_fund_portfolios(all_fund_ids, start_date, end_date, freq)
@@ -2805,16 +2839,51 @@ def active_share_subpage():
             st.warning("Could not compute active share for any period.")
             return
 
-        st.subheader("6. Active share time series")
-        df_show = df_as[["period_label", "active_share_pct"]].copy()
-        df_show = df_show.rename(
-            columns={
-                "period_label": "Period",
-                "active_share_pct": "Active share (%)",
-            }
+        # 7. Chart + horizontal table
+        st.subheader("6. Active share over time")
+
+        # Line chart
+        df_chart = df_as.dropna(subset=["active_share_pct"]).copy()
+        if df_chart.empty:
+            st.warning("Active share is NaN for all periods.")
+            return
+
+        import altair as alt
+
+        chart = (
+            alt.Chart(df_chart)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(
+                    "period_date:T",
+                    title="Period",
+                    axis=alt.Axis(format="%b %Y", labelAngle=-45),
+                ),
+                y=alt.Y(
+                    "active_share_pct:Q",
+                    title="Active share (%)",
+                ),
+                tooltip=[
+                    alt.Tooltip("period_date:T", title="Period", format="%b %Y"),
+                    alt.Tooltip("active_share_pct:Q", title="Active share (%)", format=".1f"),
+                ],
+            )
+            .properties(height=300)
         )
 
-        st.dataframe(df_show.style.format({"Active share (%)": "{:.1f}"}))
+        st.altair_chart(chart, use_container_width=True)
+
+        # Horizontal table: one row, periods as columns
+        st.subheader("7. Active share table")
+
+        df_show = df_as[["period_label", "active_share_pct"]].copy()
+        df_horizontal = (
+            df_show.set_index("period_label")
+                   .T
+        )
+        df_horizontal.index = ["Active share (%)"]
+
+        st.dataframe(df_horizontal.style.format("{:.1f}"))
 
 
 
