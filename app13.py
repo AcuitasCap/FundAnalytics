@@ -3421,6 +3421,37 @@ def portfolio_fundamentals_page():
     df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
 
     st.dataframe(df_pivot.style.format("{:.2f}"))
+    
+    
+    # 8) Quality buckets (Q1–Q4) – exposures by month for the first selected fund
+    if selected_fund_ids:
+        # Use the same month_end universe as the RoE/RoCE results
+        month_ends_list = sorted(
+            pd.to_datetime(df_result["month_end"]).dt.date.unique()
+        )
+
+        # For now, compute bucket exposures for the first selected fund
+        fund_id = selected_fund_ids[0]
+
+        quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
+
+        st.subheader("7. Quality bucket exposures (Q1–Q4)")
+        if quality_table is None or quality_table.empty:
+            st.info(
+                "No Q1–Q4 quality bucket data available for the selected fund and period."
+            )
+        else:
+            # Optional: show which fund this refers to
+            primary_fund_label = selected_fund_labels[0]
+            st.caption(f"Quality bucket exposure for: {primary_fund_label}")
+
+            st.dataframe(
+                quality_table.style.format("{:.1f}"),
+                use_container_width=True,
+            )
+    else:
+        st.info("Select at least one fund to see quality bucket exposures.")
+
 
 
 def portfolio_page():
