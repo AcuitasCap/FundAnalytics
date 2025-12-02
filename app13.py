@@ -3316,6 +3316,13 @@ def portfolio_fundamentals_page():
         st.error("Start date must be earlier than end date.")
         return
     
+    # For now, compute Q1–Q4 quality buckets for the first selected fund
+    fund_id = selected_fund_ids[0]
+
+    primary_fund_label = selected_fund_labels[0]
+    st.caption(f"Quality bucket exposure for: {primary_fund_label}")
+
+
     quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
     if quality_table is None or quality_table.empty:
         st.info("No Q1–Q4 quality bucket data available for the selected fund and period.")
