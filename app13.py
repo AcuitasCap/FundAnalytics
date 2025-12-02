@@ -217,6 +217,19 @@ def show_expected_format(upload_type: str):
             }
         )
         st.dataframe(sample)
+    elif upload_type == "Stock prices and market cap":
+        st.markdown("**Expected format (example):**")
+        sample = pd.DataFrame(
+            {
+                "ISIN": ["INE002A01018", "INE002A01018"],
+                "Date": ["31-01-2024", "29-02-2024"],  # dd-mm-yyyy
+                "Market cap": [190000.0, 195000.0],
+                "Stock price": [2450.5, 2501.0],
+            }
+        )
+        st.dataframe(sample)
+        st.info("Dates must be in dd-mm-yyyy format. Market cap and stock price must be numeric.")
+
 
 # Update Supabase with fund NAVs
 FUND_NAV_COLS = {
@@ -613,6 +626,59 @@ def upload_roe_roce(df: pd.DataFrame):
                     "name": r.get("company_name"),
                 },
             )
+
+
+def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
+    """
+    Upload stock prices + market cap into fundlab.stock_price in batches.
+
+    Expected canonical columns in df:
+      - isin
+      - price_date  (python date)
+      - market_cap
+      - price
+
+    Primary key / unique constraint: (isin, price_date, market_cap, price)
+    ON CONFLICT DO NOTHING to avoid duplicate uploads.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        n = len(df)
+        if n == 0:
+            return
+
+        # IMPORTANT: ensure you have this unique constraint in Supabase:
+        # ALTER TABLE fundlab.stock_price
+        # ADD CONSTRAINT stock_price_unq UNIQUE (isin, price_date, market_cap, price);
+        insert_sql = text("""
+            INSERT INTO fundlab.stock_price (
+                isin,
+                price_date,
+                market_cap,
+                price
+            )
+            SELECT
+                unnest(:isins)       AS isin,
+                unnest(:dates)       AS price_date,
+                unnest(:mcaps)       AS market_cap,
+                unnest(:prices)      AS price
+            ON CONFLICT (isin, price_date, market_cap, price)
+            DO NOTHING
+        """)
+
+        # Process in chunks
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = df.iloc[start:end]
+
+            params = {
+                "isins":  list(chunk["isin"].astype(str)),
+                "dates":  list(chunk["price_date"]),                     # python date → date[]
+                "mcaps":  [float(x) for x in chunk["market_cap"]],
+                "prices": [float(x) for x in chunk["price"]],
+            }
+
+            conn.execute(insert_sql, params)
 
 
 
@@ -1080,6 +1146,15 @@ def load_bench_from_db():
     with engine.begin() as conn:
         df = pd.read_sql(query, conn, parse_dates=["month-end"])
     return df
+
+# Cache stock master ISINs for validation when uploading market cap and price data
+@st.cache_data
+def load_stock_master_isins():
+    engine = get_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql("SELECT isin FROM fundlab.stock_master", conn)
+    return set(df["isin"].astype(str))
+
 
 
 def to_eom(series):
@@ -3383,6 +3458,73 @@ def active_share_subpage():
         st.dataframe(df_horizontal.style.format("{:.1f}"))
 
 
+# Validate stock prices + market cap upload
+STOCK_PRICE_COLS = {
+    "isin":       ["isin"],
+    "price_date": ["date", "nav date", "price date", "month_end", "month-end"],
+    "market_cap": ["market cap", "mcap", "market_cap", "market capitalisation", "market capitalization"],
+    "price":      ["stock price", "price", "close", "close price", "last price"],
+}
+def validate_stock_prices_mc(df_raw: pd.DataFrame):
+    """
+    Validate stock prices + market cap upload.
+
+    Expected logical roles:
+      - isin
+      - price_date (dd-mm-yyyy)
+      - market_cap
+      - price
+    """
+    required = {"isin", "price_date", "market_cap", "price"}
+    df = map_headers(df_raw.copy(), STOCK_PRICE_COLS, required)
+
+    # Clean types
+    df["isin"] = df["isin"].astype(str).str.strip()
+
+    # Parse dd-mm-yyyy
+    try:
+        df["price_date"] = pd.to_datetime(df["price_date"], dayfirst=True).dt.date
+    except Exception as e:
+        raise ValueError(f"Could not parse dates as dd-mm-yyyy: {e}")
+
+    df["market_cap"] = pd.to_numeric(df["market_cap"], errors="coerce")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+
+    if df["market_cap"].isna().any():
+        raise ValueError("Some market cap values could not be parsed as numbers.")
+    if df["price"].isna().any():
+        raise ValueError("Some stock price values could not be parsed as numbers.")
+
+    # ------------------------------
+    # 🔥 FOREIGN KEY VALIDATION
+    # ------------------------------
+    valid_isins = load_stock_master_isins()
+    isins_in_file = set(df["isin"])
+    missing_isins = sorted(isins_in_file - valid_isins)
+
+    if missing_isins:
+        raise ValueError(
+            "The following ISINs do not exist in Stock Master:\n"
+            + "\n".join(missing_isins)
+            + "\n\n→ Please upload/update Stock Master first."
+        )
+
+    # In-file duplicate check
+    dup_keys = df.groupby(["isin", "price_date", "market_cap", "price"]).size()
+    dups = dup_keys[dup_keys > 1]
+    if not dups.empty:
+        raise ValueError(
+            f"Duplicate (isin, date, market_cap, price) rows found in file: {len(dups)} duplicates."
+        )
+
+    summary = {
+        "rows": int(len(df)),
+        "unique_isin_date_mcap_price": int(len(dup_keys)),
+    }
+    return df, summary
+
+
+
 def update_db_page():
     home_button()
     st.header("Update underlying data")
@@ -3395,7 +3537,7 @@ def update_db_page():
             "Fund portfolios",
             "Stock ISIN, industry, financial/non-financial",
             "Company RoE / RoCE",
-            "Stock prices and market cap (stub)",
+            "Stock prices and market cap",
             "Company sales, book value, PAT (stub)",
         ],
     )
@@ -3418,7 +3560,7 @@ def update_db_page():
         return
 
     # Dry-run + upload pipeline
-    if upload_type in ("Stock prices and market cap (stub)", "Company sales, book value, PAT (stub)"):
+    if upload_type == "Company sales, book value, PAT (stub)":
         st.warning("This uploader is a stub. Format and ingestion are not yet implemented.")
         return
 
@@ -3439,6 +3581,8 @@ def update_db_page():
                 df_clean, summary = validate_stock_master(df_raw)
             elif upload_type == "Company RoE / RoCE":
                 df_clean, summary = validate_roe_roce(df_raw)
+            elif upload_type == "Stock prices and market cap":
+                df_clean, summary = validate_stock_prices_mc(df_raw)
             else:
                 st.error("Unsupported upload type.")
                 return
@@ -3478,9 +3622,22 @@ def update_db_page():
                     upload_stock_master(df_clean)
                 elif upload_type == "Company RoE / RoCE":
                     upload_roe_roce(df_clean)
+                elif upload_type == "Stock prices and market cap":
+                    upload_stock_prices_mc(df_clean)
                 st.success("✅ Upload completed successfully.")
             except SQLAlchemyError as e:
-                st.error(f"Database error while uploading: {e.__class__.__name__}: {getattr(e, 'orig', e)}")
+                msg = str(getattr(e, "orig", e))
+                if "foreign key constraint" in msg.lower():
+                    st.error(
+                        "❌ Some ISINs in this file do not exist in Stock Master.\n"
+                        "Please update Stock Master before uploading stock price data.\n\n"
+                        f"Database message: {msg}"
+                    )
+                else:
+                    st.error(
+                        f"Database error while uploading:\n"
+                        f"{e.__class__.__name__}: {msg}"
+                    )
             except Exception as e:
                 st.error(f"Unexpected error during upload: {e}")
 
