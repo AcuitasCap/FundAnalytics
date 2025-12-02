@@ -1058,6 +1058,7 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     df["re_based_weight"] = df["holding_weight"] / totals * 100.0
 
     # Aggregate by quartile and month
+        # Aggregate by quartile and month
     pivot = (
         df.groupby(["quality_quartile", "month_end"])["re_based_weight"]
           .sum()
@@ -1071,7 +1072,14 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     # Pretty month labels
     pivot.columns = [pd.to_datetime(col).strftime("%b %Y") for col in pivot.columns]
 
+    # Add a 'Total' row so user can see sum of exposures
+    total_row = pivot.sum(axis=0).to_frame().T
+    total_row.index = ["Total"]
+
+    pivot = pd.concat([pivot, total_row])
+
     return pivot
+
 
 
 
@@ -3445,24 +3453,33 @@ def portfolio_fundamentals_page():
         st.info("No periods found to compute quality buckets.")
         return
 
-    # For now, compute bucket exposures for the first selected fund
-    fund_id = selected_fund_ids[0]
+    # 🔹 NEW: choose which fund to view
+    quality_fund_label = st.selectbox(
+        "Select fund for quality bucket view",
+        options=selected_fund_labels,
+        index=0,
+        key="quality_fund_select",
+    )
 
-    quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
+    # Map label → fund_id using fund_options
+    quality_fund_id = fund_options[quality_fund_label]
+
+    # Compute bucket exposures for the selected fund
+    quality_table = compute_quality_bucket_exposure(quality_fund_id, month_ends_list)
 
     if quality_table is None or quality_table.empty:
         st.info(
             "No Q1–Q4 quality bucket data available for the selected fund and period."
         )
     else:
-        # Optional: show which fund this refers to
-        primary_fund_label = selected_fund_labels[0]
-        st.caption(f"Quality bucket exposure for: {primary_fund_label}")
+        # Caption: show which fund this refers to
+        st.caption(f"Quality bucket exposure for: {quality_fund_label}")
 
         st.dataframe(
             quality_table.style.format("{:.1f}"),
             use_container_width=True,
         )
+
 
 
     
