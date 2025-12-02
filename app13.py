@@ -680,6 +680,386 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
 
             conn.execute(insert_sql, params)
 
+# Recompute Large / mid /small labels based on market cap at each end-June and end-December
+def recompute_size_bands(batch_size: int = 10000):
+    """
+    For each end-June and end-December in stock_price, rank by market_cap
+    and assign size bands: top 100 Large, next 150 Mid, rest Small.
+    Upserts into fundlab.stock_size_band.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        prices = pd.read_sql(
+            """
+            SELECT isin, price_date, market_cap
+            FROM fundlab.stock_price
+            WHERE EXTRACT(MONTH FROM price_date) IN (6, 12)
+            ORDER BY price_date, market_cap DESC
+            """,
+            conn,
+        )
+
+    if prices.empty:
+        st.warning("No stock_price data for June/December month-ends.")
+        return
+
+    # Rank by market cap within each date
+    prices["rank_by_mcap"] = (
+        prices.groupby("price_date")["market_cap"]
+        .rank(method="first", ascending=False)
+        .astype(int)
+    )
+
+    def band_for_rank(r):
+        if r <= 100:
+            return "Large"
+        elif r <= 250:
+            return "Mid"
+        else:
+            return "Small"
+
+    prices["size_band"] = prices["rank_by_mcap"].apply(band_for_rank)
+    prices = prices.rename(columns={"price_date": "band_date"})
+
+    # Batched upsert
+    insert_sql = text("""
+        INSERT INTO fundlab.stock_size_band (
+            isin,
+            band_date,
+            size_band,
+            rank_by_mcap,
+            market_cap
+        )
+        SELECT
+            unnest(:isins),
+            unnest(:band_dates),
+            unnest(:bands),
+            unnest(:ranks),
+            unnest(:mcaps)
+        ON CONFLICT (isin, band_date)
+        DO UPDATE
+        SET size_band    = EXCLUDED.size_band,
+            rank_by_mcap = EXCLUDED.rank_by_mcap,
+            market_cap   = EXCLUDED.market_cap
+    """)
+
+    with engine.begin() as conn:
+        n = len(prices)
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = prices.iloc[start:end]
+            params = {
+                "isins":      list(chunk["isin"].astype(str)),
+                "band_dates": list(chunk["band_date"]),
+                "bands":      list(chunk["size_band"].astype(str)),
+                "ranks":      list(chunk["rank_by_mcap"].astype(int)),
+                "mcaps":      [float(x) for x in chunk["market_cap"]],
+            }
+            conn.execute(insert_sql, params)
+
+
+#Compute 5 year (RoE/RoCE) medians for each stock at each month_end
+def recompute_quality_medians(batch_size: int = 10000):
+    """
+    For each stock and each month_end, compute median of last 5 RoE/RoCE
+    observations (by year_end_date <= month_end) and store in
+    fundlab.stock_quality_median.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        roe = pd.read_sql(
+            """
+            SELECT isin, year_end_date, roe, roce
+            FROM fundlab.stock_roe_roce
+            ORDER BY isin, year_end_date
+            """,
+            conn,
+        )
+        months = pd.read_sql(
+            """
+            SELECT DISTINCT month_end
+            FROM fundlab.fund_portfolio
+            ORDER BY month_end
+            """,
+            conn,
+        )
+
+    if roe.empty or months.empty:
+        st.warning("RoE/RoCE or portfolio month-end data is empty.")
+        return
+
+    months_list = list(months["month_end"])
+    rows = []
+
+    grouped = roe.groupby("isin", sort=False)
+    for isin, g in grouped:
+        g = g.sort_values("year_end_date")
+        for m in months_list:
+            hist = g[g["year_end_date"] <= m].tail(5)
+            if hist.empty:
+                continue
+            rows.append(
+                {
+                    "isin": isin,
+                    "month_end": m,
+                    "median_roe_5y": hist["roe"].median(skipna=True),
+                    "median_roce_5y": hist["roce"].median(skipna=True),
+                }
+            )
+
+    if not rows:
+        st.warning("No 5-year medians could be computed.")
+        return
+
+    med_df = pd.DataFrame(rows)
+
+    insert_sql = text("""
+        INSERT INTO fundlab.stock_quality_median (
+            isin,
+            month_end,
+            median_roe_5y,
+            median_roce_5y
+        )
+        SELECT
+            unnest(:isins),
+            unnest(:month_ends),
+            unnest(:med_roe),
+            unnest(:med_roce)
+        ON CONFLICT (isin, month_end)
+        DO UPDATE
+        SET median_roe_5y  = EXCLUDED.median_roe_5y,
+            median_roce_5y = EXCLUDED.median_roce_5y
+    """)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        n = len(med_df)
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = med_df.iloc[start:end]
+            params = {
+                "isins":      list(chunk["isin"].astype(str)),
+                "month_ends": list(chunk["month_end"]),
+                "med_roe":    [None if pd.isna(x) else float(x) for x in chunk["median_roe_5y"]],
+                "med_roce":   [None if pd.isna(x) else float(x) for x in chunk["median_roce_5y"]],
+            }
+            conn.execute(insert_sql, params)
+
+#Assign Q1–Q4 quality quartiles based on 5y median RoE/RoCE within (is_financial, size_band) buckets
+def recompute_quality_quartiles(batch_size: int = 10000):
+    """
+    For each month_end, label each stock as Q1–Q4 within its
+    (is_financial, size_band) bucket based on 5y median RoE/RoCE.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        med = pd.read_sql(
+            """
+            SELECT isin, month_end, median_roe_5y, median_roce_5y
+            FROM fundlab.stock_quality_median
+            ORDER BY isin, month_end
+            """,
+            conn,
+        )
+        size = pd.read_sql(
+            """
+            SELECT isin, band_date, size_band
+            FROM fundlab.stock_size_band
+            ORDER BY isin, band_date
+            """,
+            conn,
+        )
+        master = pd.read_sql(
+            """
+            SELECT isin, is_financial
+            FROM fundlab.stock_master
+            """,
+            conn,
+        )
+
+    if med.empty or size.empty:
+        st.warning("Quality medians or size bands are empty.")
+        return
+
+    # Map size_band to each (isin, month_end) using last band_date <= month_end
+    months = med["month_end"].sort_values().unique()
+    size_records = []
+
+    for isin, g in size.groupby("isin", sort=False):
+        g = g.sort_values("band_date")
+        for m in months:
+            sub = g[g["band_date"] <= m]
+            if sub.empty:
+                continue
+            band = sub.iloc[-1]["size_band"]
+            size_records.append(
+                {"isin": isin, "month_end": m, "size_band": band}
+            )
+
+    size_for_month = pd.DataFrame(size_records)
+
+    full = (
+        med.merge(size_for_month, on=["isin", "month_end"], how="inner")
+           .merge(master, on="isin", how="left")
+    )
+    full["is_financial"] = full["is_financial"].fillna(False)
+
+    rows = []
+
+    for m, g_m in full.groupby("month_end", sort=False):
+        for fin_flag in (True, False):
+            g_f = g_m[g_m["is_financial"] == fin_flag]
+            for band in ("Large", "Mid", "Small"):
+                g_b = g_f[g_f["size_band"] == band]
+                if g_b.empty:
+                    continue
+
+                if fin_flag:
+                    g_b = g_b.assign(quality_metric=g_b["median_roe_5y"])
+                else:
+                    g_b = g_b.assign(quality_metric=g_b["median_roce_5y"])
+
+                g_b = g_b[~g_b["quality_metric"].isna()]
+                if g_b.empty:
+                    continue
+
+                # Assign quartiles: Q1 highest quality
+                try:
+                    # Use rank so ties handled deterministically
+                    rank_series = g_b["quality_metric"].rank(
+                        method="first", ascending=False
+                    )
+                    q_labels = pd.qcut(
+                        rank_series,
+                        4,
+                        labels=["Q1", "Q2", "Q3", "Q4"],
+                    )
+                except ValueError:
+                    # Too few stocks for qcut; manual thresholds
+                    ranks = g_b["quality_metric"].rank(
+                        method="first", ascending=False
+                    )
+                    n = len(ranks)
+
+                    def q_of_rank(r):
+                        if r <= 0.25 * n:
+                            return "Q1"
+                        elif r <= 0.5 * n:
+                            return "Q2"
+                        elif r <= 0.75 * n:
+                            return "Q3"
+                        else:
+                            return "Q4"
+
+                    q_labels = ranks.apply(q_of_rank)
+
+                for isin_val, qm, qlab in zip(
+                    g_b["isin"], g_b["quality_metric"], q_labels
+                ):
+                    rows.append(
+                        {
+                            "isin": isin_val,
+                            "month_end": m,
+                            "size_band": band,
+                            "is_financial": fin_flag,
+                            "quality_metric": float(qm),
+                            "quality_quartile": str(qlab),
+                        }
+                    )
+
+    if not rows:
+        st.warning("No quartile labels could be computed.")
+        return
+
+    quart_df = pd.DataFrame(rows)
+
+    insert_sql = text("""
+        INSERT INTO fundlab.stock_quality_quartile (
+            isin,
+            month_end,
+            size_band,
+            is_financial,
+            quality_metric,
+            quality_quartile
+        )
+        SELECT
+            unnest(:isins),
+            unnest(:month_ends),
+            unnest(:bands),
+            unnest(:fin_flags),
+            unnest(:metrics),
+            unnest(:quartiles)
+        ON CONFLICT (isin, month_end)
+        DO UPDATE
+        SET size_band        = EXCLUDED.size_band,
+            is_financial     = EXCLUDED.is_financial,
+            quality_metric   = EXCLUDED.quality_metric,
+            quality_quartile = EXCLUDED.quality_quartile
+    """)
+
+    with engine.begin() as conn:
+        n = len(quart_df)
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = quart_df.iloc[start:end]
+            params = {
+                "isins":      list(chunk["isin"].astype(str)),
+                "month_ends": list(chunk["month_end"]),
+                "bands":      list(chunk["size_band"].astype(str)),
+                "fin_flags":  list(chunk["is_financial"].astype(bool)),
+                "metrics":    [float(x) for x in chunk["quality_metric"]],
+                "quartiles":  list(chunk["quality_quartile"].astype(str)),
+            }
+            conn.execute(insert_sql, params)
+
+
+def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.DataFrame:
+    """
+    Returns a DataFrame with index Q1..Q4 and columns per month_end (Mmm YYYY),
+    values = % of domestic equity weight in that quality bucket.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            """
+            SELECT
+                fp.month_end,
+                fp.holding_weight,
+                sq.quality_quartile
+            FROM fundlab.fund_portfolio fp
+            JOIN fundlab.stock_quality_quartile sq
+              ON sq.isin = fp.isin
+             AND sq.month_end = fp.month_end
+            WHERE fp.fund_id = :fid
+              AND fp.month_end = ANY(:dates)
+              AND fp.asset_type = 'Domestic Equities'
+            """,
+            conn,
+            params={"fid": fund_id, "dates": month_ends},
+        )
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Rebase weights within each month to 100% (domestic equities only)
+    df["holding_weight"] = df["holding_weight"].astype(float)
+    totals = df.groupby("month_end")["holding_weight"].transform("sum")
+    df["re_based_weight"] = df["holding_weight"] / totals * 100.0
+
+    # Aggregate by quartile
+    pivot = (
+        df.groupby(["quality_quartile", "month_end"])["re_based_weight"]
+          .sum()
+          .unstack("month_end")
+          .reindex(index=["Q1", "Q2", "Q3", "Q4"])
+    )
+
+    # Pretty month labels
+    if pivot is not None and not pivot.empty:
+        pivot.columns = [d.strftime("%b %Y") for d in pivot.columns]
+
+    return pivot
+
 
 
 def get_median_metric_for_stock(roe_roce_dict, isin, eval_date, is_financial):
@@ -2934,6 +3314,17 @@ def portfolio_fundamentals_page():
     if start_date > end_date:
         st.error("Start date must be earlier than end date.")
         return
+    
+    quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
+    if quality_table is None or quality_table.empty:
+        st.info("No Q1–Q4 quality bucket data available for the selected fund and period.")
+    else:
+        st.subheader("Quality bucket exposures (Q1–Q4)")
+        st.dataframe(
+            quality_table.style.format("{:.1f}"),
+            use_container_width=True
+        )
+
 
     # 4) Segment radio buttons
     st.subheader("4. Segment")
@@ -3642,6 +4033,29 @@ def update_db_page():
                 st.error(f"Unexpected error during upload: {e}")
 
 
+# Housekeeping page
+def housekeeping_page():
+    home_button()
+    st.header("Housekeeping – Derived Tables")
+
+    st.write(
+        "Run these steps after uploading new raw data (NAVs, portfolios, RoE/RoCE, prices) "
+        "to refresh derived tables."
+    )
+
+    if st.button("1. Recompute size bands (Large/Mid/Small)"):
+        recompute_size_bands()
+        st.success("Size bands updated.")
+
+    if st.button("2. Recompute 5-year median RoE/RoCE"):
+        recompute_quality_medians()
+        st.success("5-year medians updated.")
+
+    if st.button("3. Recompute quality quartiles (Q1–Q4)"):
+        recompute_quality_quartiles()
+        st.success("Quality quartiles updated.")
+
+
 
 def home_page():
     st.subheader("Welcome to the Fund Analytics Dashboard")
@@ -3658,7 +4072,7 @@ def home_page():
                 """
     )
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         if st.button("📈 Performance"):
             st.session_state["page"] = "Performance"
@@ -3674,6 +4088,10 @@ def home_page():
     with col4:
         if st.button("🛠️ Update DB"):
             st.session_state["page"] = "Update DB"
+            st.rerun()
+    with col5:
+        if st.button("🧹 Housekeeping"):
+            st.session_state["page"] = "Housekeeping"
             st.rerun()
 
 
@@ -3698,6 +4116,8 @@ def main():
         portfolio_page()
     elif page == "Update DB":
         update_db_page()
+    elif page == "Housekeeping":
+        housekeeping_page()
     
 
 
