@@ -3264,10 +3264,9 @@ def portfolio_fundamentals_page():
         return
 
     fund_options = {
-    f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
-    for _, row in funds_df.iterrows()
+        f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
+        for _, row in funds_df.iterrows()
     }
-
 
     selected_fund_labels = st.multiselect(
         "Funds",
@@ -3290,7 +3289,12 @@ def portfolio_fundamentals_page():
 
     col1, col2 = st.columns(2)
     with col1:
-        start_year = st.selectbox("Start year", options=years, index=0, key="pf_start_year")
+        start_year = st.selectbox(
+            "Start year",
+            options=years,
+            index=0,
+            key="pf_start_year",
+        )
         start_month = st.selectbox(
             "Start month",
             options=month_options,
@@ -3299,7 +3303,12 @@ def portfolio_fundamentals_page():
             format_func=lambda m: "Mar" if m == 3 else "Sep",
         )
     with col2:
-        end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="pf_end_year")
+        end_year = st.selectbox(
+            "End year",
+            options=years,
+            index=len(years) - 1,
+            key="pf_end_year",
+        )
         end_month = st.selectbox(
             "End month",
             options=month_options,
@@ -3308,38 +3317,19 @@ def portfolio_fundamentals_page():
             format_func=lambda m: "Mar" if m == 3 else "Sep",
         )
 
-
     start_date = month_year_to_last_day(start_year, start_month)
     end_date = month_year_to_last_day(end_year, end_month)
 
     if start_date > end_date:
         st.error("Start date must be earlier than end date.")
         return
-    
-    # For now, compute Q1–Q4 quality buckets for the first selected fund
-    fund_id = selected_fund_ids[0]
-
-    primary_fund_label = selected_fund_labels[0]
-    st.caption(f"Quality bucket exposure for: {primary_fund_label}")
-
-
-    quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
-    if quality_table is None or quality_table.empty:
-        st.info("No Q1–Q4 quality bucket data available for the selected fund and period.")
-    else:
-        st.subheader("Quality bucket exposures (Q1–Q4)")
-        st.dataframe(
-            quality_table.style.format("{:.1f}"),
-            use_container_width=True
-        )
-
 
     # 4) Segment radio buttons
     st.subheader("4. Segment")
     segment_choice = st.radio(
         "Show metrics for:",
         options=["Financials", "Non-financials", "Total"],
-        horizontal=True
+        horizontal=True,
     )
 
     # 5) Fetch data & compute
@@ -3350,13 +3340,15 @@ def portfolio_fundamentals_page():
             st.warning("No portfolio data found for selected funds and period.")
             return
 
-        df_result = compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice)
+        df_result = compute_portfolio_fundamentals(
+            df_portfolio, roe_roce_dict, segment_choice
+        )
 
     if df_result.empty:
         st.warning("No fundamentals could be computed (check data availability).")
         return
 
-    # 6) Line chart
+    # 6) RoE / RoCE time series chart
     st.subheader("5. RoE / RoCE time series")
 
     df_chart = df_result.dropna(subset=["metric"]).copy()
@@ -3401,56 +3393,66 @@ def portfolio_fundamentals_page():
 
         st.altair_chart(chart, use_container_width=True)
 
-    
-    # 7) Data table
+    # 7) Underlying data table (funds in rows, periods in columns)
     st.subheader("6. Underlying data")
 
     df_table = df_result.copy()
     df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-
-    # Use the actual date for column ordering
     df_table["period_date"] = df_table["month_end"]
 
-    df_pivot = df_table.pivot_table(
-        index="fund_name",
-        columns="period_date",
-        values="metric"
-    ).sort_index(axis=0).sort_index(axis=1)
+    df_pivot = (
+        df_table.pivot_table(
+            index="fund_name",
+            columns="period_date",
+            values="metric",
+        )
+        .sort_index(axis=0)
+        .sort_index(axis=1)
+    )
 
-    # After sorting, relabel columns as "Mar 2018", "Sep 2018", etc.
+    # Relabel columns as "Mar 2018", "Sep 2018", etc.
     df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
 
     st.dataframe(df_pivot.style.format("{:.2f}"))
-    
-    
-    # 8) Quality buckets (Q1–Q4) – exposures by month for the first selected fund
-    if selected_fund_ids:
-        # Use the same month_end universe as the RoE/RoCE results
-        month_ends_list = sorted(
-            pd.to_datetime(df_result["month_end"]).dt.date.unique()
+
+    # 8) Quality bucket exposures (Q1–Q4)
+    st.subheader("7. Quality bucket exposures (Q1–Q4)")
+
+    # Only proceed if we actually have results and at least one fund selected
+    if df_result.empty or not selected_fund_ids:
+        st.info("No data available to compute Q1–Q4 quality bucket exposures.")
+        return
+
+    # Use the same month-end universe as the RoE/RoCE results
+    month_ends_list = sorted(
+        pd.to_datetime(df_result["month_end"]).dt.date.unique()
+    )
+
+    if not month_ends_list:
+        st.info("No periods found to compute quality buckets.")
+        return
+
+    # For now, compute bucket exposures for the first selected fund
+    fund_id = selected_fund_ids[0]
+
+    quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
+
+    if quality_table is None or quality_table.empty:
+        st.info(
+            "No Q1–Q4 quality bucket data available for the selected fund and period."
+        )
+    else:
+        # Optional: show which fund this refers to
+        primary_fund_label = selected_fund_labels[0]
+        st.caption(f"Quality bucket exposure for: {primary_fund_label}")
+
+        st.dataframe(
+            quality_table.style.format("{:.1f}"),
+            use_container_width=True,
         )
 
-        # For now, compute bucket exposures for the first selected fund
-        fund_id = selected_fund_ids[0]
 
-        quality_table = compute_quality_bucket_exposure(fund_id, month_ends_list)
-
-        st.subheader("7. Quality bucket exposures (Q1–Q4)")
-        if quality_table is None or quality_table.empty:
-            st.info(
-                "No Q1–Q4 quality bucket data available for the selected fund and period."
-            )
-        else:
-            # Optional: show which fund this refers to
-            primary_fund_label = selected_fund_labels[0]
-            st.caption(f"Quality bucket exposure for: {primary_fund_label}")
-
-            st.dataframe(
-                quality_table.style.format("{:.1f}"),
-                use_container_width=True,
-            )
-    else:
-        st.info("Select at least one fund to see quality bucket exposures.")
+    
 
 
 
