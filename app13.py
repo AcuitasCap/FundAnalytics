@@ -402,9 +402,9 @@ def validate_fund_portfolios(df_raw: pd.DataFrame):
     }
     return df, summary
 
-def upload_fund_portfolios(df: pd.DataFrame):
+def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
     """
-    Upload cleaned fund portfolio data into fundlab.fund_portfolio.
+    Upload cleaned fund portfolio data into fundlab.fund_portfolio in batches.
 
     Expected canonical columns in df:
       - scheme_name
@@ -428,8 +428,12 @@ def upload_fund_portfolios(df: pd.DataFrame):
                 {"names": schemes},
             )
 
-        # 2) Upsert portfolios
-        ins = text("""
+        # 2) Batched insert into fund_portfolio
+        n = len(df)
+        if n == 0:
+            return
+
+        insert_sql = text("""
             INSERT INTO fundlab.fund_portfolio (
                 fund_id,
                 month_end,
@@ -440,29 +444,41 @@ def upload_fund_portfolios(df: pd.DataFrame):
             )
             SELECT
                 f.fund_id,
-                :d,
-                :instr,
-                :w,
-                :asset,
-                :isin
-            FROM fundlab.fund f
-            WHERE f.fund_name = :name
+                t.month_end,
+                t.instrument_name,
+                t.holding_weight,
+                t.asset_type,
+                t.isin
+            FROM (
+                SELECT
+                    unnest(:scheme_names)      AS scheme_name,
+                    unnest(:month_ends)        AS month_end,
+                    unnest(:instrument_names)  AS instrument_name,
+                    unnest(:weights)           AS holding_weight,
+                    unnest(:asset_types)       AS asset_type,
+                    unnest(:isins)             AS isin
+            ) t
+            JOIN fundlab.fund f
+              ON f.fund_name = t.scheme_name
             ON CONFLICT (fund_id, month_end, instrument_name, asset_type, holding_weight)
             DO NOTHING
         """)
 
-        for _, r in df.iterrows():
-            conn.execute(
-                ins,
-                {
-                    "name": r["scheme_name"],
-                    "d": r["month_end"],
-                    "instr": r["instrument"],         # <- mapped to instrument_name column
-                    "w": float(r["holding_pct"]),
-                    "asset": r["asset_type"],
-                    "isin": r["isin"],
-                },
-            )
+        # Process in chunks
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = df.iloc[start:end]
+
+            params = {
+                "scheme_names":   list(chunk["scheme_name"].astype(str)),
+                "month_ends":     list(chunk["month_end"]),        # python date → date[]
+                "instrument_names": list(chunk["instrument"].astype(str)),
+                "weights":        [float(x) for x in chunk["holding_pct"]],
+                "asset_types":    list(chunk["asset_type"].astype(str)),
+                "isins":          list(chunk["isin"].astype(str)),
+            }
+
+            conn.execute(insert_sql, params)
 
 
 
