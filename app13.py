@@ -1017,11 +1017,17 @@ def recompute_quality_quartiles(batch_size: int = 10000):
 def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.DataFrame:
     """
     Returns a DataFrame with index Q1..Q4 and columns per month_end (Mmm YYYY),
-    values = % of domestic equity weight in that quality bucket.
+    values = % of domestic equity weight in that quality bucket for the given fund.
     """
+    if not month_ends:
+        return pd.DataFrame()
+
+    start = min(month_ends)
+    end = max(month_ends)
+
     engine = get_engine()
     with engine.connect() as conn:
-        df = pd.read_sql(
+        query = text(
             """
             SELECT
                 fp.month_end,
@@ -1032,22 +1038,26 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
               ON sq.isin = fp.isin
              AND sq.month_end = fp.month_end
             WHERE fp.fund_id = :fid
-              AND fp.month_end = ANY(:dates)
+              AND fp.month_end BETWEEN :d_start AND :d_end
               AND fp.asset_type = 'Domestic Equities'
-            """,
+            """
+        )
+
+        df = pd.read_sql(
+            query,
             conn,
-            params={"fid": fund_id, "dates": month_ends},
+            params={"fid": fund_id, "d_start": start, "d_end": end},
         )
 
     if df.empty:
         return pd.DataFrame()
 
-    # Rebase weights within each month to 100% (domestic equities only)
+    # Rebase domestic equity weights to 100% per month
     df["holding_weight"] = df["holding_weight"].astype(float)
     totals = df.groupby("month_end")["holding_weight"].transform("sum")
     df["re_based_weight"] = df["holding_weight"] / totals * 100.0
 
-    # Aggregate by quartile
+    # Aggregate by quartile and month
     pivot = (
         df.groupby(["quality_quartile", "month_end"])["re_based_weight"]
           .sum()
@@ -1055,11 +1065,14 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
           .reindex(index=["Q1", "Q2", "Q3", "Q4"])
     )
 
+    if pivot is None or pivot.empty:
+        return pd.DataFrame()
+
     # Pretty month labels
-    if pivot is not None and not pivot.empty:
-        pivot.columns = [d.strftime("%b %Y") for d in pivot.columns]
+    pivot.columns = [pd.to_datetime(col).strftime("%b %Y") for col in pivot.columns]
 
     return pivot
+
 
 
 
