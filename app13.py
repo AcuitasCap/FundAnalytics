@@ -29,6 +29,7 @@ import plotly.graph_objects as go
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
+from datetime import datetime, date
 
 
 def check_password():
