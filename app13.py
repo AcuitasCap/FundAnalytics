@@ -3466,7 +3466,7 @@ def portfolio_fundamentals_page():
         st.info("No periods found to compute quality buckets.")
         return
 
-    # 🔹 NEW: choose which fund to view
+    # Choose which fund to view for quality buckets
     quality_fund_label = st.selectbox(
         "Select fund for quality bucket view",
         options=selected_fund_labels,
@@ -3488,34 +3488,32 @@ def portfolio_fundamentals_page():
         # Caption: show which fund this refers to
         st.caption(f"Quality bucket exposure for: {quality_fund_label}")
 
-        # --- Quality quartile chart for selected fund (place this just before the data table) ---
+        # --- Quality quartile chart for selected fund (just before the data table) ---
 
-        # Filter data for the selected fund
-        fund_quartiles = (
-            quality_table[quality_table["fund_name"] == quality_fund_label]
-            .copy()
-        )
+        chart_df = quality_table.copy()
 
-        # Make sure month_end is datetime and sorted
-        fund_quartiles["month_end"] = pd.to_datetime(fund_quartiles["month_end"])
-        fund_quartiles = fund_quartiles.sort_values("month_end")
+        # Handle whether month_end is a column or the index
+        if "month_end" in chart_df.columns:
+            chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
+            chart_df = chart_df.set_index("month_end")
+        else:
+            # assume index is month_end already (or convertible)
+            chart_df.index = pd.to_datetime(chart_df.index, errors="coerce")
 
-        # Prepare chart data: index = month_end, columns = Q1–Q4 rebased exposures
-        chart_data = (
-            fund_quartiles
-            .set_index("month_end")[["Q1", "Q2", "Q3", "Q4"]]
-        )
+        # Keep only the Q1–Q4 rebased exposures (tweak names if yours differ)
+        chart_df = chart_df[["Q1", "Q2", "Q3", "Q4"]].sort_index()
 
         st.markdown("#### Quality quartile mix over time (rebased to domestic equity = 100%)")
 
         # Stacked area chart of Q1–Q4 exposures
-        st.area_chart(chart_data)
+        st.area_chart(chart_df)
 
-
+        # Underlying table (same as before)
         st.dataframe(
             quality_table.style.format("{:.1f}"),
             use_container_width=True,
         )
+
 
 
 
