@@ -3490,23 +3490,45 @@ def portfolio_fundamentals_page():
 
         # --- Quality quartile chart for selected fund (just before the data table) ---
 
+                # --- Quality quartile chart for selected fund (just before the data table) ---
+
         chart_df = quality_table.copy()
 
-        # Handle whether month_end is a column or the index
-        if "month_end" in chart_df.columns:
+        quartile_labels = {"Q1", "Q2", "Q3", "Q4"}
+
+        # Case 1: Q1–Q4 are columns and we have an explicit month_end column
+        if "month_end" in chart_df.columns and quartile_labels.issubset(set(chart_df.columns)):
             chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
             chart_df = chart_df.set_index("month_end")
+
         else:
-            # assume index is month_end already (or convertible)
+            # Most likely: Q1–Q4 are the INDEX (like your current pivot)
+            index_labels = set(chart_df.index.astype(str))
+            if quartile_labels.issubset(index_labels):
+                # Transpose so that:
+                #   index  = month_end
+                #   columns = Q1–Q4
+                chart_df = chart_df.T
+
+            # Now treat index as month_end
             chart_df.index = pd.to_datetime(chart_df.index, errors="coerce")
+            chart_df = chart_df[chart_df.index.notna()]
 
-        # Keep only the Q1–Q4 rebased exposures (tweak names if yours differ)
-        chart_df = chart_df[["Q1", "Q2", "Q3", "Q4"]].sort_index()
+        # Keep only the quartile columns that are actually present
+        quartile_cols = [c for c in ["Q1", "Q2", "Q3", "Q4"] if c in chart_df.columns]
 
-        st.markdown("#### Quality quartile mix over time (rebased to domestic equity = 100%)")
+        if not quartile_cols:
+            st.info("Quality table does not have Q1–Q4 columns to chart.")
+        else:
+            chart_df = chart_df[quartile_cols].sort_index()
 
-        # Stacked area chart of Q1–Q4 exposures
-        st.area_chart(chart_df)
+            st.markdown(
+                "#### Quality quartile mix over time (rebased to domestic equity = 100%)"
+            )
+
+            # Stacked area chart of Q1–Q4 exposures
+            st.area_chart(chart_df)
+
 
         # Underlying table (same as before)
         st.dataframe(
