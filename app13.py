@@ -3526,9 +3526,33 @@ def portfolio_fundamentals_page():
                 "#### Quality quartile mix over time (rebased to domestic equity = 100%)"
             )
 
-            # Stacked area chart of Q1–Q4 exposures
-            st.line_chart(chart_df)
+            chart_df_alt = chart_df.reset_index().rename(columns={"index": "month_end"})
+            chart_df_alt["month_end"] = pd.to_datetime(chart_df_alt["month_end"])
 
+            # Melt to long format for altair
+            chart_long = chart_df_alt.melt("month_end", var_name="Quartile", value_name="Exposure")
+
+            chart = (
+                alt.Chart(chart_long)
+                .mark_area()
+                .encode(
+                    x=alt.X(
+                        "month_end:T",
+                        title="Period",
+                        axis=alt.Axis(format="%b %Y", labelAngle=-45)   # <-- MMM YYYY format
+                    ),
+                    y=alt.Y("Exposure:Q", title="Exposure (%)"),
+                    color=alt.Color("Quartile:N", title="Quality Quartile"),
+                    tooltip=[
+                        alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                        alt.Tooltip("Quartile:N", title="Quartile"),
+                        alt.Tooltip("Exposure:Q", title="Exposure (%)", format=".1f"),
+                    ],
+                )
+                .properties(height=400)
+            )
+
+            st.altair_chart(chart, use_container_width=True)
 
         # Underlying table (same as before)
         st.dataframe(
