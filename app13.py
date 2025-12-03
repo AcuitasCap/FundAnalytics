@@ -1052,7 +1052,21 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     if df.empty:
         return pd.DataFrame()
 
-    # Use raw holding_weight WITHOUT re-basing
+    # Rebase domestic equity weights to 100% per month
+    df["holding_weight"] = df["holding_weight"].astype(float)
+    totals = df.groupby("month_end")["holding_weight"].transform("sum")
+    df["re_based_weight"] = df["holding_weight"] / totals * 100.0
+
+    # Aggregate by quartile and month
+    pivot = (
+        df.groupby(["quality_quartile", "month_end"])["re_based_weight"]
+        .sum()
+        .unstack("month_end")
+        .reindex(index=["Q1", "Q2", "Q3", "Q4"])
+    )
+
+    # Use raw holding_weight WITHOUT re-basing - uncomment to see in code. But comment the above block when doing so
+    '''
     df["holding_weight"] = df["holding_weight"].astype(float)
 
     pivot = (
@@ -1060,7 +1074,9 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
         .sum()
         .unstack("month_end")
         .reindex(index=["Q1", "Q2", "Q3", "Q4"])
-    )
+    )'''
+
+
 
 
     if pivot is None or pivot.empty:
@@ -3471,6 +3487,30 @@ def portfolio_fundamentals_page():
     else:
         # Caption: show which fund this refers to
         st.caption(f"Quality bucket exposure for: {quality_fund_label}")
+
+        # --- Quality quartile chart for selected fund (place this just before the data table) ---
+
+        # Filter data for the selected fund
+        fund_quartiles = (
+            quartile_df[quartile_df["fund_name"] == selected_quartile_fund]
+            .copy()
+        )
+
+        # Make sure month_end is datetime and sorted
+        fund_quartiles["month_end"] = pd.to_datetime(fund_quartiles["month_end"])
+        fund_quartiles = fund_quartiles.sort_values("month_end")
+
+        # Prepare chart data: index = month_end, columns = Q1–Q4 rebased exposures
+        chart_data = (
+            fund_quartiles
+            .set_index("month_end")[["Q1", "Q2", "Q3", "Q4"]]
+        )
+
+        st.markdown("#### Quality quartile mix over time (rebased to domestic equity = 100%)")
+
+        # Stacked area chart of Q1–Q4 exposures
+        st.area_chart(chart_data)
+
 
         st.dataframe(
             quality_table.style.format("{:.1f}"),
