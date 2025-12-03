@@ -1052,19 +1052,16 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     if df.empty:
         return pd.DataFrame()
 
-    # Rebase domestic equity weights to 100% per month
+    # Use raw holding_weight WITHOUT re-basing
     df["holding_weight"] = df["holding_weight"].astype(float)
-    totals = df.groupby("month_end")["holding_weight"].transform("sum")
-    df["re_based_weight"] = df["holding_weight"] / totals * 100.0
 
-    # Aggregate by quartile and month
-        # Aggregate by quartile and month
     pivot = (
-        df.groupby(["quality_quartile", "month_end"])["re_based_weight"]
-          .sum()
-          .unstack("month_end")
-          .reindex(index=["Q1", "Q2", "Q3", "Q4"])
+        df.groupby(["quality_quartile", "month_end"])["holding_weight"]
+        .sum()
+        .unstack("month_end")
+        .reindex(index=["Q1", "Q2", "Q3", "Q4"])
     )
+
 
     if pivot is None or pivot.empty:
         return pd.DataFrame()
