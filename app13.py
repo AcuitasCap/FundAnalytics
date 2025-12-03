@@ -1066,15 +1066,15 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     )
 
     # Use raw holding_weight WITHOUT re-basing - uncomment to see in code. But comment the above block when doing so
-    '''
-    df["holding_weight"] = df["holding_weight"].astype(float)
+    
+    #df["holding_weight"] = df["holding_weight"].astype(float)
 
-    pivot = (
-        df.groupby(["quality_quartile", "month_end"])["holding_weight"]
-        .sum()
-        .unstack("month_end")
-        .reindex(index=["Q1", "Q2", "Q3", "Q4"])
-    )'''
+    #pivot = (
+    #    df.groupby(["quality_quartile", "month_end"])["holding_weight"]
+    #    .sum()
+    #    .unstack("month_end")
+    #    .reindex(index=["Q1", "Q2", "Q3", "Q4"])
+    #)'''
 
 
 
@@ -3527,7 +3527,7 @@ def portfolio_fundamentals_page():
             )
 
             # Stacked area chart of Q1–Q4 exposures
-            st.area_chart(chart_df)
+            st.line_chart(chart_df)
 
 
         # Underlying table (same as before)
