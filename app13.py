@@ -230,6 +230,22 @@ def show_expected_format(upload_type: str):
         )
         st.dataframe(sample)
         st.info("Dates must be in dd-mm-yyyy format. Market cap and stock price must be numeric.")
+    elif upload_type == "Company PAT (quarterly)":
+        st.markdown(
+            "- **3 columns**: ISIN, quarter-end in `YYYYMM`, adjusted PAT (absolute)\n"
+            "- Example row: `INE123A01016 | 202403 | 125000000`"
+            )
+    elif upload_type == "Company sales (quarterly)":
+            st.markdown(
+                "- **3 columns**: ISIN, quarter-end in `YYYYMM`, sales (absolute)\n"
+                "- Example row: `INE123A01016 | 202403 | 875000000`"
+            )
+    elif upload_type == "Company book value (annual)":
+            st.markdown(
+                "- **3 columns**: ISIN, year-end in `YYYYMM`, book value (absolute net worth)\n"
+                "- Example row: `INE123A01016 | 202403 | 2150000000`"
+            )
+
 
 
 # Update Supabase with fund NAVs
@@ -629,6 +645,149 @@ def upload_roe_roce(df: pd.DataFrame):
             )
 
 
+def _parse_yyyymm_to_month_end(series: pd.Series) -> pd.Series:
+    """Convert YYYYMM strings/ints to month-end Timestamps."""
+    s = series.astype(str).str.strip()
+    if not s.str.match(r"^\d{6}$").all():
+        bad = s[~s.str.match(r"^\d{6}$")].unique()[:10]
+        raise ValueError(f"Invalid YYYYMM values found (sample): {bad}")
+    dt = pd.to_datetime(s + "01", format="%Y%m")
+    return dt + pd.offsets.MonthEnd(0)
+
+
+def validate_quarterly_pat(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Expect: Col A = ISIN, Col B = quarter end (YYYYMM), Col C = adjusted PAT (absolute).
+    """
+    if df_raw.shape[1] < 3:
+        raise ValueError("Expected at least 3 columns: ISIN, quarter_end_YYYYMM, PAT.")
+
+    df = df_raw.iloc[:, :3].copy()
+    df.columns = ["isin", "yyyymm", "pat"]
+
+    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
+    df = df[df["isin"] != ""].copy()
+
+    df["period_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+
+    # Calendar year & quarter (good enough for TTM calcs)
+    df["fiscal_year"] = df["period_end"].dt.year.astype(int)
+    df["fiscal_quarter"] = ((df["period_end"].dt.month - 1) // 3 + 1).astype(int)
+
+    df["pat"] = pd.to_numeric(df["pat"], errors="coerce")
+    df = df.dropna(subset=["pat"])
+
+    # Check for duplicates within the upload file
+    dup_mask = df.duplicated(subset=["isin", "period_end"], keep=False)
+    if dup_mask.any():
+        dup_rows = df.loc[dup_mask, ["isin", "period_end"]].drop_duplicates().head(20)
+        raise ValueError(
+            "Duplicate rows found for the same ISIN + period_end in the PAT file. "
+            f"Examples:\n{dup_rows}"
+        )
+
+    df_clean = df[["isin", "period_end", "fiscal_year", "fiscal_quarter", "pat"]].copy()
+
+    summary = {
+        "rows_raw": int(len(df_raw)),
+        "rows_clean": int(len(df_clean)),
+        "min_period_end": str(df_clean["period_end"].min().date())
+        if not df_clean.empty
+        else None,
+        "max_period_end": str(df_clean["period_end"].max().date())
+        if not df_clean.empty
+        else None,
+    }
+    return df_clean, summary
+
+
+def validate_quarterly_sales(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Expect: Col A = ISIN, Col B = quarter end (YYYYMM), Col C = sales (absolute).
+    """
+    if df_raw.shape[1] < 3:
+        raise ValueError("Expected at least 3 columns: ISIN, quarter_end_YYYYMM, sales.")
+
+    df = df_raw.iloc[:, :3].copy()
+    df.columns = ["isin", "yyyymm", "sales"]
+
+    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
+    df = df[df["isin"] != ""].copy()
+
+    df["period_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+
+    df["fiscal_year"] = df["period_end"].dt.year.astype(int)
+    df["fiscal_quarter"] = ((df["period_end"].dt.month - 1) // 3 + 1).astype(int)
+
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+    df = df.dropna(subset=["sales"])
+
+    dup_mask = df.duplicated(subset=["isin", "period_end"], keep=False)
+    if dup_mask.any():
+        dup_rows = df.loc[dup_mask, ["isin", "period_end"]].drop_duplicates().head(20)
+        raise ValueError(
+            "Duplicate rows found for the same ISIN + period_end in the sales file. "
+            f"Examples:\n{dup_rows}"
+        )
+
+    df_clean = df[["isin", "period_end", "fiscal_year", "fiscal_quarter", "sales"]].copy()
+
+    summary = {
+        "rows_raw": int(len(df_raw)),
+        "rows_clean": int(len(df_clean)),
+        "min_period_end": str(df_clean["period_end"].min().date())
+        if not df_clean.empty
+        else None,
+        "max_period_end": str(df_clean["period_end"].max().date())
+        if not df_clean.empty
+        else None,
+    }
+    return df_clean, summary
+
+
+def validate_annual_book_value(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Expect: Col A = ISIN, Col B = year-end (YYYYMM), Col C = book value (absolute net worth).
+    """
+    if df_raw.shape[1] < 3:
+        raise ValueError("Expected at least 3 columns: ISIN, year_end_YYYYMM, book_value.")
+
+    df = df_raw.iloc[:, :3].copy()
+    df.columns = ["isin", "yyyymm", "book_value"]
+
+    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
+    df = df[df["isin"] != ""].copy()
+
+    df["year_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+    df["fiscal_year"] = df["year_end"].dt.year.astype(int)
+
+    df["book_value"] = pd.to_numeric(df["book_value"], errors="coerce")
+    df = df.dropna(subset=["book_value"])
+
+    dup_mask = df.duplicated(subset=["isin", "year_end"], keep=False)
+    if dup_mask.any():
+        dup_rows = df.loc[dup_mask, ["isin", "year_end"]].drop_duplicates().head(20)
+        raise ValueError(
+            "Duplicate rows found for the same ISIN + year_end in the book value file. "
+            f"Examples:\n{dup_rows}"
+        )
+
+    df_clean = df[["isin", "year_end", "fiscal_year", "book_value"]].copy()
+
+    summary = {
+        "rows_raw": int(len(df_raw)),
+        "rows_clean": int(len(df_clean)),
+        "min_year_end": str(df_clean["year_end"].min().date())
+        if not df_clean.empty
+        else None,
+        "max_year_end": str(df_clean["year_end"].max().date())
+        if not df_clean.empty
+        else None,
+    }
+    return df_clean, summary
+
+
+
 def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
     """
     Upload stock prices + market cap into fundlab.stock_price in batches.
@@ -680,6 +839,119 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
             }
 
             conn.execute(insert_sql, params)
+
+from sqlalchemy import text
+
+def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
+    """
+    Upsert PAT into fundlab.stock_quarterly_financials.
+    Insert new rows or update PAT for existing (isin, period_end, is_consolidated).
+    """
+    if df_clean.empty:
+        return
+
+    records = []
+    for _, row in df_clean.iterrows():
+        records.append(
+            {
+                "isin": row["isin"],
+                "period_end": row["period_end"],
+                "fiscal_year": int(row["fiscal_year"]),
+                "fiscal_quarter": int(row["fiscal_quarter"]),
+                "pat": float(row["pat"]),
+            }
+        )
+
+    stmt = text(
+        """
+        INSERT INTO fundlab.stock_quarterly_financials
+            (isin, period_end, fiscal_year, fiscal_quarter, pat)
+        VALUES
+            (:isin, :period_end, :fiscal_year, :fiscal_quarter, :pat)
+        ON CONFLICT (isin, period_end, is_consolidated)
+        DO UPDATE SET
+            pat = EXCLUDED.pat,
+            updated_at = NOW();
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(stmt, records)
+
+
+def upload_quarterly_sales(df_clean: pd.DataFrame) -> None:
+    """
+    Upsert sales into fundlab.stock_quarterly_financials.
+    Insert new rows or update sales for existing (isin, period_end, is_consolidated).
+    """
+    if df_clean.empty:
+        return
+
+    records = []
+    for _, row in df_clean.iterrows():
+        records.append(
+            {
+                "isin": row["isin"],
+                "period_end": row["period_end"],
+                "fiscal_year": int(row["fiscal_year"]),
+                "fiscal_quarter": int(row["fiscal_quarter"]),
+                "sales": float(row["sales"]),
+            }
+        )
+
+    stmt = text(
+        """
+        INSERT INTO fundlab.stock_quarterly_financials
+            (isin, period_end, fiscal_year, fiscal_quarter, sales)
+        VALUES
+            (:isin, :period_end, :fiscal_year, :fiscal_quarter, :sales)
+        ON CONFLICT (isin, period_end, is_consolidated)
+        DO UPDATE SET
+            sales = EXCLUDED.sales,
+            updated_at = NOW();
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(stmt, records)
+
+
+def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
+    """
+    Upsert book value into fundlab.stock_annual_book_value.
+    Insert new rows or update book_value for existing (isin, year_end, is_consolidated).
+    """
+    if df_clean.empty:
+        return
+
+    records = []
+    for _, row in df_clean.iterrows():
+        records.append(
+            {
+                "isin": row["isin"],
+                "year_end": row["year_end"],
+                "fiscal_year": int(row["fiscal_year"]),
+                "book_value": float(row["book_value"]),
+            }
+        )
+
+    stmt = text(
+        """
+        INSERT INTO fundlab.stock_annual_book_value
+            (isin, year_end, fiscal_year, book_value)
+        VALUES
+            (:isin, :year_end, :fiscal_year, :book_value)
+        ON CONFLICT (isin, year_end, is_consolidated)
+        DO UPDATE SET
+            book_value = EXCLUDED.book_value,
+            updated_at = NOW();
+        """
+    )
+
+    with engine.begin() as conn:
+        conn.execute(stmt, records)
+
+
 
 # Recompute Large / mid /small labels based on market cap at each end-June and end-December
 def recompute_size_bands(batch_size: int = 10000):
@@ -4067,7 +4339,6 @@ def validate_stock_prices_mc(df_raw: pd.DataFrame):
     return df, summary
 
 
-
 def update_db_page():
     home_button()
     st.header("Update underlying data")
@@ -4081,14 +4352,20 @@ def update_db_page():
             "Stock ISIN, industry, financial/non-financial",
             "Company RoE / RoCE",
             "Stock prices and market cap",
-            "Company sales, book value, PAT (stub)",
+            "Company PAT (quarterly)",
+            "Company sales (quarterly)",
+            "Company book value (annual)",
         ],
     )
 
     # Single file upload for the chosen type
-    uploaded = st.file_uploader("Upload Excel file", type=["xlsx"], key=f"upload_{upload_type}")
+    uploaded = st.file_uploader(
+        "Upload Excel file",
+        type=["xlsx"],
+        key=f"upload_{upload_type}",
+    )
 
-    # Show expected format preview
+    # Show expected format preview (extend this function for new types)
     show_expected_format(upload_type)
 
     if not uploaded:
@@ -4100,11 +4377,6 @@ def update_db_page():
         df_raw = pd.read_excel(uploaded)
     except Exception as e:
         st.error(f"Could not read Excel file: {e}")
-        return
-
-    # Dry-run + upload pipeline
-    if upload_type == "Company sales, book value, PAT (stub)":
-        st.warning("This uploader is a stub. Format and ingestion are not yet implemented.")
         return
 
     # State keys to remember validated data
@@ -4126,6 +4398,12 @@ def update_db_page():
                 df_clean, summary = validate_roe_roce(df_raw)
             elif upload_type == "Stock prices and market cap":
                 df_clean, summary = validate_stock_prices_mc(df_raw)
+            elif upload_type == "Company PAT (quarterly)":
+                df_clean, summary = validate_quarterly_pat(df_raw)
+            elif upload_type == "Company sales (quarterly)":
+                df_clean, summary = validate_quarterly_sales(df_raw)
+            elif upload_type == "Company book value (annual)":
+                df_clean, summary = validate_annual_book_value(df_raw)
             else:
                 st.error("Unsupported upload type.")
                 return
@@ -4167,13 +4445,29 @@ def update_db_page():
                     upload_roe_roce(df_clean)
                 elif upload_type == "Stock prices and market cap":
                     upload_stock_prices_mc(df_clean)
+                elif upload_type == "Company PAT (quarterly)":
+                    upload_quarterly_pat(df_clean)
+                elif upload_type == "Company sales (quarterly)":
+                    upload_quarterly_sales(df_clean)
+                elif upload_type == "Company book value (annual)":
+                    upload_annual_book_value(df_clean)
+
                 st.success("✅ Upload completed successfully.")
+
             except SQLAlchemyError as e:
                 msg = str(getattr(e, "orig", e))
-                if "foreign key constraint" in msg.lower():
+                lower_msg = msg.lower()
+
+                if "foreign key constraint" in lower_msg:
                     st.error(
                         "❌ Some ISINs in this file do not exist in Stock Master.\n"
-                        "Please update Stock Master before uploading stock price data.\n\n"
+                        "Please update Stock Master before uploading this data.\n\n"
+                        f"Database message: {msg}"
+                    )
+                elif "duplicate key value" in lower_msg or "unique constraint" in lower_msg:
+                    st.error(
+                        "❌ Duplicate rows detected against existing database records.\n"
+                        "These ISIN + period combinations already exist.\n\n"
                         f"Database message: {msg}"
                     )
                 else:
@@ -4183,6 +4477,7 @@ def update_db_page():
                     )
             except Exception as e:
                 st.error(f"Unexpected error during upload: {e}")
+
 
 
 # Housekeeping page
