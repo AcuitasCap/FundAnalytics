@@ -645,14 +645,46 @@ def upload_roe_roce(df: pd.DataFrame):
             )
 
 
-def _parse_yyyymm_to_month_end(series: pd.Series) -> pd.Series:
-    """Convert YYYYMM strings/ints to month-end Timestamps."""
+def _parse_period_to_month_end(series: pd.Series) -> pd.Series:
+    """
+    Convert a column containing quarter/year ends to month-end Timestamps.
+
+    Handles:
+    - Excel dates / datetime
+    - Numeric or string 'YYYYMM'
+    - Numeric or string 'YYYYMMDD'
+    """
+    # Case 1: already datetime
+    if pd.api.types.is_datetime64_any_dtype(series):
+        dt = pd.to_datetime(series)
+        return dt + pd.offsets.MonthEnd(0)
+
     s = series.astype(str).str.strip()
-    if not s.str.match(r"^\d{6}$").all():
-        bad = s[~s.str.match(r"^\d{6}$")].unique()[:10]
-        raise ValueError(f"Invalid YYYYMM values found (sample): {bad}")
-    dt = pd.to_datetime(s + "01", format="%Y%m")
+
+    # Keep only the numeric part (in case Excel did something funky)
+    s_digits = s.str.extract(r"(\d+)", expand=False)
+
+    # Length 6 => YYYYMM, length 8 => YYYYMMDD
+    len6 = s_digits.str.len() == 6
+    len8 = s_digits.str.len() == 8
+
+    if not (len6 | len8).all():
+        bad = s[~(len6 | len8)].unique()[:10]
+        raise ValueError(
+            "Invalid period values found (expected YYYYMM or YYYYMMDD). "
+            f"Sample invalid values: {bad}"
+        )
+
+    # Parse 6-digit as YYYYMM01, 8-digit as YYYYMMDD
+    dt = pd.to_datetime(
+        np.where(len6, s_digits + "01", s_digits),
+        format="%Y%m%d",
+        errors="raise",
+    )
+
+    # Snap to month-end
     return dt + pd.offsets.MonthEnd(0)
+
 
 
 def validate_quarterly_pat(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -668,7 +700,7 @@ def validate_quarterly_pat(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     df["isin"] = df["isin"].astype(str).str.strip().str.upper()
     df = df[df["isin"] != ""].copy()
 
-    df["period_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+    df["period_end"] = _parse_period_to_month_end(df["yyyymm"])
 
     # Calendar year & quarter (good enough for TTM calcs)
     df["fiscal_year"] = df["period_end"].dt.year.astype(int)
@@ -714,7 +746,7 @@ def validate_quarterly_sales(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     df["isin"] = df["isin"].astype(str).str.strip().str.upper()
     df = df[df["isin"] != ""].copy()
 
-    df["period_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+    df["period_end"] = _parse_period_to_month_end(df["yyyymm"])
 
     df["fiscal_year"] = df["period_end"].dt.year.astype(int)
     df["fiscal_quarter"] = ((df["period_end"].dt.month - 1) // 3 + 1).astype(int)
@@ -758,7 +790,7 @@ def validate_annual_book_value(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict
     df["isin"] = df["isin"].astype(str).str.strip().str.upper()
     df = df[df["isin"] != ""].copy()
 
-    df["year_end"] = _parse_yyyymm_to_month_end(df["yyyymm"])
+    df["year_end"] = _parse_period_to_month_end(df["yyyymm"])
     df["fiscal_year"] = df["year_end"].dt.year.astype(int)
 
     df["book_value"] = pd.to_numeric(df["book_value"], errors="coerce")
