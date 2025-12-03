@@ -3501,7 +3501,7 @@ def portfolio_fundamentals_page():
             chart_df.index = pd.to_datetime(chart_df.index, errors="coerce")
 
         # Keep only the Q1–Q4 rebased exposures (tweak names if yours differ)
-        chart_df = chart_df[["Q1", "Q2", "Q3", "Q4"]].sort_index()
+        chart_df = chart_df["Q1", "Q2", "Q3", "Q4"].sort_index()
 
         st.markdown("#### Quality quartile mix over time (rebased to domestic equity = 100%)")
 
