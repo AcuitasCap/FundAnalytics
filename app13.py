@@ -3492,7 +3492,7 @@ def portfolio_fundamentals_page():
 
         # Filter data for the selected fund
         fund_quartiles = (
-            quartile_df[quartile_df["fund_name"] == selected_quartile_fund]
+            quality_table[quality_table["fund_name"] == quality_fund_label]
             .copy()
         )
 
