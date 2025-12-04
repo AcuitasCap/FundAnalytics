@@ -1732,7 +1732,7 @@ def compute_portfolio_valuations_timeseries(
       - 'Historical valuations of current portfolio'
 
     Returns DataFrame with columns:
-      month_end (datetime64), series ('Focus fund' / 'Universe median (others)'), value
+      month_end (datetime64[ns]), series ('Focus fund' / 'Universe median (others)'), value
     """
 
     if not fund_ids or focus_fund_id not in fund_ids:
@@ -1744,8 +1744,8 @@ def compute_portfolio_valuations_timeseries(
 
     engine = get_engine()
 
-    # Monthly grid for requested period
-    month_range = pd.date_range(start_date, end_date, freq="M").date
+    # Monthly grid for requested period (as proper datetimes)
+    month_range = pd.date_range(start_date, end_date, freq="M")
     if len(month_range) == 0:
         return pd.DataFrame()
 
@@ -1845,7 +1845,15 @@ def compute_portfolio_valuations_timeseries(
     if holdings.empty:
         return pd.DataFrame()
 
-    holdings["month_end"] = pd.to_datetime(holdings["month_end"]).dt.date
+    # 🔑 CRITICAL: normalise month_end to proper datetime64[ns]
+    # Your sample shows "30-06-2023" → try dd-mm-yyyy first, then fallback
+    try:
+        holdings["month_end"] = pd.to_datetime(
+            holdings["month_end"], format="%d-%m-%Y", errors="raise"
+        )
+    except Exception:
+        holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
+    holdings["month_end"] = holdings["month_end"].dt.normalize()
 
     # ---------------------------------------------------------------------
     # 2) Segment filter
@@ -1862,23 +1870,26 @@ def compute_portfolio_valuations_timeseries(
     # ---------------------------------------------------------------------
     # 3) Rebase weights within (fund_id, month_end) to Domestic Equities = 100
     # ---------------------------------------------------------------------
-    holdings["weight_pct"] = holdings["weight_pct"].astype(float)
+    holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
     sum_w = holdings.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
     holdings = holdings[sum_w > 0].copy()
+    if holdings.empty:
+        return pd.DataFrame()
+
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
 
-    all_isins = sorted(holdings["isin"].dropna().unique().tolist())
+    all_isins = sorted(holdings["isin"].dropna().astype(str).unique().tolist())
     if not all_isins:
         return pd.DataFrame()
 
-    min_month = min(month_range)
-    max_month = max(month_range)
+    min_month = month_range.min().normalize()
+    max_month = month_range.max().normalize()
 
     # ---------------------------------------------------------------------
     # 4) Fetch market cap + quarterly & annual fundamentals (once)
     # ---------------------------------------------------------------------
     with engine.begin() as conn:
-        # ✅ UPDATED: market cap from fundlab.stock_price (price_date → month_end)
+        # Market cap from stock_price (price_date → month_end)
         mc_sql = text(
             """
             SELECT
@@ -1895,7 +1906,8 @@ def compute_portfolio_valuations_timeseries(
             conn,
             params={"isins": all_isins, "start_date": min_month, "end_date": max_month},
         )
-        mc["month_end"] = pd.to_datetime(mc["month_end"]).dt.date
+        if not mc.empty:
+            mc["month_end"] = pd.to_datetime(mc["month_end"], errors="coerce").dt.normalize()
 
         # Quarterly sales & PAT
         q_sql = text(
@@ -1912,7 +1924,7 @@ def compute_portfolio_valuations_timeseries(
             q_sql, conn, params={"isins": all_isins, "end_date": max_month}
         )
         if not qdf.empty:
-            qdf["period_end"] = pd.to_datetime(qdf["period_end"]).dt.date
+            qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
 
         # Annual book value
         bv_sql = text(
@@ -1929,7 +1941,7 @@ def compute_portfolio_valuations_timeseries(
             bv_sql, conn, params={"isins": all_isins, "end_date": max_month}
         )
         if not bvdf.empty:
-            bvdf["year_end"] = pd.to_datetime(bvdf["year_end"]).dt.date
+            bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
 
     # ---------------------------------------------------------------------
     # 5) Build TTM sales / PAT from quarterly data
@@ -1958,105 +1970,66 @@ def compute_portfolio_valuations_timeseries(
     # 6) Attach MC and fundamentals to holdings (as-of each month)
     # ---------------------------------------------------------------------
     # Merge market cap on (isin, month_end)
-    mc_ = mc.rename(columns={"month_end": "month_end", "market_cap": "mc"})
-    holdings = holdings.merge(
-        mc_[["isin", "month_end", "mc"]],
-        on=["isin", "month_end"],
-        how="left",
-    )
+    if not mc.empty:
+        mc["isin"] = mc["isin"].astype(str)
+        mc_ = mc.rename(columns={"market_cap": "mc"})
+        holdings["isin"] = holdings["isin"].astype(str)
+        holdings = holdings.merge(
+            mc_[["isin", "month_end", "mc"]],
+            on=["isin", "month_end"],
+            how="left",
+        )
+    else:
+        holdings["mc"] = np.nan
 
     # As-of TTM sales/PAT via merge_asof on (isin, month_end)
-    # --- As-of TTM sales/PAT ---
     if not qdf_ttm.empty:
-        # Left frame
-        h = holdings.copy()
-        h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        h = h.sort_values(["isin", "month_end_dt"]).reset_index(drop=True)
+        qdf_ttm["isin"] = qdf_ttm["isin"].astype(str)
 
-        # Right frame
+        h = holdings.copy()
+        h = h.sort_values(["isin", "month_end"]).reset_index(drop=True)
+
         ttm = qdf_ttm.copy()
-        ttm["period_end_dt"] = pd.to_datetime(ttm["period_end"])
-        ttm = ttm.sort_values(["isin", "period_end_dt"]).reset_index(drop=True)
+        ttm = ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
 
-        # Important: merge_asof REQUIRES identical dtype and sortedness on join keys
-        
-            # ================================
-        # DEBUG BLOCK: remove after testing
-        # ================================
-        st.write("DEBUG: holdings head (10 rows):")
-        st.write(holdings.head(10))
-
-        st.write("DEBUG: holdings dtypes:")
-        st.write(holdings.dtypes)
-
-        # Check sort correctness for holdings
-        h = holdings.copy()
-        h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        h = h.sort_values(["isin", "month_end_dt"])
-
-        # Are we REALLY sorted? Check where sorted order breaks.
-        h_shift = h[["isin", "month_end_dt"]].shift(1)
-        not_sorted_mask = (
-            (h["isin"] < h_shift["isin"]) |
-            ((h["isin"] == h_shift["isin"]) & (h["month_end_dt"] < h_shift["month_end_dt"]))
-        )
-
-        bad_rows = h[not_sorted_mask]
-        if len(bad_rows) > 0:
-            st.error("🚨 HOLDINGS NOT SORTED CORRECTLY FOR merge_asof!")
-            st.write("Rows where ordering fails:")
-            st.write(bad_rows.head(20))
-            st.stop()
-
-        st.success("Holdings sorting validated.")
-    # ================================
-
-        
         merged = pd.merge_asof(
             h,
             ttm,
-            left_on="month_end_dt",
-            right_on="period_end_dt",
+            left_on="month_end",
+            right_on="period_end",
             by="isin",
             direction="backward",
             allow_exact_matches=True,
         )
 
-        holdings = merged.drop(columns=["month_end_dt", "period_end_dt"])
-
+        holdings = merged.drop(columns=["period_end"])
     else:
         holdings["ttm_sales"] = np.nan
         holdings["ttm_pat"] = np.nan
 
-
-
     # As-of last book value via merge_asof
-    # --- As-of Book Value ---
     if not bvdf.empty:
+        bvdf["isin"] = bvdf["isin"].astype(str)
+
         h = holdings.copy()
-        h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        h = h.sort_values(["isin", "month_end_dt"]).reset_index(drop=True)
+        h = h.sort_values(["isin", "month_end"]).reset_index(drop=True)
 
         b = bvdf.copy()
-        b["year_end_dt"] = pd.to_datetime(b["year_end"])
-        b = b.sort_values(["isin", "year_end_dt"]).reset_index(drop=True)
+        b = b.sort_values(["isin", "year_end"]).reset_index(drop=True)
 
         merged_b = pd.merge_asof(
             h,
             b,
-            left_on="month_end_dt",
-            right_on="year_end_dt",
+            left_on="month_end",
+            right_on="year_end",
             by="isin",
             direction="backward",
             allow_exact_matches=True,
         )
 
-        holdings = merged_b.drop(columns=["month_end_dt", "year_end_dt"])
-
+        holdings = merged_b.drop(columns=["year_end"])
     else:
         holdings["book_value"] = np.nan
-
-
 
     # ---------------------------------------------------------------------
     # 7) Metric-specific filters & portfolio-level aggregation
@@ -2067,6 +2040,8 @@ def compute_portfolio_valuations_timeseries(
     # Exclude stocks with zero/missing MC
     df["mc"] = pd.to_numeric(df["mc"], errors="coerce").fillna(0.0)
     df = df[df["mc"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
 
     if metric == "PS":
         df["denom"] = pd.to_numeric(df["ttm_sales"], errors="coerce")
@@ -2084,6 +2059,9 @@ def compute_portfolio_valuations_timeseries(
     # Rebase weights again after excluding bad stocks
     sum_w2 = df.groupby(["fund_id", "month_end"])["w_domestic"].transform("sum")
     df = df[sum_w2 > 0].copy()
+    if df.empty:
+        return pd.DataFrame()
+
     df["w_final"] = df["w_domestic"] / sum_w2
 
     # Compute numerator & denominator
@@ -2099,7 +2077,7 @@ def compute_portfolio_valuations_timeseries(
         return pd.DataFrame()
 
     agg["value"] = agg["num"] / agg["den"]
-    agg["month_end"] = pd.to_datetime(agg["month_end"])
+    # month_end is already datetime64[ns] and normalised
 
     # ---------------------------------------------------------------------
     # 8) Build chart-ready series: Focus fund vs Universe median (others)
@@ -2126,6 +2104,7 @@ def compute_portfolio_valuations_timeseries(
 
     df_chart = pd.concat([focus_chart, median_chart], ignore_index=True)
     return df_chart
+
 
 
 
