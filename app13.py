@@ -1713,8 +1713,8 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
 
 
 def rebuild_stock_monthly_valuations(
-    start_date: dt.date,
-    end_date: dt.date,
+    start_date: dt.date | None = None,
+    end_date: dt.date | None = None,
     batch_size: int = 10000,
 ):
     """
@@ -1731,9 +1731,35 @@ def rebuild_stock_monthly_valuations(
     """
     engine = get_engine()
 
-    # ------------------------------------------------------------------
+    
+    # --------------------------------------------------------------
+    # 0) Auto-derive start/end if not given
+    # --------------------------------------------------------------
+    if start_date is None or end_date is None:
+        with engine.begin() as conn:
+            rng = conn.execute(
+                text(
+                    """
+                    SELECT
+                        MIN(price_date)::date AS min_d,
+                        MAX(price_date)::date AS max_d
+                    FROM fundlab.stock_price;
+                    """
+                )
+            ).fetchone()
+
+        if not rng or rng.min_d is None or rng.max_d is None:
+            st.warning("No data in fundlab.stock_price to infer date range.")
+            return
+
+        if start_date is None:
+            start_date = rng.min_d
+        if end_date is None:
+            end_date = rng.max_d
+
+    # --------------------------------------------------------------
     # 1) Fetch monthly price / market cap
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------
     with engine.begin() as conn:
         price_sql = text(
             """
@@ -2020,8 +2046,8 @@ def rebuild_stock_monthly_valuations(
 
 
 def rebuild_fund_monthly_valuations(
-    start_date: dt.date,
-    end_date: dt.date,
+    start_date: dt.date | None = None,
+    end_date: dt.date | None = None,
     fund_ids: list[int] | None = None,
     batch_size: int = 5000,
 ):
@@ -2047,6 +2073,45 @@ def rebuild_fund_monthly_valuations(
          ON CONFLICT (fund_id, month_end, segment) DO UPDATE.
     """
     engine = get_engine()
+
+    # --------------------------------------------------------------
+    # 0) Auto-derive date range if not provided
+    # --------------------------------------------------------------
+    with engine.begin() as conn:
+        if start_date is None or end_date is None:
+            if fund_ids:
+                rng = conn.execute(
+                    text(
+                        """
+                        SELECT
+                            MIN(month_end)::date AS min_d,
+                            MAX(month_end)::date AS max_d
+                        FROM fundlab.fund_portfolio
+                        WHERE fund_id = ANY(:fund_ids);
+                        """
+                    ),
+                    {"fund_ids": fund_ids},
+                ).fetchone()
+            else:
+                rng = conn.execute(
+                    text(
+                        """
+                        SELECT
+                            MIN(month_end)::date AS min_d,
+                            MAX(month_end)::date AS max_d
+                        FROM fundlab.fund_portfolio;
+                        """
+                    )
+                ).fetchone()
+
+            if not rng or rng.min_d is None or rng.max_d is None:
+                st.warning("No data in fundlab.fund_portfolio to infer date range.")
+                return
+
+            if start_date is None:
+                start_date = rng.min_d
+            if end_date is None:
+                end_date = rng.max_d
 
     # --------------------------------------------------------------
     # 1) Fetch holdings (Domestic Equities only) for the period
@@ -2106,6 +2171,7 @@ def rebuild_fund_monthly_valuations(
                     "end_date": end_date,
                 },
             )
+
 
     if holdings.empty:
         st.info("No fund_portfolio holdings found in the given period.")
