@@ -1965,44 +1965,58 @@ def compute_portfolio_valuations_timeseries(
         how="left",
     )
 
-    # As-of TTM sales/PAT
+    # As-of TTM sales/PAT via merge_asof on (isin, month_end)
     if not qdf_ttm.empty:
-        h = holdings.sort_values(["isin", "month_end"]).copy()
+        # Left frame: holdings, sorted by (isin, month_end_dt)
+        h = holdings.copy()
         h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        ttm = qdf_ttm.sort_values(["isin", "period_end"]).copy()
+        h = h.sort_values(["isin", "month_end_dt"])
+
+        # Right frame: TTM quarterly data, sorted by (isin, period_end_dt)
+        ttm = qdf_ttm.copy()
         ttm["period_end_dt"] = pd.to_datetime(ttm["period_end"])
+        ttm = ttm.sort_values(["isin", "period_end_dt"])
 
         merged = pd.merge_asof(
-            h.sort_values(["isin", "month_end_dt"]),
-            ttm.sort_values(["isin", "period_end_dt"]),
+            h,
+            ttm,
             left_on="month_end_dt",
             right_on="period_end_dt",
             by="isin",
             direction="backward",
         )
+
         holdings = merged.drop(columns=["month_end_dt", "period_end_dt"])
     else:
         holdings["ttm_sales"] = np.nan
         holdings["ttm_pat"] = np.nan
 
-    # As-of book value
+
+    # As-of last book value via merge_asof
     if not bvdf.empty:
-        h = holdings.sort_values(["isin", "month_end"]).copy()
+        # Left frame: holdings, sorted by (isin, month_end_dt)
+        h = holdings.copy()
         h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        b = bvdf.sort_values(["isin", "year_end"]).copy()
+        h = h.sort_values(["isin", "month_end_dt"])
+
+        # Right frame: annual BV, sorted by (isin, year_end_dt)
+        b = bvdf.copy()
         b["year_end_dt"] = pd.to_datetime(b["year_end"])
+        b = b.sort_values(["isin", "year_end_dt"])
 
         merged_b = pd.merge_asof(
-            h.sort_values(["isin", "month_end_dt"]),
-            b.sort_values(["isin", "year_end_dt"]),
+            h,
+            b,
             left_on="month_end_dt",
             right_on="year_end_dt",
             by="isin",
             direction="backward",
         )
+
         holdings = merged_b.drop(columns=["month_end_dt", "year_end_dt"])
     else:
         holdings["book_value"] = np.nan
+
 
     # ---------------------------------------------------------------------
     # 7) Metric-specific filters & portfolio-level aggregation
@@ -4669,26 +4683,6 @@ def portfolio_fundamentals_page():
         )
         st.altair_chart(val_chart, use_container_width=True)
 
-    # 10) Underlying data table (funds in rows, periods in columns)
-    st.subheader("7. Underlying data")
-
-    df_table = df_result.copy()
-    df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-    df_table["period_date"] = df_table["month_end"]
-
-    df_pivot = (
-        df_table.pivot_table(
-            index="fund_name",
-            columns="period_date",
-            values="metric",
-        )
-        .sort_index(axis=0)
-        .sort_index(axis=1)
-    )
-
-    df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
-
-    st.dataframe(df_pivot.style.format("{:.2f}"))
 
 
 
