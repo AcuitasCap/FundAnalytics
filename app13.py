@@ -874,25 +874,22 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
 
 from sqlalchemy import text
 
+from sqlalchemy import text
+
+
 def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
     """
     Upsert PAT into fundlab.stock_quarterly_financials.
     Insert new rows or update PAT for existing (isin, period_end, is_consolidated).
+    Explicit batching for large files.
     """
+    BATCH_SIZE = 10_000
     if df_clean.empty:
         return
 
-    records = []
-    for _, row in df_clean.iterrows():
-        records.append(
-            {
-                "isin": row["isin"],
-                "period_end": row["period_end"],
-                "fiscal_year": int(row["fiscal_year"]),
-                "fiscal_quarter": int(row["fiscal_quarter"]),
-                "pat": float(row["pat"]),
-            }
-        )
+    total_rows = len(df_clean)
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
 
     stmt = text(
         """
@@ -908,28 +905,40 @@ def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
     )
 
     with engine.begin() as conn:
-        conn.execute(stmt, records)
+        for i in range(0, total_rows, BATCH_SIZE):
+            batch = df_clean.iloc[i : i + BATCH_SIZE]
+            records = [
+                {
+                    "isin": row["isin"],
+                    "period_end": row["period_end"],
+                    "fiscal_year": int(row["fiscal_year"]),
+                    "fiscal_quarter": int(row["fiscal_quarter"]),
+                    "pat": float(row["pat"]),
+                }
+                for _, row in batch.iterrows()
+            ]
+            conn.execute(stmt, records)
+
+            fraction = min((i + len(batch)) / total_rows, 1.0)
+            progress_bar.progress(fraction)
+            progress_text.text(f"Uploading PAT… {i + len(batch)} / {total_rows} rows")
+
+    progress_text.text(f"Uploading PAT… done ({total_rows} rows).")
 
 
 def upload_quarterly_sales(df_clean: pd.DataFrame) -> None:
     """
     Upsert sales into fundlab.stock_quarterly_financials.
     Insert new rows or update sales for existing (isin, period_end, is_consolidated).
+    Explicit batching for large files.
     """
+    BATCH_SIZE = 10_000
     if df_clean.empty:
         return
 
-    records = []
-    for _, row in df_clean.iterrows():
-        records.append(
-            {
-                "isin": row["isin"],
-                "period_end": row["period_end"],
-                "fiscal_year": int(row["fiscal_year"]),
-                "fiscal_quarter": int(row["fiscal_quarter"]),
-                "sales": float(row["sales"]),
-            }
-        )
+    total_rows = len(df_clean)
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
 
     stmt = text(
         """
@@ -945,27 +954,40 @@ def upload_quarterly_sales(df_clean: pd.DataFrame) -> None:
     )
 
     with engine.begin() as conn:
-        conn.execute(stmt, records)
+        for i in range(0, total_rows, BATCH_SIZE):
+            batch = df_clean.iloc[i : i + BATCH_SIZE]
+            records = [
+                {
+                    "isin": row["isin"],
+                    "period_end": row["period_end"],
+                    "fiscal_year": int(row["fiscal_year"]),
+                    "fiscal_quarter": int(row["fiscal_quarter"]),
+                    "sales": float(row["sales"]),
+                }
+                for _, row in batch.iterrows()
+            ]
+            conn.execute(stmt, records)
+
+            fraction = min((i + len(batch)) / total_rows, 1.0)
+            progress_bar.progress(fraction)
+            progress_text.text(f"Uploading sales… {i + len(batch)} / {total_rows} rows")
+
+    progress_text.text(f"Uploading sales… done ({total_rows} rows).")
 
 
 def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
     """
     Upsert book value into fundlab.stock_annual_book_value.
     Insert new rows or update book_value for existing (isin, year_end, is_consolidated).
+    Explicit batching for large files.
     """
+    BATCH_SIZE = 10_000
     if df_clean.empty:
         return
 
-    records = []
-    for _, row in df_clean.iterrows():
-        records.append(
-            {
-                "isin": row["isin"],
-                "year_end": row["year_end"],
-                "fiscal_year": int(row["fiscal_year"]),
-                "book_value": float(row["book_value"]),
-            }
-        )
+    total_rows = len(df_clean)
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
 
     stmt = text(
         """
@@ -981,7 +1003,25 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
     )
 
     with engine.begin() as conn:
-        conn.execute(stmt, records)
+        for i in range(0, total_rows, BATCH_SIZE):
+            batch = df_clean.iloc[i : i + BATCH_SIZE]
+            records = [
+                {
+                    "isin": row["isin"],
+                    "year_end": row["year_end"],
+                    "fiscal_year": int(row["fiscal_year"]),
+                    "book_value": float(row["book_value"]),
+                }
+                for _, row in batch.iterrows()
+            ]
+            conn.execute(stmt, records)
+
+            fraction = min((i + len(batch)) / total_rows, 1.0)
+            progress_bar.progress(fraction)
+            progress_text.text(f"Uploading book value… {i + len(batch)} / {total_rows} rows")
+
+    progress_text.text(f"Uploading book value… done ({total_rows} rows).")
+
 
 
 
