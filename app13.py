@@ -1711,6 +1711,634 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     return pivot
 
 
+
+def rebuild_stock_monthly_valuations(
+    start_date: dt.date,
+    end_date: dt.date,
+    batch_size: int = 10000,
+):
+    """
+    Housekeeping job:
+    Builds/refreshes fundlab.stock_monthly_valuations for all ISINs
+    that have prices between start_date and end_date.
+
+    For each (isin, month_end) in fundlab.stock_price:
+      - Pull market_cap at that date
+      - Attach TTM sales / PAT (last 4 quarters <= month_end)
+      - Attach last annual book value (year_end <= month_end)
+      - Compute P/S, P/E, P/B at stock level
+      - Upsert into fundlab.stock_monthly_valuations
+    """
+    engine = get_engine()
+
+    # ------------------------------------------------------------------
+    # 1) Fetch monthly price / market cap
+    # ------------------------------------------------------------------
+    with engine.begin() as conn:
+        price_sql = text(
+            """
+            SELECT
+                isin,
+                price_date::date AS month_end,
+                market_cap
+            FROM fundlab.stock_price
+            WHERE price_date BETWEEN :start_date AND :end_date
+              AND market_cap IS NOT NULL;
+            """
+        )
+        prices = pd.read_sql(
+            price_sql,
+            conn,
+            params={"start_date": start_date, "end_date": end_date},
+        )
+
+    if prices.empty:
+        st.info("No stock_price data found in the given period for stock valuations.")
+        return
+
+    # Clean up price data
+    prices["isin"] = prices["isin"].astype(str).str.strip()
+    prices["month_end"] = pd.to_datetime(prices["month_end"], errors="coerce").dt.normalize()
+    prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
+
+    prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
+    if prices.empty:
+        st.info("After cleaning, no usable price/market_cap rows remain.")
+        return
+
+    # We'll work on this as our base monthly grid
+    base = prices.copy()
+
+    all_isins = sorted(base["isin"].unique().tolist())
+    min_month = base["month_end"].min()
+    max_month = base["month_end"].max()
+
+    # ------------------------------------------------------------------
+    # 2) Fetch quarterly & annual fundamentals once
+    # ------------------------------------------------------------------
+    with engine.begin() as conn:
+        # Quarterly sales & PAT
+        q_sql = text(
+            """
+            SELECT isin, period_end, sales, pat
+            FROM fundlab.stock_quarterly_financials
+            WHERE isin = ANY(:isins)
+              AND is_consolidated = TRUE
+              AND period_end <= :end_date
+            ORDER BY isin, period_end;
+            """
+        )
+        qdf = pd.read_sql(
+            q_sql, conn, params={"isins": all_isins, "end_date": max_month}
+        )
+
+        # Annual book value
+        bv_sql = text(
+            """
+            SELECT isin, year_end, book_value
+            FROM fundlab.stock_annual_book_value
+            WHERE isin = ANY(:isins)
+              AND is_consolidated = TRUE
+              AND year_end <= :end_date
+            ORDER BY isin, year_end;
+            """
+        )
+        bvdf = pd.read_sql(
+            bv_sql, conn, params={"isins": all_isins, "end_date": max_month}
+        )
+
+    # Clean up quarterly data
+    if not qdf.empty:
+        qdf["isin"] = qdf["isin"].astype(str).str.strip()
+        qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
+        qdf["sales"] = pd.to_numeric(qdf["sales"], errors="coerce")
+        qdf["pat"] = pd.to_numeric(qdf["pat"], errors="coerce")
+
+        qdf = qdf.dropna(subset=["isin", "period_end"])
+        # Build TTM
+        qdf = qdf.sort_values(["isin", "period_end"])
+        qdf["ttm_sales"] = (
+            qdf.groupby("isin")["sales"]
+            .rolling(window=4, min_periods=4)
+            .sum()
+            .reset_index(level=0, drop=True)
+        )
+        qdf["ttm_pat"] = (
+            qdf.groupby("isin")["pat"]
+            .rolling(window=4, min_periods=4)
+            .sum()
+            .reset_index(level=0, drop=True)
+        )
+
+        qdf_ttm = qdf[["isin", "period_end", "ttm_sales", "ttm_pat"]].dropna(
+            how="all", subset=["ttm_sales", "ttm_pat"]
+        )
+    else:
+        qdf_ttm = pd.DataFrame(columns=["isin", "period_end", "ttm_sales", "ttm_pat"])
+
+    # Clean up annual BV data
+    if not bvdf.empty:
+        bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
+        bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
+        bvdf["book_value"] = pd.to_numeric(bvdf["book_value"], errors="coerce")
+        bvdf = bvdf.dropna(subset=["isin", "year_end"])
+    else:
+        bvdf = pd.DataFrame(columns=["isin", "year_end", "book_value"])
+
+    # ------------------------------------------------------------------
+    # 3) Attach TTM sales / PAT and book value per (isin, month_end)
+    #    using manual "last known <= month_end" alignment
+    # ------------------------------------------------------------------
+    base = base.reset_index(drop=True)
+    base["ttm_sales"] = np.nan
+    base["ttm_pat"] = np.nan
+    base["book_value"] = np.nan
+
+    # ---- TTM sales/PAT ----
+    if not qdf_ttm.empty:
+        qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
+
+        for isin, sub_ttm in qdf_ttm.groupby("isin"):
+            mask = base["isin"] == isin
+            if not mask.any():
+                continue
+
+            idx = base.index[mask]
+            h_dates = base.loc[idx, "month_end"].values.astype("datetime64[ns]")
+            q_dates = sub_ttm["period_end"].values.astype("datetime64[ns]")
+
+            pos = np.searchsorted(q_dates, h_dates, side="right") - 1
+            valid = pos >= 0
+            if not np.any(valid):
+                continue
+
+            aligned_sales = np.full(h_dates.shape, np.nan)
+            aligned_pat = np.full(h_dates.shape, np.nan)
+            aligned_sales[valid] = sub_ttm["ttm_sales"].values[pos[valid]]
+            aligned_pat[valid] = sub_ttm["ttm_pat"].values[pos[valid]]
+
+            base.loc[idx, "ttm_sales"] = aligned_sales
+            base.loc[idx, "ttm_pat"] = aligned_pat
+
+    # ---- Book value ----
+    if not bvdf.empty:
+        bvdf = bvdf.sort_values(["isin", "year_end"]).reset_index(drop=True)
+
+        for isin, sub_bv in bvdf.groupby("isin"):
+            mask = base["isin"] == isin
+            if not mask.any():
+                continue
+
+            idx = base.index[mask]
+            h_dates = base.loc[idx, "month_end"].values.astype("datetime64[ns]")
+            b_dates = sub_bv["year_end"].values.astype("datetime64[ns]")
+
+            pos = np.searchsorted(b_dates, h_dates, side="right") - 1
+            valid = pos >= 0
+            if not np.any(valid):
+                continue
+
+            aligned_bv = np.full(h_dates.shape, np.nan)
+            aligned_bv[valid] = sub_bv["book_value"].values[pos[valid]]
+
+            base.loc[idx, "book_value"] = aligned_bv
+
+    # ------------------------------------------------------------------
+    # 4) Compute P/S, P/E, P/B at stock level
+    # ------------------------------------------------------------------
+    df = base.copy()
+
+    mc = pd.to_numeric(df["market_cap"], errors="coerce")
+    ttm_sales = pd.to_numeric(df["ttm_sales"], errors="coerce")
+    ttm_pat = pd.to_numeric(df["ttm_pat"], errors="coerce")
+    bv = pd.to_numeric(df["book_value"], errors="coerce")
+
+    df["ps"] = np.where(
+        (mc > 0) & (ttm_sales > 0),
+        mc / ttm_sales,
+        np.nan,
+    )
+    df["pe"] = np.where(
+        (mc > 0) & (ttm_pat > 0),
+        mc / ttm_pat,
+        np.nan,
+    )
+    df["pb"] = np.where(
+        (mc > 0) & (bv > 0),
+        mc / bv,
+        np.nan,
+    )
+
+    # Optional: drop rows with no valuations at all (keep only where at least MC is present)
+    df = df.dropna(subset=["market_cap"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # 5) Batched upsert into fundlab.stock_monthly_valuations
+    # ------------------------------------------------------------------
+    n = len(df)
+    if n == 0:
+        st.info("No rows to write into stock_monthly_valuations after processing.")
+        return
+
+    insert_sql = text(
+        """
+        INSERT INTO fundlab.stock_monthly_valuations (
+            isin,
+            month_end,
+            market_cap,
+            ttm_sales,
+            ttm_pat,
+            book_value,
+            ps,
+            pe,
+            pb,
+            is_consolidated,
+            currency_code,
+            source,
+            source_ref
+        )
+        SELECT
+            unnest(:isins),
+            unnest(:month_ends),
+            unnest(:market_caps),
+            unnest(:ttm_sales),
+            unnest(:ttm_pats),
+            unnest(:book_values),
+            unnest(:ps_vals),
+            unnest(:pe_vals),
+            unnest(:pb_vals),
+            unnest(:is_consolidated),
+            unnest(:currency_codes),
+            unnest(:sources),
+            unnest(:source_refs)
+        ON CONFLICT (isin, month_end)
+        DO UPDATE SET
+            market_cap    = EXCLUDED.market_cap,
+            ttm_sales     = EXCLUDED.ttm_sales,
+            ttm_pat       = EXCLUDED.ttm_pat,
+            book_value    = EXCLUDED.book_value,
+            ps            = EXCLUDED.ps,
+            pe            = EXCLUDED.pe,
+            pb            = EXCLUDED.pb,
+            is_consolidated = EXCLUDED.is_consolidated,
+            currency_code   = EXCLUDED.currency_code,
+            source          = EXCLUDED.source,
+            source_ref      = EXCLUDED.source_ref,
+            updated_at      = NOW();
+        """
+    )
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = df.iloc[start:end]
+
+            params = {
+                "isins":          list(chunk["isin"].astype(str)),
+                "month_ends":     list(chunk["month_end"].dt.date),
+                "market_caps":    list(chunk["market_cap"]),
+                "ttm_sales":      list(chunk["ttm_sales"]),
+                "ttm_pats":       list(chunk["ttm_pat"]),
+                "book_values":    list(chunk["book_value"]),
+                "ps_vals":        list(chunk["ps"]),
+                "pe_vals":        list(chunk["pe"]),
+                "pb_vals":        list(chunk["pb"]),
+                "is_consolidated": [True] * len(chunk),
+                "currency_codes":  ["INR"] * len(chunk),
+                "sources":         ["housekeeping"] * len(chunk),
+                "source_refs":     ["stock_price+financials"] * len(chunk),
+            }
+
+            conn.execute(insert_sql, params)
+
+    st.success(
+        f"Stock monthly valuations rebuilt for {n} (isin, month_end) rows "
+        f"between {start_date} and {end_date}."
+    )
+
+
+
+def rebuild_fund_monthly_valuations(
+    start_date: dt.date,
+    end_date: dt.date,
+    fund_ids: list[int] | None = None,
+    batch_size: int = 5000,
+):
+    """
+    Housekeeping job:
+    Precomputes 'valuations of historical portfolios' for all (or selected) funds
+    and stores them in fundlab.fund_monthly_valuations.
+
+    Logic:
+      1) Pull fund_portfolio holdings for Domestic Equities between start_date & end_date,
+         joined with stock_master to get is_financial.
+      2) Rebase holding_weight within (fund_id, month_end) so Domestic Equities = 100%.
+      3) Join to fundlab.stock_monthly_valuations on (isin, month_end).
+      4) For each (fund_id, month_end, segment) and metric (P/S, P/E, P/B):
+           - Segment = 'Total' / 'Financials' / 'Non-financials'
+           - For chosen segment:
+               * Filter to stocks with metric > 0 (ps, pe, pb) and not null.
+               * Let w_i = w_domestic (rebased domestic weight).
+               * Let W = sum(w_i) over eligible stocks.
+               * Weighted metric = sum( (w_i / W) * metric_i ).
+           - Store ps, pe, pb in fund_monthly_valuations.
+      5) Upsert using UNNEST-based batch insert with
+         ON CONFLICT (fund_id, month_end, segment) DO UPDATE.
+    """
+    engine = get_engine()
+
+    # --------------------------------------------------------------
+    # 1) Fetch holdings (Domestic Equities only) for the period
+    # --------------------------------------------------------------
+    with engine.begin() as conn:
+        if fund_ids:
+            holdings_sql = text(
+                """
+                SELECT
+                    fp.fund_id,
+                    fp.month_end,
+                    fp.isin,
+                    fp.holding_weight AS weight_pct,
+                    fp.asset_type,
+                    sm.is_financial
+                FROM fundlab.fund_portfolio fp
+                JOIN fundlab.stock_master sm
+                  ON fp.isin = sm.isin
+                WHERE fp.month_end BETWEEN :start_date AND :end_date
+                  AND fp.asset_type = 'Domestic Equities'
+                  AND fp.fund_id = ANY(:fund_ids)
+                ORDER BY fp.fund_id, fp.month_end, fp.isin;
+                """
+            )
+            holdings = pd.read_sql(
+                holdings_sql,
+                conn,
+                params={
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "fund_ids": fund_ids,
+                },
+            )
+        else:
+            holdings_sql = text(
+                """
+                SELECT
+                    fp.fund_id,
+                    fp.month_end,
+                    fp.isin,
+                    fp.holding_weight AS weight_pct,
+                    fp.asset_type,
+                    sm.is_financial
+                FROM fundlab.fund_portfolio fp
+                JOIN fundlab.stock_master sm
+                  ON fp.isin = sm.isin
+                WHERE fp.month_end BETWEEN :start_date AND :end_date
+                  AND fp.asset_type = 'Domestic Equities'
+                ORDER BY fp.fund_id, fp.month_end, fp.isin;
+                """
+            )
+            holdings = pd.read_sql(
+                holdings_sql,
+                conn,
+                params={
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+            )
+
+    if holdings.empty:
+        st.info("No fund_portfolio holdings found in the given period.")
+        return
+
+    # Clean holdings
+    holdings["isin"] = holdings["isin"].astype(str).str.strip()
+    holdings["month_end"] = pd.to_datetime(
+        holdings["month_end"], errors="coerce"
+    ).dt.normalize()
+    holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
+    holdings = holdings.dropna(subset=["fund_id", "isin", "month_end", "weight_pct"])
+
+    if holdings.empty:
+        st.info("No usable holdings after cleaning.")
+        return
+
+    # --------------------------------------------------------------
+    # 2) Rebase weights within (fund_id, month_end) to Domestic = 100
+    # --------------------------------------------------------------
+    sum_w = holdings.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
+    holdings = holdings[sum_w > 0].copy()
+    if holdings.empty:
+        st.info("No holdings with positive weight sums.")
+        return
+
+    holdings["w_domestic"] = holdings["weight_pct"] / sum_w
+
+    # --------------------------------------------------------------
+    # 3) Join to stock_monthly_valuations
+    # --------------------------------------------------------------
+    all_isins = sorted(holdings["isin"].unique().tolist())
+    min_month = holdings["month_end"].min()
+    max_month = holdings["month_end"].max()
+
+    with engine.begin() as conn:
+        val_sql = text(
+            """
+            SELECT
+                isin,
+                month_end,
+                market_cap,
+                ttm_sales,
+                ttm_pat,
+                book_value,
+                ps,
+                pe,
+                pb
+            FROM fundlab.stock_monthly_valuations
+            WHERE isin = ANY(:isins)
+              AND month_end BETWEEN :start_date AND :end_date;
+            """
+        )
+        vals = pd.read_sql(
+            val_sql,
+            conn,
+            params={
+                "isins": all_isins,
+                "start_date": min_month,
+                "end_date": max_month,
+            },
+        )
+
+    if vals.empty:
+        st.info("No stock_monthly_valuations rows found for the given holdings.")
+        return
+
+    vals["isin"] = vals["isin"].astype(str).str.strip()
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
+
+    # Merge valuations into holdings
+    df = holdings.merge(
+        vals,
+        on=["isin", "month_end"],
+        how="left",
+        suffixes=("", "_val"),
+    )
+
+    # If no valuations at all, nothing to do
+    if df[["ps", "pe", "pb"]].isna().all(axis=None):
+        st.info("All merged valuations are NaN; nothing to write.")
+        return
+
+    # --------------------------------------------------------------
+    # 4) Compute fund-level valuations: P/S, P/E, P/B by segment
+    # --------------------------------------------------------------
+    segments = ["Total", "Financials", "Non-financials"]
+    records = []
+
+    # We operate fund-by-fund, month-by-month
+    df["is_financial"] = df["is_financial"].astype(bool)
+
+    for (fund_id, month_end), grp in df.groupby(["fund_id", "month_end"]):
+        grp = grp.copy()
+
+        for seg in segments:
+            if seg == "Financials":
+                seg_grp = grp[grp["is_financial"]].copy()
+            elif seg == "Non-financials":
+                seg_grp = grp[~grp["is_financial"]].copy()
+            else:  # 'Total'
+                seg_grp = grp.copy()
+
+            if seg_grp.empty:
+                continue
+
+            # For diagnostics: total domestic weight in this segment before dropping bad stocks
+            total_weight_seg = float(seg_grp["w_domestic"].sum())
+
+            # Metric-wise computations
+            ps_val = np.nan
+            pe_val = np.nan
+            pb_val = np.nan
+            stock_count = 0  # we will track max count among metrics
+
+            # Helper to compute weighted avg of any given metric column name
+            def _weighted_metric(col_name: str) -> tuple[float, int, float]:
+                g = seg_grp.copy()
+                g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
+                g = g[g[col_name] > 0].copy()
+                if g.empty:
+                    return (np.nan, 0, 0.0)
+
+                w = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
+                sum_w = float(w.sum())
+                if sum_w <= 0:
+                    return (np.nan, 0, 0.0)
+
+                w_rebased = w / sum_w
+                metric = g[col_name].to_numpy()
+                value = float((w_rebased * metric).sum())
+                return (value, len(g), sum_w)
+
+            # P/S
+            ps_val, ps_count, ps_wsum = _weighted_metric("ps")
+            # P/E
+            pe_val, pe_count, pe_wsum = _weighted_metric("pe")
+            # P/B
+            pb_val, pb_count, pb_wsum = _weighted_metric("pb")
+
+            # If all three are NaN, skip writing a row
+            if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
+                continue
+
+            stock_count = max(ps_count, pe_count, pb_count)
+
+            records.append(
+                {
+                    "fund_id": int(fund_id),
+                    "month_end": month_end,
+                    "segment": seg,
+                    "ps": None if np.isnan(ps_val) else float(ps_val),
+                    "pe": None if np.isnan(pe_val) else float(pe_val),
+                    "pb": None if np.isnan(pb_val) else float(pb_val),
+                    "stock_count": int(stock_count),
+                    "total_weight": total_weight_seg,
+                    "notes": None,
+                }
+            )
+
+    if not records:
+        st.info("No fund-level valuation records to write (all segments/metrics empty).")
+        return
+
+    df_out = pd.DataFrame.from_records(records)
+
+    # --------------------------------------------------------------
+    # 5) Batched upsert into fundlab.fund_monthly_valuations
+    # --------------------------------------------------------------
+    n = len(df_out)
+
+    insert_sql = text(
+        """
+        INSERT INTO fundlab.fund_monthly_valuations (
+            fund_id,
+            month_end,
+            segment,
+            ps,
+            pe,
+            pb,
+            stock_count,
+            total_weight,
+            notes
+        )
+        SELECT
+            unnest(:fund_ids),
+            unnest(:month_ends),
+            unnest(:segments),
+            unnest(:ps_vals),
+            unnest(:pe_vals),
+            unnest(:pb_vals),
+            unnest(:stock_counts),
+            unnest(:total_weights),
+            unnest(:notes)
+        ON CONFLICT (fund_id, month_end, segment)
+        DO UPDATE SET
+            ps           = EXCLUDED.ps,
+            pe           = EXCLUDED.pe,
+            pb           = EXCLUDED.pb,
+            stock_count  = EXCLUDED.stock_count,
+            total_weight = EXCLUDED.total_weight,
+            notes        = EXCLUDED.notes,
+            updated_at   = NOW();
+        """
+    )
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            chunk = df_out.iloc[start:end]
+
+            params = {
+                "fund_ids":      list(chunk["fund_id"].astype(int)),
+                "month_ends":    list(pd.to_datetime(chunk["month_end"]).dt.date),
+                "segments":      list(chunk["segment"].astype(str)),
+                "ps_vals":       list(chunk["ps"]),
+                "pe_vals":       list(chunk["pe"]),
+                "pb_vals":       list(chunk["pb"]),
+                "stock_counts":  list(chunk["stock_count"].astype(int)),
+                "total_weights": list(chunk["total_weight"].astype(float)),
+                "notes":         list(chunk["notes"]),
+            }
+
+            conn.execute(insert_sql, params)
+
+    st.success(
+        f"Fund monthly valuations rebuilt: {n} (fund, month, segment) rows "
+        f"between {start_date} and {end_date}."
+    )
+
+
+
 def compute_portfolio_valuations_timeseries(
     fund_ids: list[int],
     focus_fund_id: int,
@@ -5379,6 +6007,14 @@ def housekeeping_page():
     if st.button("3. Recompute quality quartiles (Q1–Q4)"):
         recompute_quality_quartiles()
         st.success("Quality quartiles updated.")
+    
+    if st.button("4. Refresh stock valuations"):
+        rebuild_stock_monthly_valuations()
+        st.success("Stock valuations updated")   
+
+    if st.button("5. Refresh fund valuations"):
+        rebuild_fund_monthly_valuations()
+        st.success("Fund valuations updated")     
 
 
 
