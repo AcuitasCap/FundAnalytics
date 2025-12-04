@@ -1979,6 +1979,39 @@ def compute_portfolio_valuations_timeseries(
         ttm = ttm.sort_values(["isin", "period_end_dt"]).reset_index(drop=True)
 
         # Important: merge_asof REQUIRES identical dtype and sortedness on join keys
+        
+            # ================================
+        # DEBUG BLOCK: remove after testing
+        # ================================
+        st.write("DEBUG: holdings head (10 rows):")
+        st.write(holdings.head(10))
+
+        st.write("DEBUG: holdings dtypes:")
+        st.write(holdings.dtypes)
+
+        # Check sort correctness for holdings
+        h = holdings.copy()
+        h["month_end_dt"] = pd.to_datetime(h["month_end"])
+        h = h.sort_values(["isin", "month_end_dt"])
+
+        # Are we REALLY sorted? Check where sorted order breaks.
+        h_shift = h[["isin", "month_end_dt"]].shift(1)
+        not_sorted_mask = (
+            (h["isin"] < h_shift["isin"]) |
+            ((h["isin"] == h_shift["isin"]) & (h["month_end_dt"] < h_shift["month_end_dt"]))
+        )
+
+        bad_rows = h[not_sorted_mask]
+        if len(bad_rows) > 0:
+            st.error("🚨 HOLDINGS NOT SORTED CORRECTLY FOR merge_asof!")
+            st.write("Rows where ordering fails:")
+            st.write(bad_rows.head(20))
+            st.stop()
+
+        st.success("Holdings sorting validated.")
+    # ================================
+
+        
         merged = pd.merge_asof(
             h,
             ttm,
