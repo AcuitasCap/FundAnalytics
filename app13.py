@@ -1966,17 +1966,19 @@ def compute_portfolio_valuations_timeseries(
     )
 
     # As-of TTM sales/PAT via merge_asof on (isin, month_end)
+    # --- As-of TTM sales/PAT ---
     if not qdf_ttm.empty:
-        # Left frame: holdings, sorted by (isin, month_end_dt)
+        # Left frame
         h = holdings.copy()
         h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        h = h.sort_values(["isin", "month_end_dt"])
+        h = h.sort_values(["isin", "month_end_dt"]).reset_index(drop=True)
 
-        # Right frame: TTM quarterly data, sorted by (isin, period_end_dt)
+        # Right frame
         ttm = qdf_ttm.copy()
         ttm["period_end_dt"] = pd.to_datetime(ttm["period_end"])
-        ttm = ttm.sort_values(["isin", "period_end_dt"])
+        ttm = ttm.sort_values(["isin", "period_end_dt"]).reset_index(drop=True)
 
+        # Important: merge_asof REQUIRES identical dtype and sortedness on join keys
         merged = pd.merge_asof(
             h,
             ttm,
@@ -1984,25 +1986,27 @@ def compute_portfolio_valuations_timeseries(
             right_on="period_end_dt",
             by="isin",
             direction="backward",
+            allow_exact_matches=True,
         )
 
         holdings = merged.drop(columns=["month_end_dt", "period_end_dt"])
+
     else:
         holdings["ttm_sales"] = np.nan
         holdings["ttm_pat"] = np.nan
 
 
+
     # As-of last book value via merge_asof
+    # --- As-of Book Value ---
     if not bvdf.empty:
-        # Left frame: holdings, sorted by (isin, month_end_dt)
         h = holdings.copy()
         h["month_end_dt"] = pd.to_datetime(h["month_end"])
-        h = h.sort_values(["isin", "month_end_dt"])
+        h = h.sort_values(["isin", "month_end_dt"]).reset_index(drop=True)
 
-        # Right frame: annual BV, sorted by (isin, year_end_dt)
         b = bvdf.copy()
         b["year_end_dt"] = pd.to_datetime(b["year_end"])
-        b = b.sort_values(["isin", "year_end_dt"])
+        b = b.sort_values(["isin", "year_end_dt"]).reset_index(drop=True)
 
         merged_b = pd.merge_asof(
             h,
@@ -2011,11 +2015,14 @@ def compute_portfolio_valuations_timeseries(
             right_on="year_end_dt",
             by="isin",
             direction="backward",
+            allow_exact_matches=True,
         )
 
         holdings = merged_b.drop(columns=["month_end_dt", "year_end_dt"])
+
     else:
         holdings["book_value"] = np.nan
+
 
 
     # ---------------------------------------------------------------------
