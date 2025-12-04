@@ -2018,25 +2018,38 @@ def rebuild_stock_monthly_valuations(
     with engine.begin() as conn:
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
-            chunk = df.iloc[start:end]
+            chunk = df.iloc[start:end].copy()
+
+            # Helper: convert numeric columns to Python floats with None for NaN
+            def _num_list(colname: str):
+                s = pd.to_numeric(chunk[colname], errors="coerce")
+                return [None if pd.isna(x) else float(x) for x in s]
+
+            # month_end as pure date objects
+            month_ends = pd.to_datetime(chunk["month_end"], errors="coerce").dt.date
 
             params = {
                 "isins":          list(chunk["isin"].astype(str)),
-                "month_ends":     list(chunk["month_end"].dt.date),
-                "market_caps":    list(chunk["market_cap"]),
-                "ttm_sales":      list(chunk["ttm_sales"]),
-                "ttm_pats":       list(chunk["ttm_pat"]),
-                "book_values":    list(chunk["book_value"]),
-                "ps_vals":        list(chunk["ps"]),
-                "pe_vals":        list(chunk["pe"]),
-                "pb_vals":        list(chunk["pb"]),
+                "month_ends":     list(month_ends),
+                "market_caps":    _num_list("market_cap"),
+                "ttm_sales":      _num_list("ttm_sales"),
+                "ttm_pats":       _num_list("ttm_pat"),
+                "book_values":    _num_list("book_value"),
+                "ps_vals":        _num_list("ps"),
+                "pe_vals":        _num_list("pe"),
+                "pb_vals":        _num_list("pb"),
                 "is_consolidated": [True] * len(chunk),
                 "currency_codes":  ["INR"] * len(chunk),
                 "sources":         ["housekeeping"] * len(chunk),
                 "source_refs":     ["stock_price+financials"] * len(chunk),
             }
 
+            # Optional sanity check: all array lengths equal
+            L = len(chunk)
+            assert all(len(v) == L for v in params.values()), "UNNEST array length mismatch"
+
             conn.execute(insert_sql, params)
+
 
     st.success(
         f"Stock monthly valuations rebuilt for {n} (isin, month_end) rows "
