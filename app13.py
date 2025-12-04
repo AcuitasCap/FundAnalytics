@@ -311,6 +311,84 @@ def upload_fund_navs(df: pd.DataFrame):
             )
 
 
+def find_conflicts_quarterly(df_clean: pd.DataFrame, table: str):
+    """
+    Check for (isin, period_end) conflicts in either PAT or sales upload.
+    Returns a small list of conflicts if found.
+    """
+    if df_clean.empty:
+        return []
+
+    # Only test unique key pairs
+    pairs = df_clean[["isin", "period_end"]].drop_duplicates()
+
+    # Build VALUES block for up to first 5000 pairs (avoid giant SQL)
+    max_rows = min(len(pairs), 5000)
+    pairs = pairs.iloc[:max_rows]
+
+    values_clause = ", ".join(
+        f"(:isin{i}, :period_end{i})" for i in range(len(pairs))
+    )
+
+    params = {}
+    for i, (_, row) in enumerate(pairs.iterrows()):
+        params[f"isin{i}"] = row["isin"]
+        params[f"period_end{i}"] = row["period_end"]
+
+    query = text(
+        f"""
+        SELECT v.isin, v.period_end
+        FROM (VALUES
+            {values_clause}
+        ) AS v(isin, period_end)
+        JOIN fundlab.{table} t
+        USING (isin, period_end)
+        LIMIT 20;
+        """
+    )
+
+    with engine.begin() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    return rows
+
+
+def find_conflicts_annual(df_clean: pd.DataFrame):
+    """Check (isin, year_end) conflicts for annual book value."""
+    if df_clean.empty:
+        return []
+
+    pairs = df_clean[["isin", "year_end"]].drop_duplicates()
+    max_rows = min(len(pairs), 5000)
+    pairs = pairs.iloc[:max_rows]
+
+    values_clause = ", ".join(
+        f"(:isin{i}, :year_end{i})" for i in range(len(pairs))
+    )
+
+    params = {}
+    for i, (_, row) in enumerate(pairs.iterrows()):
+        params[f"isin{i}"] = row["isin"]
+        params[f"year_end{i}"] = row["year_end"]
+
+    query = text(
+        f"""
+        SELECT v.isin, v.year_end
+        FROM (VALUES
+            {values_clause}
+        ) AS v(isin, year_end)
+        JOIN fundlab.stock_annual_book_value b
+        USING (isin, year_end)
+        LIMIT 20;
+        """
+    )
+
+    with engine.begin() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    return rows
+
+
 
 #Update Supabase with benchmark NAVs
 
@@ -874,332 +952,347 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
 
 
 
+
 def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
     """
-    Insert PAT into fundlab.stock_quarterly_financials.
+    Bulk upload quarterly PAT into fundlab.stock_quarterly_financials.
 
     Behaviour:
-    - Tries to INSERT all rows with ON CONFLICT DO NOTHING.
-    - If any (isin, period_end, is_consolidated) already exists in DB,
-      the entire transaction is rolled back and an error is raised.
+    - If (isin, period_end) does NOT exist → INSERT a new row with PAT.
+    - If (isin, period_end) already exists → UPDATE PAT (and fiscal_year/quarter)
+      for that row, leaving sales untouched.
+    - Uses set-based INSERT/UPDATE via unnest for speed.
     """
+
     if df_clean.empty:
         return
 
-    # Ensure no dupes within the file (validator should already enforce this, but belt & braces)
+    # Remove duplicates within the file
     df_clean = df_clean.drop_duplicates(subset=["isin", "period_end"]).copy()
 
-    total_rows = len(df_clean)
+    n = len(df_clean)
+    if n == 0:
+        return
+
     BATCH_SIZE = 10_000
 
-    progress_text = st.empty()
+    engine = get_engine()
     progress_bar = st.progress(0.0)
-
-    stmt = text(
-        """
-        INSERT INTO fundlab.stock_quarterly_financials
-            (isin, period_end, fiscal_year, fiscal_quarter, pat)
-        VALUES
-            (:isin, :period_end, :fiscal_year, :fiscal_quarter, :pat)
-        ON CONFLICT (isin, period_end, is_consolidated)
-        DO NOTHING;
-        """
-    )
-
-    inserted_total = 0
+    progress_text = st.empty()
 
     with engine.begin() as conn:
-        # 1) Do batched inserts
-        for i in range(0, total_rows, BATCH_SIZE):
-            batch = df_clean.iloc[i : i + BATCH_SIZE]
-            records = [
-                {
-                    "isin": row["isin"],
-                    "period_end": row["period_end"],
-                    "fiscal_year": int(row["fiscal_year"]),
-                    "fiscal_quarter": int(row["fiscal_quarter"]),
-                    "pat": float(row["pat"]),
-                }
-                for _, row in batch.iterrows()
-            ]
+        for start in range(0, n, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, n)
+            chunk = df_clean.iloc[start:end].copy()
 
-            # Update progress BEFORE DB call so UI doesn't look stuck
-            done = i + len(batch)
-            fraction = min(done / total_rows, 1.0)
-            progress_bar.progress(fraction)
-            progress_text.text(f"Uploading PAT… {done} / {total_rows} rows")
-
-            result = conn.execute(stmt, records)
-            inserted_total += result.rowcount
-
-        # 2) Check for conflicts vs DB
-        if inserted_total < total_rows:
-            # Some rows already existed → identify a sample of conflicts for a helpful message
-            keys_sample = (
-                df_clean[["isin", "period_end"]]
-                .drop_duplicates()
-                .head(1000)   # limit sample to avoid huge VALUES clause
-            )
-
-            values_clause = ", ".join(
-                f"(:isin{i}, :period_end{i})" for i in range(len(keys_sample))
-            )
-            params = {
-                f"isin{i}": row["isin"]
-                for i, (_, row) in enumerate(keys_sample.iterrows())
-            }
-            params.update(
-                {
-                    f"period_end{i}": row["period_end"]
-                    for i, (_, row) in enumerate(keys_sample.iterrows())
-                }
-            )
-
-            conflict_query = text(
-                f"""
+            # 1) Find which (isin, period_end) already exist in DB
+            keys = chunk[["isin", "period_end"]].drop_duplicates()
+            existing_sql = text(
+                """
                 SELECT v.isin, v.period_end
-                FROM (VALUES
-                    {values_clause}
-                ) AS v(isin, period_end)
+                FROM (
+                    SELECT
+                        unnest(:isins)       AS isin,
+                        unnest(:period_ends) AS period_end
+                ) v
                 JOIN fundlab.stock_quarterly_financials q
-                USING (isin, period_end)
-                LIMIT 20;
+                  ON q.isin = v.isin
+                 AND q.period_end = v.period_end
+                 AND q.is_consolidated = TRUE
                 """
             )
+            key_params = {
+                "isins":       list(keys["isin"].astype(str)),
+                "period_ends": list(keys["period_end"]),
+            }
+            existing_rows = conn.execute(existing_sql, key_params).fetchall()
+            existing_set = {(r.isin, r.period_end) for r in existing_rows}
 
-            conflicts = conn.execute(conflict_query, params).fetchall()
+            # 2) Split into new vs existing rows
+            chunk["key"] = list(zip(chunk["isin"], chunk["period_end"]))
+            mask_existing = chunk["key"].isin(existing_set)
 
-            # Build a readable error message
-            if conflicts:
-                conflict_list = [
-                    f"{row.isin} @ {row.period_end.date()}" for row in conflicts
-                ]
-                conflict_msg = "; ".join(conflict_list)
-            else:
-                conflict_msg = "at least one (ISIN, period_end) pair"
+            new_rows = chunk[~mask_existing].copy()
+            upd_rows = chunk[mask_existing].copy()
 
-            raise RuntimeError(
-                "Duplicate quarterly PAT data detected against existing database rows. "
-                "No data from this file was inserted.\n"
-                f"Examples of conflicts: {conflict_msg}"
-            )
+            # 3) Insert new rows
+            if not new_rows.empty:
+                insert_sql = text(
+                    """
+                    INSERT INTO fundlab.stock_quarterly_financials (
+                        isin,
+                        period_end,
+                        fiscal_year,
+                        fiscal_quarter,
+                        pat
+                    )
+                    SELECT
+                        t.isin,
+                        t.period_end,
+                        t.fiscal_year,
+                        t.fiscal_quarter,
+                        t.pat
+                    FROM (
+                        SELECT
+                            unnest(:isins)           AS isin,
+                            unnest(:period_ends)     AS period_end,
+                            unnest(:fiscal_years)    AS fiscal_year,
+                            unnest(:fiscal_quarters) AS fiscal_quarter,
+                            unnest(:pats)            AS pat
+                    ) t
+                    """
+                )
+                params_ins = {
+                    "isins":           list(new_rows["isin"].astype(str)),
+                    "period_ends":     list(new_rows["period_end"]),
+                    "fiscal_years":    list(new_rows["fiscal_year"].astype(int)),
+                    "fiscal_quarters": list(new_rows["fiscal_quarter"].astype(int)),
+                    "pats":            [float(x) for x in new_rows["pat"]],
+                }
+                conn.execute(insert_sql, params_ins)
 
-    progress_text.text(f"Uploading PAT… done ({total_rows} rows inserted).")
+            # 4) Update existing rows (PAT only)
+            if not upd_rows.empty:
+                update_sql = text(
+                    """
+                    UPDATE fundlab.stock_quarterly_financials q
+                    SET
+                        pat          = v.pat,
+                        fiscal_year  = v.fiscal_year,
+                        fiscal_quarter = v.fiscal_quarter,
+                        updated_at   = NOW()
+                    FROM (
+                        SELECT
+                            unnest(:isins)           AS isin,
+                            unnest(:period_ends)     AS period_end,
+                            unnest(:fiscal_years)    AS fiscal_year,
+                            unnest(:fiscal_quarters) AS fiscal_quarter,
+                            unnest(:pats)            AS pat
+                    ) v
+                    WHERE q.isin = v.isin
+                      AND q.period_end = v.period_end
+                      AND q.is_consolidated = TRUE
+                    """
+                )
+                params_upd = {
+                    "isins":           list(upd_rows["isin"].astype(str)),
+                    "period_ends":     list(upd_rows["period_end"]),
+                    "fiscal_years":    list(upd_rows["fiscal_year"].astype(int)),
+                    "fiscal_quarters": list(upd_rows["fiscal_quarter"].astype(int)),
+                    "pats":            [float(x) for x in upd_rows["pat"]],
+                }
+                conn.execute(update_sql, params_upd)
 
+            # Progress
+            frac = end / n
+            progress_bar.progress(frac)
+            progress_text.text(f"Uploading PAT… {end} / {n} rows processed")
+
+    progress_text.text(f"PAT upload complete: {n} rows processed (inserts + updates).")
 
 
 def upload_quarterly_sales(df_clean: pd.DataFrame) -> None:
     """
-    Insert sales into fundlab.stock_quarterly_financials.
+    Bulk upload quarterly sales into fundlab.stock_quarterly_financials.
 
     Behaviour:
-    - Tries to INSERT all rows with ON CONFLICT DO NOTHING.
-    - If any (isin, period_end, is_consolidated) already exists in DB,
-      the entire transaction is rolled back and an error is raised.
+    - If (isin, period_end) does NOT exist → INSERT a new row with sales.
+    - If (isin, period_end) already exists → UPDATE sales for that row,
+      leaving PAT untouched.
     """
+
     if df_clean.empty:
         return
 
     df_clean = df_clean.drop_duplicates(subset=["isin", "period_end"]).copy()
 
-    total_rows = len(df_clean)
+    n = len(df_clean)
+    if n == 0:
+        return
+
     BATCH_SIZE = 10_000
 
-    progress_text = st.empty()
+    engine = get_engine()
     progress_bar = st.progress(0.0)
-
-    stmt = text(
-        """
-        INSERT INTO fundlab.stock_quarterly_financials
-            (isin, period_end, fiscal_year, fiscal_quarter, sales)
-        VALUES
-            (:isin, :period_end, :fiscal_year, :fiscal_quarter, :sales)
-        ON CONFLICT (isin, period_end, is_consolidated)
-        DO NOTHING;
-        """
-    )
-
-    inserted_total = 0
+    progress_text = st.empty()
 
     with engine.begin() as conn:
-        for i in range(0, total_rows, BATCH_SIZE):
-            batch = df_clean.iloc[i : i + BATCH_SIZE]
-            records = [
-                {
-                    "isin": row["isin"],
-                    "period_end": row["period_end"],
-                    "fiscal_year": int(row["fiscal_year"]),
-                    "fiscal_quarter": int(row["fiscal_quarter"]),
-                    "sales": float(row["sales"]),
-                }
-                for _, row in batch.iterrows()
-            ]
+        for start in range(0, n, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, n)
+            chunk = df_clean.iloc[start:end].copy()
 
-            done = i + len(batch)
-            fraction = min(done / total_rows, 1.0)
-            progress_bar.progress(fraction)
-            progress_text.text(f"Uploading sales… {done} / {total_rows} rows")
-
-            result = conn.execute(stmt, records)
-            inserted_total += result.rowcount
-
-        if inserted_total < total_rows:
-            keys_sample = (
-                df_clean[["isin", "period_end"]]
-                .drop_duplicates()
-                .head(1000)
-            )
-
-            values_clause = ", ".join(
-                f"(:isin{i}, :period_end{i})" for i in range(len(keys_sample))
-            )
-            params = {
-                f"isin{i}": row["isin"]
-                for i, (_, row) in enumerate(keys_sample.iterrows())
-            }
-            params.update(
-                {
-                    f"period_end{i}": row["period_end"]
-                    for i, (_, row) in enumerate(keys_sample.iterrows())
-                }
-            )
-
-            conflict_query = text(
-                f"""
+            # 1) Which keys already exist?
+            keys = chunk[["isin", "period_end"]].drop_duplicates()
+            existing_sql = text(
+                """
                 SELECT v.isin, v.period_end
-                FROM (VALUES
-                    {values_clause}
-                ) AS v(isin, period_end)
+                FROM (
+                    SELECT
+                        unnest(:isins)       AS isin,
+                        unnest(:period_ends) AS period_end
+                ) v
                 JOIN fundlab.stock_quarterly_financials q
-                USING (isin, period_end)
-                LIMIT 20;
+                  ON q.isin = v.isin
+                 AND q.period_end = v.period_end
+                 AND q.is_consolidated = TRUE
                 """
             )
+            key_params = {
+                "isins":       list(keys["isin"].astype(str)),
+                "period_ends": list(keys["period_end"]),
+            }
+            existing_rows = conn.execute(existing_sql, key_params).fetchall()
+            existing_set = {(r.isin, r.period_end) for r in existing_rows}
 
-            conflicts = conn.execute(conflict_query, params).fetchall()
+            # 2) Split into new vs existing
+            chunk["key"] = list(zip(chunk["isin"], chunk["period_end"]))
+            mask_existing = chunk["key"].isin(existing_set)
 
-            if conflicts:
-                conflict_list = [
-                    f"{row.isin} @ {row.period_end.date()}" for row in conflicts
-                ]
-                conflict_msg = "; ".join(conflict_list)
-            else:
-                conflict_msg = "at least one (ISIN, period_end) pair"
+            new_rows = chunk[~mask_existing].copy()
+            upd_rows = chunk[mask_existing].copy()
 
-            raise RuntimeError(
-                "Duplicate quarterly sales data detected against existing database rows. "
-                "No data from this file was inserted.\n"
-                f"Examples of conflicts: {conflict_msg}"
-            )
+            # 3) Insert new rows
+            if not new_rows.empty:
+                insert_sql = text(
+                    """
+                    INSERT INTO fundlab.stock_quarterly_financials (
+                        isin,
+                        period_end,
+                        fiscal_year,
+                        fiscal_quarter,
+                        sales
+                    )
+                    SELECT
+                        t.isin,
+                        t.period_end,
+                        t.fiscal_year,
+                        t.fiscal_quarter,
+                        t.sales
+                    FROM (
+                        SELECT
+                            unnest(:isins)           AS isin,
+                            unnest(:period_ends)     AS period_end,
+                            unnest(:fiscal_years)    AS fiscal_year,
+                            unnest(:fiscal_quarters) AS fiscal_quarter,
+                            unnest(:sales_vals)      AS sales
+                    ) t
+                    """
+                )
+                params_ins = {
+                    "isins":           list(new_rows["isin"].astype(str)),
+                    "period_ends":     list(new_rows["period_end"]),
+                    "fiscal_years":    list(new_rows["fiscal_year"].astype(int)),
+                    "fiscal_quarters": list(new_rows["fiscal_quarter"].astype(int)),
+                    "sales_vals":      [float(x) for x in new_rows["sales"]],
+                }
+                conn.execute(insert_sql, params_ins)
 
-    progress_text.text(f"Uploading sales… done ({total_rows} rows inserted).")
+            # 4) Update existing rows (sales only)
+            if not upd_rows.empty:
+                update_sql = text(
+                    """
+                    UPDATE fundlab.stock_quarterly_financials q
+                    SET
+                        sales        = v.sales,
+                        fiscal_year  = v.fiscal_year,
+                        fiscal_quarter = v.fiscal_quarter,
+                        updated_at   = NOW()
+                    FROM (
+                        SELECT
+                            unnest(:isins)           AS isin,
+                            unnest(:period_ends)     AS period_end,
+                            unnest(:fiscal_years)    AS fiscal_year,
+                            unnest(:fiscal_quarters) AS fiscal_quarter,
+                            unnest(:sales_vals)      AS sales
+                    ) v
+                    WHERE q.isin = v.isin
+                      AND q.period_end = v.period_end
+                      AND q.is_consolidated = TRUE
+                    """
+                )
+                params_upd = {
+                    "isins":           list(upd_rows["isin"].astype(str)),
+                    "period_ends":     list(upd_rows["period_end"]),
+                    "fiscal_years":    list(upd_rows["fiscal_year"].astype(int)),
+                    "fiscal_quarters": list(upd_rows["fiscal_quarter"].astype(int)),
+                    "sales_vals":      [float(x) for x in upd_rows["sales"]],
+                }
+                conn.execute(update_sql, params_upd)
+
+            frac = end / n
+            progress_bar.progress(frac)
+            progress_text.text(f"Uploading sales… {end} / {n} rows processed")
+
+    progress_text.text(f"Sales upload complete: {n} rows processed (inserts + updates).")
 
 
 
 def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
-    """
-    Insert book value into fundlab.stock_annual_book_value.
-
-    Behaviour:
-    - Tries to INSERT all rows with ON CONFLICT DO NOTHING.
-    - If any (isin, year_end, is_consolidated) already exists in DB,
-      the entire transaction is rolled back and an error is raised.
-    """
     if df_clean.empty:
         return
 
-    df_clean = df_clean.drop_duplicates(subset=["isin", "year_end"]).copy()
+    df_clean = df_clean.drop_duplicates(subset=["isin", "year_end"])
 
-    total_rows = len(df_clean)
-    BATCH_SIZE = 10_000
+    conflicts = find_conflicts_annual(df_clean)
+    if conflicts:
+        sample = "; ".join([f"{r.isin} @ {r.year_end.date()}" for r in conflicts])
+        raise ValueError(
+            "Duplicate book value data detected: These ISIN + year-end rows already exist.\n"
+            f"Examples: {sample}\n\n"
+            "Upload aborted. No rows inserted."
+        )
 
-    progress_text = st.empty()
-    progress_bar = st.progress(0.0)
+    n = len(df_clean)
+    BATCH_SIZE = 10000
+    if n == 0:
+        return
 
-    stmt = text(
+    insert_sql = text(
         """
-        INSERT INTO fundlab.stock_annual_book_value
-            (isin, year_end, fiscal_year, book_value)
-        VALUES
-            (:isin, :year_end, :fiscal_year, :book_value)
-        ON CONFLICT (isin, year_end, is_consolidated)
-        DO NOTHING;
+        INSERT INTO fundlab.stock_annual_book_value (
+            isin,
+            year_end,
+            fiscal_year,
+            book_value
+        )
+        SELECT
+            t.isin,
+            t.year_end,
+            t.fiscal_year,
+            t.book_value
+        FROM (
+            SELECT
+                unnest(:isins)        AS isin,
+                unnest(:year_ends)    AS year_end,
+                unnest(:fiscal_years) AS fiscal_year,
+                unnest(:bvals)        AS book_value
+        ) t
         """
     )
 
-    inserted_total = 0
+    progress_bar = st.progress(0.0)
+    progress_text = st.empty()
 
     with engine.begin() as conn:
-        for i in range(0, total_rows, BATCH_SIZE):
-            batch = df_clean.iloc[i : i + BATCH_SIZE]
-            records = [
-                {
-                    "isin": row["isin"],
-                    "year_end": row["year_end"],
-                    "fiscal_year": int(row["fiscal_year"]),
-                    "book_value": float(row["book_value"]),
-                }
-                for _, row in batch.iterrows()
-            ]
+        for start in range(0, n, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, n)
+            chunk = df_clean.iloc[start:end]
 
-            done = i + len(batch)
-            fraction = min(done / total_rows, 1.0)
-            progress_bar.progress(fraction)
-            progress_text.text(f"Uploading book value… {done} / {total_rows} rows")
-
-            result = conn.execute(stmt, records)
-            inserted_total += result.rowcount
-
-        if inserted_total < total_rows:
-            keys_sample = (
-                df_clean[["isin", "year_end"]]
-                .drop_duplicates()
-                .head(1000)
-            )
-
-            values_clause = ", ".join(
-                f"(:isin{i}, :year_end{i})" for i in range(len(keys_sample))
-            )
             params = {
-                f"isin{i}": row["isin"]
-                for i, (_, row) in enumerate(keys_sample.iterrows())
+                "isins":        list(chunk["isin"].astype(str)),
+                "year_ends":    list(chunk["year_end"]),
+                "fiscal_years": list(chunk["fiscal_year"].astype(int)),
+                "bvals":        [float(x) for x in chunk["book_value"]],
             }
-            params.update(
-                {
-                    f"year_end{i}": row["year_end"]
-                    for i, (_, row) in enumerate(keys_sample.iterrows())
-                }
-            )
 
-            conflict_query = text(
-                f"""
-                SELECT v.isin, v.year_end
-                FROM (VALUES
-                    {values_clause}
-                ) AS v(isin, year_end)
-                JOIN fundlab.stock_annual_book_value b
-                USING (isin, year_end)
-                LIMIT 20;
-                """
-            )
+            frac = (end / n)
+            progress_bar.progress(frac)
+            progress_text.text(f"Inserting book value… {end} / {n}")
 
-            conflicts = conn.execute(conflict_query, params).fetchall()
+            conn.execute(insert_sql, params)
 
-            if conflicts:
-                conflict_list = [
-                    f"{row.isin} @ {row.year_end.date()}" for row in conflicts
-                ]
-                conflict_msg = "; ".join(conflict_list)
-            else:
-                conflict_msg = "at least one (ISIN, year_end) pair"
+    progress_text.text(f"Annual book value insert complete: {n} rows.")
 
-            raise RuntimeError(
-                "Duplicate annual book value data detected against existing database rows. "
-                "No data from this file was inserted.\n"
-                f"Examples of conflicts: {conflict_msg}"
-            )
-
-    progress_text.text(f"Uploading book value… done ({total_rows} rows inserted).")
 
 
 
