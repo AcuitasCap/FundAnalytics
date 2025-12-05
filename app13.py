@@ -1710,39 +1710,41 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
 
     return pivot
 
+import datetime as dt
+import numpy as np
+import pandas as pd
+from sqlalchemy import text
+import streamlit as st
+
 
 def rebuild_stock_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    batch_size: int = 200,
+    batch_size: int = 5000,
 ):
     """
-    Housekeeping job:
-    Builds / refreshes fundlab.stock_monthly_valuations for all ISINs
-    that have prices between start_date and end_date.
+    ONE-SHOT FULL HISTORY BUILD (no incremental logic).
 
-    For each (isin, month_end) in fundlab.stock_price:
-      - Pull market_cap at that date
-      - Attach TTM sales / PAT (last 4 quarters <= month_end)
-      - Attach last annual book value (year_end <= month_end)
-      - Compute P/S, P/E, P/B at stock level
-      - Insert into fundlab.stock_monthly_valuations
-
-    This version:
-      * For a full refresh (no start/end supplied), TRUNCATEs the table first.
-      * For a partial refresh, DELETEs only the requested date range.
-      * Uses plain INSERT (no ON CONFLICT) to avoid heavy index-upsert work.
+    - Reads monthly market_cap from fundlab.stock_price
+    - Attaches TTM sales / PAT from fundlab.stock_quarterly_financials
+    - Attaches book value from fundlab.stock_annual_book_value
+    - Computes PS / PE / PB at STOCK LEVEL
+        · PS = MC / TTM Sales       (only if MC > 0 and TTM Sales > 0)
+        · PE = MC / TTM PAT         (only if MC > 0 and TTM PAT   > 0)
+        · PB = MC / Book Value      (only if MC > 0 and BV        > 0)
+      → Negative or zero denominators give NaN ratios.
+    - Inserts ALL rows into fundlab.stock_monthly_valuations
+      without any ON CONFLICT / checks. If you run it twice,
+      you'll get duplicates. Treat this as a first full-history load.
     """
+
     engine = get_engine()
 
     # --------------------------------------------------------------
-    # 0) Work out date range (and remember if it was auto-derived)
+    # 0) Infer date range from stock_price if not provided
     # --------------------------------------------------------------
-    auto_start = start_date is None
-    auto_end = end_date is None
-
-    if auto_start or auto_end:
-        with engine.begin() as conn:
+    with engine.begin() as conn:
+        if start_date is None or end_date is None:
             rng = conn.execute(
                 text(
                     """
@@ -1754,33 +1756,20 @@ def rebuild_stock_monthly_valuations(
                 )
             ).fetchone()
 
-        if not rng or rng.min_d is None or rng.max_d is None:
-            st.warning("No data in fundlab.stock_price to infer date range.")
-            return
+            if not rng or rng.min_d is None or rng.max_d is None:
+                st.warning("No data in fundlab.stock_price to infer date range.")
+                return
 
-        if auto_start:
-            start_date = rng.min_d
-        if auto_end:
-            end_date = rng.max_d
+            if start_date is None:
+                start_date = rng.min_d
+            if end_date is None:
+                end_date = rng.max_d
 
-    # Safety: don't let start_date be None at this point
-    if start_date is None or end_date is None:
-        st.error("Could not determine a valid start/end date for valuations.")
-        return
-
-    # Optional: clamp to a sensible lower bound (e.g. 2010-01-01)
-    cutoff = dt.date(2010, 1, 1)
-    if start_date < cutoff:
-        start_date = cutoff
-
-    if start_date > end_date:
-        st.error("Valuation start date must be on or before end date.")
-        return
-
-    full_refresh = auto_start and auto_end
+    st.info(f"Building stock valuations from {start_date} to {end_date} (FULL history).")
 
     # --------------------------------------------------------------
-    # 1) Fetch monthly price / market cap
+    # 1) Base monthly price / market cap universe
+    #    → one row per (isin, month_end)
     # --------------------------------------------------------------
     with engine.begin() as conn:
         price_sql = text(
@@ -1788,10 +1777,11 @@ def rebuild_stock_monthly_valuations(
             SELECT
                 isin,
                 price_date::date AS month_end,
-                market_cap
+                MAX(market_cap) AS market_cap
             FROM fundlab.stock_price
             WHERE price_date BETWEEN :start_date AND :end_date
-              AND market_cap IS NOT NULL;
+              AND market_cap IS NOT NULL
+            GROUP BY isin, price_date::date;
             """
         )
         prices = pd.read_sql(
@@ -1805,26 +1795,27 @@ def rebuild_stock_monthly_valuations(
         return
 
     prices["isin"] = prices["isin"].astype(str).str.strip()
-    prices["month_end"] = pd.to_datetime(
-        prices["month_end"], errors="coerce"
-    ).dt.normalize()
+    prices["month_end"] = pd.to_datetime(prices["month_end"], errors="coerce").dt.normalize()
     prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
-
     prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
+
     if prices.empty:
         st.info("After cleaning, no usable price/market_cap rows remain.")
         return
 
-    base = prices.copy()
+    base = prices.reset_index(drop=True)
+
     all_isins = sorted(base["isin"].unique().tolist())
     min_month = base["month_end"].min()
     max_month = base["month_end"].max()
 
+    st.write(f"Universe: {len(all_isins)} ISINs, {len(base)} (isin, month_end) pairs.")
+
     # --------------------------------------------------------------
-    # 2) Fetch quarterly & annual fundamentals once
+    # 2) Fetch quarterly & annual fundamentals (for needed ISINs)
     # --------------------------------------------------------------
     with engine.begin() as conn:
-        # Quarterly sales & PAT
+        # Quarterly sales & PAT (consolidated)
         q_sql = text(
             """
             SELECT isin, period_end, sales, pat
@@ -1836,12 +1827,10 @@ def rebuild_stock_monthly_valuations(
             """
         )
         qdf = pd.read_sql(
-            q_sql,
-            conn,
-            params={"isins": all_isins, "end_date": max_month},
+            q_sql, conn, params={"isins": all_isins, "end_date": max_month}
         )
 
-        # Annual book value
+        # Annual book value (consolidated)
         bv_sql = text(
             """
             SELECT isin, year_end, book_value
@@ -1853,17 +1842,15 @@ def rebuild_stock_monthly_valuations(
             """
         )
         bvdf = pd.read_sql(
-            bv_sql,
-            conn,
-            params={"isins": all_isins, "end_date": max_month},
+            bv_sql, conn, params={"isins": all_isins, "end_date": max_month}
         )
 
-    # ---- Quarterly clean + TTM ----
+    # --------------------------------------------------------------
+    # 3) Clean quarterly fundamentals & build TTM sales/PAT
+    # --------------------------------------------------------------
     if not qdf.empty:
         qdf["isin"] = qdf["isin"].astype(str).str.strip()
-        qdf["period_end"] = pd.to_datetime(
-            qdf["period_end"], errors="coerce"
-        ).dt.normalize()
+        qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
         qdf["sales"] = pd.to_numeric(qdf["sales"], errors="coerce")
         qdf["pat"] = pd.to_numeric(qdf["pat"], errors="coerce")
         qdf = qdf.dropna(subset=["isin", "period_end"])
@@ -1881,33 +1868,33 @@ def rebuild_stock_monthly_valuations(
             .sum()
             .reset_index(level=0, drop=True)
         )
+
         qdf_ttm = qdf[["isin", "period_end", "ttm_sales", "ttm_pat"]].dropna(
             how="all", subset=["ttm_sales", "ttm_pat"]
         )
     else:
         qdf_ttm = pd.DataFrame(columns=["isin", "period_end", "ttm_sales", "ttm_pat"])
 
-    # ---- Annual BV clean ----
+    # --------------------------------------------------------------
+    # 4) Clean annual BV
+    # --------------------------------------------------------------
     if not bvdf.empty:
         bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
-        bvdf["year_end"] = pd.to_datetime(
-            bvdf["year_end"], errors="coerce"
-        ).dt.normalize()
+        bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
         bvdf["book_value"] = pd.to_numeric(bvdf["book_value"], errors="coerce")
         bvdf = bvdf.dropna(subset=["isin", "year_end"])
     else:
         bvdf = pd.DataFrame(columns=["isin", "year_end", "book_value"])
 
     # --------------------------------------------------------------
-    # 3) Attach TTM sales / PAT and book value per (isin, month_end)
-    #    using manual "last known <= month_end" alignment
+    # 5) Attach TTM sales / PAT and BV to (isin, month_end)
+    #    via "last known <= month_end" alignment
     # --------------------------------------------------------------
-    base = base.reset_index(drop=True)
     base["ttm_sales"] = np.nan
     base["ttm_pat"] = np.nan
     base["book_value"] = np.nan
 
-    # ---- TTM sales / PAT ----
+    # --- TTM sales/PAT ---
     if not qdf_ttm.empty:
         qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
 
@@ -1933,7 +1920,7 @@ def rebuild_stock_monthly_valuations(
             base.loc[idx, "ttm_sales"] = aligned_sales
             base.loc[idx, "ttm_pat"] = aligned_pat
 
-    # ---- Book value ----
+    # --- Book value ---
     if not bvdf.empty:
         bvdf = bvdf.sort_values(["isin", "year_end"]).reset_index(drop=True)
 
@@ -1957,7 +1944,8 @@ def rebuild_stock_monthly_valuations(
             base.loc[idx, "book_value"] = aligned_bv
 
     # --------------------------------------------------------------
-    # 4) Compute P/S, P/E, P/B at stock level
+    # 6) Compute PS / PE / PB at stock level
+    #    Exclude negative / zero denominators
     # --------------------------------------------------------------
     df = base.copy()
 
@@ -1982,117 +1970,86 @@ def rebuild_stock_monthly_valuations(
         np.nan,
     )
 
+    # Keep rows with a market cap (even if ratios are NaN)
     df = df.dropna(subset=["market_cap"]).reset_index(drop=True)
 
-    n = len(df)
-    if n == 0:
+    n_rows = len(df)
+    if n_rows == 0:
         st.info("No rows to write into stock_monthly_valuations after processing.")
         return
 
+    st.write(f"Prepared {n_rows} valuation rows to insert.")
+
     # --------------------------------------------------------------
-    # 5) Wipe existing data for this range, then insert in small batches
+    # 7) Batched INSERT into fundlab.stock_monthly_valuations
+    #    No ON CONFLICT, no checks.
     # --------------------------------------------------------------
     insert_sql = text(
         """
         INSERT INTO fundlab.stock_monthly_valuations (
             isin,
             month_end,
-            market_cap,
             ttm_sales,
             ttm_pat,
             book_value,
             ps,
             pe,
-            pb,
-            is_consolidated,
-            currency_code,
-            source,
-            source_ref
+            pb
         )
         VALUES (
             :isin,
             :month_end,
-            :market_cap,
             :ttm_sales,
             :ttm_pat,
             :book_value,
             :ps,
             :pe,
-            :pb,
-            :is_consolidated,
-            :currency_code,
-            :source,
-            :source_ref
+            :pb
         );
         """
     )
 
+    def num(val):
+        if pd.isna(val):
+            return None
+        return float(val)
+
+    inserted_total = 0
     with engine.begin() as conn:
-        if full_refresh:
-            # TRUNCATE is not allowed on Supabase inside a transaction
-            conn.execute(text("DELETE FROM fundlab.stock_monthly_valuations;"))
-        else:
-            conn.execute(
-                text("""
-                    DELETE FROM fundlab.stock_monthly_valuations
-                    WHERE month_end BETWEEN :start_date AND :end_date;
-                """),
-                {"start_date": start_date, "end_date": end_date},
-            )
+        for start in range(0, n_rows, batch_size):
+            end = min(start + batch_size, n_rows)
+            chunk = df.iloc[start:end].copy()
 
-
-        # Insert in small batches
-        years = sorted({d.year for d in df["month_end"].dt.date})
-        for yr in years:
-            df_year = df[df["month_end"].dt.year == yr].copy()
-            if df_year.empty:
-                continue
-
-            for start in range(0, len(df_year), batch_size):
-                end = min(start + batch_size, len(df_year))
-                chunk = df_year.iloc[start:end]
-
-                rows = []
-                for _, r in chunk.iterrows():
-                    def num(val):
-                        if pd.isna(val):
-                            return None
-                        return float(val)
-
-                    month_end_dt = pd.to_datetime(
-                        r["month_end"], errors="coerce"
-                    )
-                    if pd.isna(month_end_dt):
-                        continue
-
-                    rows.append(
-                        {
-                            "isin": str(r["isin"]).strip(),
-                            "month_end": month_end_dt.date(),
-                            "market_cap": num(r.get("market_cap")),
-                            "ttm_sales": num(r.get("ttm_sales")),
-                            "ttm_pat": num(r.get("ttm_pat")),
-                            "book_value": num(r.get("book_value")),
-                            "ps": num(r.get("ps")),
-                            "pe": num(r.get("pe")),
-                            "pb": num(r.get("pb")),
-                            "is_consolidated": True,
-                            "currency_code": "INR",
-                            "source": "housekeeping",
-                            "source_ref": "stock_price+financials",
-                        }
-                    )
-
-                if not rows:
+            rows = []
+            for _, r in chunk.iterrows():
+                month_end_dt = pd.to_datetime(r["month_end"], errors="coerce")
+                if pd.isna(month_end_dt):
                     continue
 
-                conn.execute(insert_sql, rows)
+                rows.append(
+                    {
+                        "isin":       str(r["isin"]).strip(),
+                        "month_end":  month_end_dt.date(),
+                        "ttm_sales":  num(r.get("ttm_sales")),
+                        "ttm_pat":    num(r.get("ttm_pat")),
+                        "book_value": num(r.get("book_value")),
+                        "ps":         num(r.get("ps")),
+                        "pe":         num(r.get("pe")),
+                        "pb":         num(r.get("pb")),
+                    }
+                )
+
+            if not rows:
+                continue
+
+            conn.execute(insert_sql, rows)
+            inserted_total += len(rows)
+            st.write(f"Inserted {len(rows)} rows (cumulative {inserted_total})...")
 
     st.success(
-        f"Stock monthly valuations rebuilt for {n} rows "
+        f"Stock monthly valuations: inserted {inserted_total} rows "
         f"between {start_date} and {end_date}."
     )
-
 
 
 def rebuild_fund_monthly_valuations(
