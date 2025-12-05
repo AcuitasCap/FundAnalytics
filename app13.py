@@ -1980,8 +1980,12 @@ def rebuild_stock_monthly_valuations(
     df = df.dropna(subset=["market_cap"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # 5) Batched re-insert into fundlab.stock_monthly_valuations
-    #    Strategy: DELETE existing rows in the range, then INSERT fresh
+    # 5) Rebuild into fundlab.stock_monthly_valuations in small chunks
+    #    Strategy:
+    #      - Work year by year to limit index work per statement
+    #      - For each year:
+    #           * DELETE rows for that year
+    #           * INSERT that year's rows in small batches
     # ------------------------------------------------------------------
     n = len(df)
     if n == 0:
@@ -1995,21 +1999,11 @@ def rebuild_stock_monthly_valuations(
         st.info("After cleaning, no rows remain for stock_monthly_valuations.")
         return
 
+    # Derive year for chunking
+    df["year"] = df["month_end"].apply(lambda d: d.year)
+
     engine = get_engine()
 
-    # 5a) DELETE existing rows for the date range we are rebuilding
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                DELETE FROM fundlab.stock_monthly_valuations
-                WHERE month_end BETWEEN :start_date AND :end_date;
-                """
-            ),
-            {"start_date": start_date, "end_date": end_date},
-        )
-
-    # 5b) Plain INSERT in batches (no ON CONFLICT)
     insert_sql = text(
         """
         INSERT INTO fundlab.stock_monthly_valuations (
@@ -2045,54 +2039,91 @@ def rebuild_stock_monthly_valuations(
         """
     )
 
-    # Use smaller batches to keep each statement well under timeout
-    BATCH_SIZE = 2000
+    # Smaller batches to keep each statement cheap
+    BATCH_SIZE = 500
 
     total_inserted = 0
+    years = sorted(df["year"].unique().tolist())
+
     with engine.begin() as conn:
-        for start_idx in range(0, n, BATCH_SIZE):
-            end_idx = min(start_idx + BATCH_SIZE, n)
-            chunk = df.iloc[start_idx:end_idx].copy()
+        for yr in years:
+            year_start = dt.date(yr, 1, 1)
+            year_end = dt.date(yr, 12, 31)
 
-            rows = []
-
-            for _, r in chunk.iterrows():
-                def num(val):
-                    if pd.isna(val):
-                        return None
-                    return float(val)
-
-                month_end = r["month_end"]
-                if pd.isna(month_end):
-                    continue
-
-                rows.append(
-                    {
-                        "isin":           str(r["isin"]).strip(),
-                        "month_end":      month_end,
-                        "market_cap":     num(r.get("market_cap")),
-                        "ttm_sales":      num(r.get("ttm_sales")),
-                        "ttm_pat":        num(r.get("ttm_pat")),
-                        "book_value":     num(r.get("book_value")),
-                        "ps":             num(r.get("ps")),
-                        "pe":             num(r.get("pe")),
-                        "pb":             num(r.get("pb")),
-                        "is_consolidated": True,
-                        "currency_code":   "INR",
-                        "source":          "housekeeping",
-                        "source_ref":      "stock_price+financials",
-                    }
-                )
-
-            if not rows:
+            df_year = df[(df["month_end"] >= year_start) & (df["month_end"] <= year_end)].copy()
+            if df_year.empty:
                 continue
 
-            conn.execute(insert_sql, rows)
-            total_inserted += len(rows)
+            # 5a) DELETE existing rows for this year
+            try:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM fundlab.stock_monthly_valuations
+                        WHERE month_end BETWEEN :start_d AND :end_d;
+                        """
+                    ),
+                    {"start_d": year_start, "end_d": year_end},
+                )
+            except Exception as e:
+                st.error(f"🔥 PostgreSQL error while deleting year {yr}: {e}")
+                raise
+
+            # 5b) INSERT this year's rows in small batches
+            m = len(df_year)
+            for start_idx in range(0, m, BATCH_SIZE):
+                end_idx = min(start_idx + BATCH_SIZE, m)
+                chunk = df_year.iloc[start_idx:end_idx].copy()
+
+                rows = []
+
+                for _, r in chunk.iterrows():
+                    def num(val):
+                        if pd.isna(val):
+                            return None
+                        return float(val)
+
+                    month_end = r["month_end"]
+                    if pd.isna(month_end):
+                        continue
+
+                    rows.append(
+                        {
+                            "isin":            str(r["isin"]).strip(),
+                            "month_end":       month_end,
+                            "market_cap":      num(r.get("market_cap")),
+                            "ttm_sales":       num(r.get("ttm_sales")),
+                            "ttm_pat":         num(r.get("ttm_pat")),
+                            "book_value":      num(r.get("book_value")),
+                            "ps":              num(r.get("ps")),
+                            "pe":              num(r.get("pe")),
+                            "pb":              num(r.get("pb")),
+                            "is_consolidated": True,
+                            "currency_code":   "INR",
+                            "source":          "housekeeping",
+                            "source_ref":      "stock_price+financials",
+                        }
+                    )
+
+                if not rows:
+                    continue
+
+                try:
+                    conn.execute(insert_sql, rows)
+                except Exception as e:
+                    st.error(
+                        f"🔥 PostgreSQL error during insert for year {yr}, "
+                        f"rows {start_idx}–{end_idx}: {e}"
+                    )
+                    st.write("Sample rows from this failing batch:")
+                    st.write(rows[:5])
+                    raise
+
+                total_inserted += len(rows)
 
     st.success(
         f"Stock monthly valuations rebuilt for {total_inserted} (isin, month_end) rows "
-        f"between {start_date} and {end_date}."
+        f"between {start_date} and {end_date}, processed year by year."
     )
 
 
