@@ -2074,18 +2074,23 @@ def rebuild_stock_monthly_valuations(
 
             if not rows:
                 continue
-            # DEBUG: print first few rows of the batch
-            st.write("DEBUG first rows in batch:")
-            st.write(rows[:5])
+            
+            
+            try:
+                conn.execute(insert_sql, rows)
 
-            # Also show all keys present
-            st.write("DEBUG row keys:", rows[0].keys())
+            except Exception as e:
+                # Print the failing row + postgres error BEFORE Streamlit redacts it
+                st.error("🔥 PostgreSQL error during batch insert. Showing diagnostic details:")
+                st.code(str(e))  # full psycopg2 message BEFORE redaction
 
-            # And show dtypes of df rows
-            st.write("DEBUG chunk dtypes:", chunk.dtypes)
+                # print a small sample of failing rows
+                st.write("Sample rows from this batch:")
+                st.write(rows[:5])
 
+                # Stop execution so you see error immediately
+                raise
 
-            conn.execute(insert_sql, rows)
 
     st.success(
         f"Stock monthly valuations rebuilt for {n} (isin, month_end) rows "
