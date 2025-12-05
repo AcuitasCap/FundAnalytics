@@ -1966,7 +1966,7 @@ def rebuild_stock_monthly_valuations(
         st.info("No rows to write into stock_monthly_valuations after processing.")
         return
 
-    insert_sql = text(
+        insert_sql = text(
         """
         INSERT INTO fundlab.stock_monthly_valuations (
             isin,
@@ -1983,29 +1983,30 @@ def rebuild_stock_monthly_valuations(
             source,
             source_ref
         )
-        SELECT
-            unnest(:isins),
-            unnest(:month_ends),
-            unnest(:market_caps),
-            unnest(:ttm_sales),
-            unnest(:ttm_pats),
-            unnest(:book_values),
-            unnest(:ps_vals),
-            unnest(:pe_vals),
-            unnest(:pb_vals),
-            unnest(:is_consolidated),
-            unnest(:currency_codes),
-            unnest(:sources),
-            unnest(:source_refs)
+        VALUES (
+            :isin,
+            :month_end,
+            :market_cap,
+            :ttm_sales,
+            :ttm_pat,
+            :book_value,
+            :ps,
+            :pe,
+            :pb,
+            :is_consolidated,
+            :currency_code,
+            :source,
+            :source_ref
+        )
         ON CONFLICT (isin, month_end)
         DO UPDATE SET
-            market_cap    = EXCLUDED.market_cap,
-            ttm_sales     = EXCLUDED.ttm_sales,
-            ttm_pat       = EXCLUDED.ttm_pat,
-            book_value    = EXCLUDED.book_value,
-            ps            = EXCLUDED.ps,
-            pe            = EXCLUDED.pe,
-            pb            = EXCLUDED.pb,
+            market_cap      = EXCLUDED.market_cap,
+            ttm_sales       = EXCLUDED.ttm_sales,
+            ttm_pat         = EXCLUDED.ttm_pat,
+            book_value      = EXCLUDED.book_value,
+            ps              = EXCLUDED.ps,
+            pe              = EXCLUDED.pe,
+            pb              = EXCLUDED.pb,
             is_consolidated = EXCLUDED.is_consolidated,
             currency_code   = EXCLUDED.currency_code,
             source          = EXCLUDED.source,
@@ -2014,41 +2015,54 @@ def rebuild_stock_monthly_valuations(
         """
     )
 
-    engine = get_engine()
+
+        engine = get_engine()
+    n = len(df)
+    if n == 0:
+        st.info("No rows to write into stock_monthly_valuations after processing.")
+        return
+
     with engine.begin() as conn:
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             chunk = df.iloc[start:end].copy()
 
-            # Helper: convert numeric columns to Python floats with None for NaN
-            def _num_list(colname: str):
-                s = pd.to_numeric(chunk[colname], errors="coerce")
-                return [None if pd.isna(x) else float(x) for x in s]
+            rows = []
 
-            # month_end as pure date objects
-            month_ends = pd.to_datetime(chunk["month_end"], errors="coerce").dt.date
+            for _, r in chunk.iterrows():
+                def num(val):
+                    if pd.isna(val):
+                        return None
+                    return float(val)
 
-            params = {
-                "isins":          list(chunk["isin"].astype(str)),
-                "month_ends":     list(month_ends),
-                "market_caps":    _num_list("market_cap"),
-                "ttm_sales":      _num_list("ttm_sales"),
-                "ttm_pats":       _num_list("ttm_pat"),
-                "book_values":    _num_list("book_value"),
-                "ps_vals":        _num_list("ps"),
-                "pe_vals":        _num_list("pe"),
-                "pb_vals":        _num_list("pb"),
-                "is_consolidated": [True] * len(chunk),
-                "currency_codes":  ["INR"] * len(chunk),
-                "sources":         ["housekeeping"] * len(chunk),
-                "source_refs":     ["stock_price+financials"] * len(chunk),
-            }
+                # Ensure a plain date object
+                month_end = pd.to_datetime(r["month_end"], errors="coerce")
+                if pd.isna(month_end):
+                    continue
+                month_end = month_end.date()
 
-            # Optional sanity check: all array lengths equal
-            L = len(chunk)
-            assert all(len(v) == L for v in params.values()), "UNNEST array length mismatch"
+                rows.append(
+                    {
+                        "isin":          str(r["isin"]).strip(),
+                        "month_end":     month_end,
+                        "market_cap":    num(r.get("market_cap")),
+                        "ttm_sales":     num(r.get("ttm_sales")),
+                        "ttm_pat":       num(r.get("ttm_pat")),
+                        "book_value":    num(r.get("book_value")),
+                        "ps":            num(r.get("ps")),
+                        "pe":            num(r.get("pe")),
+                        "pb":            num(r.get("pb")),
+                        "is_consolidated": True,
+                        "currency_code":   "INR",
+                        "source":          "housekeeping",
+                        "source_ref":      "stock_price+financials",
+                    }
+                )
 
-            conn.execute(insert_sql, params)
+            if not rows:
+                continue
+
+            conn.execute(insert_sql, rows)
 
 
     st.success(
