@@ -2029,19 +2029,17 @@ def rebuild_stock_monthly_valuations(
 
     with engine.begin() as conn:
         if full_refresh:
-            # Fastest: blow away everything and rebuild
-            conn.execute(text("TRUNCATE TABLE fundlab.stock_monthly_valuations;"))
+            # TRUNCATE is not allowed on Supabase inside a transaction
+            conn.execute(text("DELETE FROM fundlab.stock_monthly_valuations;"))
         else:
-            # Narrow delete only for the date range we're about to rebuild
             conn.execute(
-                text(
-                    """
+                text("""
                     DELETE FROM fundlab.stock_monthly_valuations
                     WHERE month_end BETWEEN :start_date AND :end_date;
-                    """
-                ),
+                """),
                 {"start_date": start_date, "end_date": end_date},
             )
+
 
         # Insert in small batches
         years = sorted({d.year for d in df["month_end"].dt.date})
