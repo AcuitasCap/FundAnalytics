@@ -1792,6 +1792,22 @@ def rebuild_stock_monthly_valuations(
     if prices.empty:
         st.info("After cleaning, no usable price/market_cap rows remain.")
         return
+    
+    with engine.begin() as conn:
+        sm_isins = pd.read_sql(
+            text("SELECT isin FROM fundlab.stock_master;"),
+            conn,
+        )
+    valid_isins = set(sm_isins["isin"].astype(str).str.strip())
+
+    prices = prices[prices["isin"].isin(valid_isins)].copy()
+    if prices.empty:
+        st.info(
+            "After filtering by stock_master, no ISINs remain. "
+            "Check that stock_master is populated consistently with stock_price."
+        )
+        return
+
 
     # We'll work on this as our base monthly grid
     base = prices.copy()
