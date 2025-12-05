@@ -1980,13 +1980,36 @@ def rebuild_stock_monthly_valuations(
     df = df.dropna(subset=["market_cap"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # 5) Batched row-wise upsert into fundlab.stock_monthly_valuations
+    # 5) Batched re-insert into fundlab.stock_monthly_valuations
+    #    Strategy: DELETE existing rows in the range, then INSERT fresh
     # ------------------------------------------------------------------
     n = len(df)
     if n == 0:
         st.info("No rows to write into stock_monthly_valuations after processing.")
         return
 
+    # Ensure month_end is a pure date
+    df["month_end"] = pd.to_datetime(df["month_end"], errors="coerce").dt.date
+    df = df.dropna(subset=["month_end", "isin"])
+    if df.empty:
+        st.info("After cleaning, no rows remain for stock_monthly_valuations.")
+        return
+
+    engine = get_engine()
+
+    # 5a) DELETE existing rows for the date range we are rebuilding
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM fundlab.stock_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date;
+                """
+            ),
+            {"start_date": start_date, "end_date": end_date},
+        )
+
+    # 5b) Plain INSERT in batches (no ON CONFLICT)
     insert_sql = text(
         """
         INSERT INTO fundlab.stock_monthly_valuations (
@@ -2018,28 +2041,18 @@ def rebuild_stock_monthly_valuations(
             :currency_code,
             :source,
             :source_ref
-        )
-        ON CONFLICT (isin, month_end)
-        DO UPDATE SET
-            market_cap      = EXCLUDED.market_cap,
-            ttm_sales       = EXCLUDED.ttm_sales,
-            ttm_pat         = EXCLUDED.ttm_pat,
-            book_value      = EXCLUDED.book_value,
-            ps              = EXCLUDED.ps,
-            pe              = EXCLUDED.pe,
-            pb              = EXCLUDED.pb,
-            is_consolidated = EXCLUDED.is_consolidated,
-            currency_code   = EXCLUDED.currency_code,
-            source          = EXCLUDED.source,
-            source_ref      = EXCLUDED.source_ref,
-            updated_at      = NOW();
+        );
         """
     )
 
+    # Use smaller batches to keep each statement well under timeout
+    BATCH_SIZE = 2000
+
+    total_inserted = 0
     with engine.begin() as conn:
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            chunk = df.iloc[start:end].copy()
+        for start_idx in range(0, n, BATCH_SIZE):
+            end_idx = min(start_idx + BATCH_SIZE, n)
+            chunk = df.iloc[start_idx:end_idx].copy()
 
             rows = []
 
@@ -2049,22 +2062,21 @@ def rebuild_stock_monthly_valuations(
                         return None
                     return float(val)
 
-                month_end = pd.to_datetime(r["month_end"], errors="coerce")
+                month_end = r["month_end"]
                 if pd.isna(month_end):
                     continue
-                month_end = month_end.date()
 
                 rows.append(
                     {
-                        "isin":          str(r["isin"]).strip(),
-                        "month_end":     month_end,
-                        "market_cap":    num(r.get("market_cap")),
-                        "ttm_sales":     num(r.get("ttm_sales")),
-                        "ttm_pat":       num(r.get("ttm_pat")),
-                        "book_value":    num(r.get("book_value")),
-                        "ps":            num(r.get("ps")),
-                        "pe":            num(r.get("pe")),
-                        "pb":            num(r.get("pb")),
+                        "isin":           str(r["isin"]).strip(),
+                        "month_end":      month_end,
+                        "market_cap":     num(r.get("market_cap")),
+                        "ttm_sales":      num(r.get("ttm_sales")),
+                        "ttm_pat":        num(r.get("ttm_pat")),
+                        "book_value":     num(r.get("book_value")),
+                        "ps":             num(r.get("ps")),
+                        "pe":             num(r.get("pe")),
+                        "pb":             num(r.get("pb")),
                         "is_consolidated": True,
                         "currency_code":   "INR",
                         "source":          "housekeeping",
@@ -2074,26 +2086,12 @@ def rebuild_stock_monthly_valuations(
 
             if not rows:
                 continue
-            
-            
-            try:
-                conn.execute(insert_sql, rows)
 
-            except Exception as e:
-                # Print the failing row + postgres error BEFORE Streamlit redacts it
-                st.error("🔥 PostgreSQL error during batch insert. Showing diagnostic details:")
-                st.code(str(e))  # full psycopg2 message BEFORE redaction
-
-                # print a small sample of failing rows
-                st.write("Sample rows from this batch:")
-                st.write(rows[:5])
-
-                # Stop execution so you see error immediately
-                raise
-
+            conn.execute(insert_sql, rows)
+            total_inserted += len(rows)
 
     st.success(
-        f"Stock monthly valuations rebuilt for {n} (isin, month_end) rows "
+        f"Stock monthly valuations rebuilt for {total_inserted} (isin, month_end) rows "
         f"between {start_date} and {end_date}."
     )
 
