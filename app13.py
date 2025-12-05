@@ -2058,6 +2058,16 @@ def rebuild_stock_monthly_valuations(
 
             if not rows:
                 continue
+            # DEBUG: print first few rows of the batch
+            st.write("DEBUG first rows in batch:")
+            st.write(rows[:5])
+
+            # Also show all keys present
+            st.write("DEBUG row keys:", rows[0].keys())
+
+            # And show dtypes of df rows
+            st.write("DEBUG chunk dtypes:", chunk.dtypes)
+
 
             conn.execute(insert_sql, rows)
 
