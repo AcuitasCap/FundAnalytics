@@ -2016,12 +2016,11 @@ def rebuild_stock_monthly_valuations(
     )
 
 
-        engine = get_engine()
+    engine = get_engine()
     n = len(df)
     if n == 0:
         st.info("No rows to write into stock_monthly_valuations after processing.")
         return
-    engine = get_engine()
     with engine.begin() as conn:
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
