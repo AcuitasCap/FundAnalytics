@@ -1731,7 +1731,6 @@ def rebuild_stock_monthly_valuations(
     """
     engine = get_engine()
 
-    
     # --------------------------------------------------------------
     # 0) Auto-derive start/end if not given
     # --------------------------------------------------------------
@@ -1784,7 +1783,9 @@ def rebuild_stock_monthly_valuations(
 
     # Clean up price data
     prices["isin"] = prices["isin"].astype(str).str.strip()
-    prices["month_end"] = pd.to_datetime(prices["month_end"], errors="coerce").dt.normalize()
+    prices["month_end"] = pd.to_datetime(
+        prices["month_end"], errors="coerce"
+    ).dt.normalize()
     prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
 
     prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
@@ -1836,7 +1837,9 @@ def rebuild_stock_monthly_valuations(
     # Clean up quarterly data
     if not qdf.empty:
         qdf["isin"] = qdf["isin"].astype(str).str.strip()
-        qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
+        qdf["period_end"] = pd.to_datetime(
+            qdf["period_end"], errors="coerce"
+        ).dt.normalize()
         qdf["sales"] = pd.to_numeric(qdf["sales"], errors="coerce")
         qdf["pat"] = pd.to_numeric(qdf["pat"], errors="coerce")
 
@@ -1865,7 +1868,9 @@ def rebuild_stock_monthly_valuations(
     # Clean up annual BV data
     if not bvdf.empty:
         bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
-        bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
+        bvdf["year_end"] = pd.to_datetime(
+            bvdf["year_end"], errors="coerce"
+        ).dt.normalize()
         bvdf["book_value"] = pd.to_numeric(bvdf["book_value"], errors="coerce")
         bvdf = bvdf.dropna(subset=["isin", "year_end"])
     else:
@@ -1955,18 +1960,18 @@ def rebuild_stock_monthly_valuations(
         np.nan,
     )
 
-    # Optional: drop rows with no valuations at all (keep only where at least MC is present)
+    # Keep rows where market_cap is present (we may allow ps/pe/pb to be NaN)
     df = df.dropna(subset=["market_cap"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # 5) Batched upsert into fundlab.stock_monthly_valuations
+    # 5) Batched row-wise upsert into fundlab.stock_monthly_valuations
     # ------------------------------------------------------------------
     n = len(df)
     if n == 0:
         st.info("No rows to write into stock_monthly_valuations after processing.")
         return
 
-        insert_sql = text(
+    insert_sql = text(
         """
         INSERT INTO fundlab.stock_monthly_valuations (
             isin,
@@ -2015,12 +2020,6 @@ def rebuild_stock_monthly_valuations(
         """
     )
 
-
-    engine = get_engine()
-    n = len(df)
-    if n == 0:
-        st.info("No rows to write into stock_monthly_valuations after processing.")
-        return
     with engine.begin() as conn:
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
@@ -2034,7 +2033,6 @@ def rebuild_stock_monthly_valuations(
                         return None
                     return float(val)
 
-                # Ensure a plain date object
                 month_end = pd.to_datetime(r["month_end"], errors="coerce")
                 if pd.isna(month_end):
                     continue
@@ -2063,11 +2061,11 @@ def rebuild_stock_monthly_valuations(
 
             conn.execute(insert_sql, rows)
 
-
     st.success(
         f"Stock monthly valuations rebuilt for {n} (isin, month_end) rows "
         f"between {start_date} and {end_date}."
     )
+
 
 
 
