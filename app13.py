@@ -1756,6 +1756,11 @@ def rebuild_stock_monthly_valuations(
         if end_date is None:
             end_date = rng.max_d
 
+    # ✅ HARD CUTOFF: don't rebuild earlier than 2010 from the app
+    cutoff = dt.date(2010, 1, 1)
+    if start_date < cutoff:
+        start_date = cutoff
+
     # --------------------------------------------------------------
     # 1) Fetch monthly price / market cap
     # --------------------------------------------------------------
@@ -2040,7 +2045,7 @@ def rebuild_stock_monthly_valuations(
     )
 
     # Smaller batches to keep each statement cheap
-    BATCH_SIZE = 500
+    BATCH_SIZE = 25
 
     total_inserted = 0
     years = sorted(df["year"].unique().tolist())
