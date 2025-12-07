@@ -2349,10 +2349,10 @@ def rebuild_fund_monthly_valuations(
 
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
 
-    # --------------------------------------------------------------
+        # --------------------------------------------------------------
     # 3) Join to stock_monthly_valuations
+    #    (Pull ALL isins for the date range; filter via merge)
     # --------------------------------------------------------------
-    all_isins = sorted(holdings["isin"].unique().tolist())
     min_month = holdings["month_end"].min()
     max_month = holdings["month_end"].max()
 
@@ -2362,36 +2362,30 @@ def rebuild_fund_monthly_valuations(
             SELECT
                 isin,
                 month_end,
-                market_cap,
-                ttm_sales,
-                ttm_pat,
-                book_value,
                 ps,
                 pe,
                 pb
             FROM fundlab.stock_monthly_valuations
-            WHERE isin = ANY(:isins)
-              AND month_end BETWEEN :start_date AND :end_date;
+            WHERE month_end BETWEEN :start_date AND :end_date;
             """
         )
         vals = pd.read_sql(
             val_sql,
             conn,
             params={
-                "isins": all_isins,
                 "start_date": min_month,
                 "end_date": max_month,
             },
         )
 
     if vals.empty:
-        st.info("No stock_monthly_valuations rows found for the given holdings.")
+        st.info("No stock_monthly_valuations rows found for the given period.")
         return
 
     vals["isin"] = vals["isin"].astype(str).str.strip()
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
 
-    # Merge valuations into holdings
+    # Merge valuations into holdings (this implicitly filters to holdings' ISINs)
     df = holdings.merge(
         vals,
         on=["isin", "month_end"],
@@ -2403,6 +2397,7 @@ def rebuild_fund_monthly_valuations(
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
         st.info("All merged valuations are NaN; nothing to write.")
         return
+
 
     # --------------------------------------------------------------
     # 4) Compute fund-level valuations: P/S, P/E, P/B by segment
