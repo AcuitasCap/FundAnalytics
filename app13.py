@@ -282,6 +282,268 @@ def validate_fund_navs(df_raw: pd.DataFrame):
     }
     return df, summary
 
+def debug_portfolio_valuation_point(
+    fund_id: int,
+    target_date: dt.date,
+    segment_choice: str,
+    metric_choice: str,
+    mode: str,
+):
+    """
+    Debug helper: for a single fund + month, print all guts of the valuation calc.
+
+    mode:
+      - 'Valuations of historical portfolios'
+      - 'Historical valuations of current portfolio'
+    """
+
+    engine = get_engine()
+
+    # Work at month-level (ignore day)
+    target_period = pd.Period(target_date, freq="M")
+    month_start = target_period.to_timestamp("M")  # last day-of-month as canonical date
+
+    st.write(f"### Debug valuation point")
+    st.write(f"Fund: {fund_id}, Month: {target_period} (canonical date {month_start.date()})")
+    st.write(f"Segment: {segment_choice}, Metric: {metric_choice}, Mode: {mode}")
+
+    # Metric mapping
+    metric_map = {"P/S": "ps", "P/E": "pe", "P/B": "pb"}
+    metric_key = metric_map.get(metric_choice)
+    if metric_key is None:
+        st.error(f"Unsupported metric_choice: {metric_choice}")
+        return
+
+    # ------------------------------------------------------------------
+    # 1) Get holdings snapshot for this mode
+    # ------------------------------------------------------------------
+    if mode == "Valuations of historical portfolios":
+        # Use actual historical holdings for that calendar month
+        with engine.begin() as conn:
+            h_sql = text(
+                """
+                SELECT
+                    fp.fund_id,
+                    fp.month_end,
+                    fp.isin,
+                    fp.holding_weight AS weight_pct,
+                    fp.asset_type,
+                    sm.is_financial
+                FROM fundlab.fund_portfolio fp
+                JOIN fundlab.stock_master sm
+                  ON sm.isin = fp.isin
+                WHERE fp.fund_id = :fund_id
+                  AND fp.asset_type = 'Domestic Equities';
+                """
+            )
+            holdings = pd.read_sql(h_sql, conn, params={"fund_id": fund_id})
+
+        if holdings.empty:
+            st.error("No historical holdings found for this fund.")
+            return
+
+        holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
+        holdings = holdings.dropna(subset=["month_end"])
+        holdings["month_key"] = holdings["month_end"].dt.to_period("M")
+        holdings = holdings[holdings["month_key"] == target_period].copy()
+
+        if holdings.empty:
+            st.error("No holdings for this fund in the selected month.")
+            return
+
+    elif mode == "Historical valuations of current portfolio":
+        # Use latest snapshot <= target_date as anchor
+        with engine.begin() as conn:
+            anchor_sql = text(
+                """
+                SELECT MAX(month_end) AS anchor_month_end
+                FROM fundlab.fund_portfolio
+                WHERE fund_id = :fund_id
+                  AND month_end <= :target_date;
+                """
+            )
+            anchor = conn.execute(
+                anchor_sql, {"fund_id": fund_id, "target_date": target_date}
+            ).fetchone()
+            if not anchor or anchor.anchor_month_end is None:
+                st.error("No anchor holdings found on or before target_date.")
+                return
+
+            h_sql = text(
+                """
+                SELECT
+                    fp.fund_id,
+                    fp.month_end,
+                    fp.isin,
+                    fp.holding_weight AS weight_pct,
+                    fp.asset_type,
+                    sm.is_financial
+                FROM fundlab.fund_portfolio fp
+                JOIN fundlab.stock_master sm
+                  ON sm.isin = fp.isin
+                WHERE fp.fund_id = :fund_id
+                  AND fp.month_end = :anchor_month_end
+                  AND fp.asset_type = 'Domestic Equities';
+                """
+            )
+            holdings = pd.read_sql(
+                h_sql,
+                conn,
+                params={"fund_id": fund_id, "anchor_month_end": anchor.anchor_month_end},
+            )
+
+        if holdings.empty:
+            st.error("No anchor holdings found.")
+            return
+
+        holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
+        holdings["month_key"] = target_period  # we will revalue at this month
+
+    else:
+        st.error(f"Unsupported mode: {mode}")
+        return
+
+    # Segment filter
+    if segment_choice == "Financials":
+        holdings = holdings[holdings["is_financial"].astype(bool)].copy()
+    elif segment_choice == "Non-financials":
+        holdings = holdings[~holdings["is_financial"].astype(bool)].copy()
+
+    if holdings.empty:
+        st.error("No holdings in this segment for the selected month.")
+        return
+
+    holdings["isin"] = holdings["isin"].astype(str).str.strip()
+    holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
+    sum_w = holdings["weight_pct"].sum()
+    if sum_w <= 0:
+        st.error("Sum of weights is not positive.")
+        return
+
+    holdings["w_domestic"] = holdings["weight_pct"] / sum_w
+
+    st.write("#### Step 1: Raw holdings (after segment filter & domestic rebase)")
+    st.dataframe(
+        holdings[
+            ["isin", "weight_pct", "w_domestic", "is_financial"]
+        ].reset_index(drop=True)
+    )
+
+    # ------------------------------------------------------------------
+    # 2) Get stock-level multiples for that month (using month_key)
+    # ------------------------------------------------------------------
+    all_isins = sorted(holdings["isin"].unique().tolist())
+    with engine.begin() as conn:
+        v_sql = text(
+            """
+            SELECT
+                isin,
+                month_end,
+                ps,
+                pe,
+                pb
+            FROM fundlab.stock_monthly_valuations
+            WHERE isin = ANY(:isins)
+              AND month_end BETWEEN :start AND :end;
+            """
+        )
+        # small buffer around the month just in case; we'll filter via period
+        start = target_period.start_time.date()
+        end = target_period.to_timestamp("M").date()
+        vals = pd.read_sql(
+            v_sql,
+            conn,
+            params={"isins": all_isins, "start": start, "end": end},
+        )
+
+    if vals.empty:
+        st.error("No stock_monthly_valuations for these ISINs in this month window.")
+        return
+
+    vals["isin"] = vals["isin"].astype(str).str.strip()
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
+    vals = vals.dropna(subset=["month_end"])
+    vals["month_key"] = vals["month_end"].dt.to_period("M")
+    vals = vals[vals["month_key"] == target_period].copy()
+
+    if vals.empty:
+        st.error("No stock valuations matching this year-month.")
+        return
+
+    st.write("#### Step 2: Stock-level multiples in this month")
+    st.dataframe(
+        vals[["isin", "month_end", "ps", "pe", "pb"]].reset_index(drop=True)
+    )
+
+    # ------------------------------------------------------------------
+    # 3) Merge holdings + multiples, compute weights used and metric
+    # ------------------------------------------------------------------
+    df = holdings.merge(
+        vals[["isin", "month_key", "ps", "pe", "pb"]],
+        on=["isin", "month_key"],
+        how="left",
+    )
+
+    df["metric"] = pd.to_numeric(df[metric_key], errors="coerce")
+    df = df[df["metric"] > 0].copy()
+    if df.empty:
+        st.error("After dropping invalid/<=0 metrics, no stocks remain.")
+        return
+
+    sum_w_valid = df["w_domestic"].sum()
+    if sum_w_valid <= 0:
+        st.error("Sum of w_domestic over valid stocks is not positive.")
+        return
+
+    df["w_norm"] = df["w_domestic"] / sum_w_valid
+    df["w_times_metric"] = df["w_norm"] * df["metric"]
+
+    st.write("#### Step 3: Effective weights and contributions")
+    st.dataframe(
+        df[
+            ["isin", "w_domestic", "w_norm", "metric", "w_times_metric"]
+        ].reset_index(drop=True)
+    )
+
+    fund_metric = df["w_times_metric"].sum()
+    st.write(f"#### Result: Fund-level {metric_choice} for this point = **{fund_metric:.4f}**")
+
+    # ------------------------------------------------------------------
+    # 4) If historical portfolio mode, show stored DB value for comparison
+    # ------------------------------------------------------------------
+    if mode == "Valuations of historical portfolios":
+        with engine.begin() as conn:
+            db_sql = text(
+                """
+                SELECT ps, pe, pb
+                FROM fundlab.fund_monthly_valuations
+                WHERE fund_id = :fund_id
+                  AND month_end = :month_end
+                  AND segment = :segment;
+                """
+            )
+            row = conn.execute(
+                db_sql,
+                {
+                    "fund_id": fund_id,
+                    "month_end": month_start.date(),
+                    "segment": segment_choice,
+                },
+            ).fetchone()
+
+        if row:
+            stored_val = getattr(row, metric_key)
+            st.write(
+                f"Stored value in fund_monthly_valuations ({metric_choice}) "
+                f"for this point: **{stored_val}**"
+            )
+        else:
+            st.write(
+                "No row found in fund_monthly_valuations for this fund/month/segment yet."
+            )
+
+
+
 def upload_fund_navs(df: pd.DataFrame):
     engine = get_engine()
     with engine.begin() as conn:
@@ -2397,12 +2659,73 @@ def rebuild_fund_monthly_valuations(
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
 
     # Merge valuations into holdings
+    
+    # --------------------------------------------------------------
+    # 3) Pull stock valuations only for relevant ISINs and dates
+    #    (match by year-month, ignore day)
+    # --------------------------------------------------------------
+    all_isins = sorted(holdings["isin"].unique().tolist())
+    min_month = holdings["month_end"].min()
+    max_month = holdings["month_end"].max()
+
+    with engine.begin() as conn:
+        val_sql = text(
+            """
+            SELECT
+                isin,
+                month_end,
+                ttm_sales,
+                ttm_pat,
+                book_value,
+                ps,
+                pe,
+                pb
+            FROM fundlab.stock_monthly_valuations
+            WHERE isin = ANY(:isins)
+              AND month_end BETWEEN :start_date AND :end_date
+            """
+        )
+        vals = pd.read_sql(
+            val_sql,
+            conn,
+            params={
+                "isins": all_isins,
+                "start_date": min_month,
+                "end_date": max_month,
+            },
+        )
+
+    if vals.empty:
+        st.info("No stock_monthly_valuations rows found for the given holdings.")
+        return
+
+    # Clean & build month_key (year-month) on both sides
+    holdings["isin"] = holdings["isin"].astype(str).str.strip()
+    holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
+    holdings = holdings.dropna(subset=["month_end"])
+    holdings["month_key"] = holdings["month_end"].dt.to_period("M")
+
+    vals["isin"] = vals["isin"].astype(str).str.strip()
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
+    vals = vals.dropna(subset=["month_end"])
+    vals["month_key"] = vals["month_end"].dt.to_period("M")
+
+    # Merge on (isin, month_key) instead of exact date
     df = holdings.merge(
-        vals,
-        on=["isin", "month_end"],
+        vals.drop(columns=["month_end"]),   # drop its date; keep month_key
+        on=["isin", "month_key"],
         how="left",
         suffixes=("", "_val"),
     )
+
+    if df[["ps", "pe", "pb"]].isna().all(axis=None):
+        st.info("All merged valuations are NaN after month_key merge; nothing to write.")
+        return
+
+    # Use canonical month_end = last day of month for output
+    df["month_end"] = df["month_key"].dt.to_timestamp("M").dt.date
+
+
 
     # If no valuations at all, nothing to do
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
@@ -2708,15 +3031,15 @@ def compute_portfolio_valuations_timeseries(
     if mode != "Historical valuations of current portfolio":
         raise ValueError(f"Unsupported mode: {mode}")
 
-    # Monthly grid for requested period (as proper datetimes, end-of-month)
-    month_range = pd.date_range(start_date, end_date, freq="M")
-    if len(month_range) == 0:
+    engine = get_engine()
+
+    # Build month-level grid (as Periods) for the requested range
+    month_periods = pd.period_range(start=start_date, end=end_date, freq="M")
+    if len(month_periods) == 0:
         return pd.DataFrame(columns=["month_end", "series", "value"])
-    month_range = month_range.normalize()
 
     with engine.begin() as conn:
-        # 1) Get "anchor" portfolios for each fund:
-        #    latest month_end <= end_date (Domestic Equities only)
+        # 1) Anchor portfolios: latest month_end <= end_date for each fund
         anchor_sql = text(
             """
             SELECT fund_id, MAX(month_end) AS anchor_month_end
@@ -2767,7 +3090,6 @@ def compute_portfolio_valuations_timeseries(
 
     # Clean holdings
     anchor_holdings["isin"] = anchor_holdings["isin"].astype(str).str.strip()
-    # Normalize anchor month_end just for consistency (not used later)
     anchor_holdings["month_end"] = pd.to_datetime(
         anchor_holdings["month_end"], errors="coerce"
     ).dt.normalize()
@@ -2777,7 +3099,6 @@ def compute_portfolio_valuations_timeseries(
         anchor_holdings = anchor_holdings[anchor_holdings["is_financial"].astype(bool)].copy()
     elif segment_choice == "Non-financials":
         anchor_holdings = anchor_holdings[~anchor_holdings["is_financial"].astype(bool)].copy()
-    # 'Total' → keep all
 
     if anchor_holdings.empty:
         return pd.DataFrame(columns=["month_end", "series", "value"])
@@ -2793,7 +3114,6 @@ def compute_portfolio_valuations_timeseries(
 
     anchor_holdings["w_domestic"] = anchor_holdings["weight_pct"] / sum_w
 
-    # For valuation, we only need fund_id, isin, w_domestic (weights fixed across time)
     base_holdings = anchor_holdings[["fund_id", "isin", "w_domestic"]].copy()
     base_holdings["isin"] = base_holdings["isin"].astype(str).str.strip()
 
@@ -2801,10 +3121,7 @@ def compute_portfolio_valuations_timeseries(
     if not all_isins:
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # Fetch stock-level multiples for these ISINs over the month_range
-    min_month = month_range.min()
-    max_month = month_range.max()
-
+    # Fetch stock-level multiples for these ISINs over the full date window
     with engine.begin() as conn:
         vals_sql = text(
             """
@@ -2824,8 +3141,8 @@ def compute_portfolio_valuations_timeseries(
             conn,
             params={
                 "isins": all_isins,
-                "start_date": min_month,
-                "end_date": max_month,
+                "start_date": start_date,
+                "end_date": end_date,
             },
         )
 
@@ -2833,37 +3150,41 @@ def compute_portfolio_valuations_timeseries(
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
     vals["isin"] = vals["isin"].astype(str).str.strip()
-    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
-    vals = vals.dropna(subset=["isin", "month_end"])
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
+    vals = vals.dropna(subset=["month_end"])
+    # Month key on valuations side
+    vals["month_key"] = vals["month_end"].dt.to_period("M")
+
+    # Restrict to requested month_periods
+    vals = vals[vals["month_key"].isin(month_periods)].copy()
     if vals.empty:
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # Restrict to the actual months for which we have valuations
-    valid_months = sorted(vals["month_end"].dropna().unique().tolist())
-    if not valid_months:
-        return pd.DataFrame(columns=["month_end", "series", "value"])
-
-    # Build cross-join: (fund_id, isin, w_domestic) × month_end
-    months_df = pd.DataFrame({"month_end": valid_months})
-    # Cross join via dummy key
+    # Build cross-join: (fund_id, isin, w_domestic) × month_key
+    months_df = pd.DataFrame({"month_key": month_periods})
     base_holdings["_key"] = 1
     months_df["_key"] = 1
     combo = base_holdings.merge(months_df, on="_key").drop(columns=["_key"])
 
-    # Join stock-level multiples
+    # Join stock-level multiples on (isin, month_key)
     df = combo.merge(
-        vals[["isin", "month_end", "ps", "pe", "pb"]],
-        on=["isin", "month_end"],
+        vals[["isin", "month_key", "ps", "pe", "pb"]],
+        on=["isin", "month_key"],
         how="left",
     )
 
-    # Choose metric column and ensure numeric
+    # Select metric
+    metric_map = {"P/S": "ps", "P/E": "pe", "P/B": "pb"}
+    metric_key = metric_map.get(metric_choice)
+    if metric_key is None:
+        raise ValueError(f"Unsupported metric_choice: {metric_choice}")
+
     df["metric"] = pd.to_numeric(df[metric_key], errors="coerce")
-    df = df[df["metric"] > 0].copy()  # drop zero/negative/NaN metrics
+    df = df[df["metric"] > 0].copy()
     if df.empty:
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # Weighted average of stock-level multiples within each (fund_id, month_end)
+    # Weighted average of stock-level multiples within (fund_id, month_key)
     def _agg_weighted_metric(group: pd.DataFrame) -> float | None:
         w = pd.to_numeric(group["w_domestic"], errors="coerce").fillna(0.0)
         if (w <= 0).all():
@@ -2876,11 +3197,13 @@ def compute_portfolio_valuations_timeseries(
         return float((w_norm * m).sum())
 
     agg_list = []
-    for (fid, m_end), grp in df.groupby(["fund_id", "month_end"], sort=True):
+    for (fid, m_key), grp in df.groupby(["fund_id", "month_key"], sort=True):
         val = _agg_weighted_metric(grp)
         if val is None or np.isnan(val):
             continue
-        agg_list.append({"fund_id": int(fid), "month_end": m_end, "value": val})
+        # canonical month_end = last day of month
+        month_end = m_key.to_timestamp("M")
+        agg_list.append({"fund_id": int(fid), "month_end": month_end, "value": val})
 
     if not agg_list:
         return pd.DataFrame(columns=["month_end", "series", "value"])
@@ -2914,6 +3237,7 @@ def compute_portfolio_valuations_timeseries(
     df_chart = pd.concat([focus, median_others], ignore_index=True)
     df_chart = df_chart.sort_values(["month_end", "series"]).reset_index(drop=True)
     return df_chart
+
 
 
 
@@ -5090,7 +5414,7 @@ def performance_page():
 
 def portfolio_fundamentals_page():
     home_button()
-    st.header("Portfolio fundamentals – RoE / RoCE")
+    st.header("Portfolio fundamentals – return on capital & valuations")
 
     # 1) Category selector (checkboxes)
     categories = fetch_categories()
@@ -6204,6 +6528,29 @@ def housekeeping_page():
 
     if st.button("6. Upload this workbook to Supabase"):
         upload_stock_monthly_valuations_from_excel(uploaded_val_file)
+
+    # ---------------------------------------------------------------
+    # Debug valuation point (sanity-check tool)
+    # ---------------------------------------------------------------
+    with st.expander("🔍 Debug valuation point (advanced)", expanded=False):
+        dbg_fund = st.number_input("Fund ID", min_value=1, step=1)
+        dbg_date = st.date_input("Month (any day in month)")
+        dbg_segment = st.selectbox("Segment", ["Total", "Financials", "Non-financials"])
+        dbg_metric = st.selectbox("Metric", ["P/E", "P/B", "P/S"])
+        dbg_mode = st.selectbox(
+            "Mode",
+            ["Valuations of historical portfolios", "Historical valuations of current portfolio"],
+        )
+
+        if st.button("Run valuation debug"):
+            debug_portfolio_valuation_point(
+                fund_id=int(dbg_fund),
+                target_date=dbg_date,
+                segment_choice=dbg_segment,
+                metric_choice=dbg_metric,
+                mode=dbg_mode,
+            )
+
   
 
 
