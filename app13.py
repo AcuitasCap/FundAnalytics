@@ -2000,7 +2000,7 @@ def rebuild_stock_monthly_valuations(
     )
 
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for block_start_year in range(min_year, max_year + 1, year_block):
             block_end_year = min(block_start_year + year_block - 1, max_year)
 
