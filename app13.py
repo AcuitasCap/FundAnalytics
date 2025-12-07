@@ -1710,28 +1710,34 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
 
     return pivot
 
+
+import datetime as dt
+import io
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+from sqlalchemy import text
+
 def rebuild_stock_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    batch_size: int = 5_000,
     year_block: int = 5,
 ):
     """
-    Housekeeping job (initial full-history build):
+    Housekeeping job (full-history export to Excel):
 
     1) Reads monthly market cap from fundlab.stock_price
     2) Attaches TTM sales / PAT (from stock_quarterly_financials, consolidated)
     3) Attaches latest annual book value (from stock_annual_book_value, consolidated)
     4) Computes stock-level P/S, P/E, P/B with:
           - only positive denominators
-          - all ratios capped to abs(value) <= 1000 (else NULL)
-    5) Uploads into fundlab.stock_monthly_valuations in 5-year blocks,
-       each block committed separately, using executemany batches.
+          - ratios capped to abs(value) <= 1000 (else NULL)
+    5) Does NOT write to Supabase.
+       Instead, produces 5-year-wise Excel files for manual upload.
 
-    Assumptions:
-    - fundlab.stock_monthly_valuations exists and is EMPTY.
-    - No foreign keys / unique constraints / indices yet.
-    - We are NOT doing ON CONFLICT or any validation here.
+    Output columns (aligned to fundlab.stock_monthly_valuations):
+      isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
     """
     engine = get_engine()
 
@@ -1981,49 +1987,22 @@ def rebuild_stock_monthly_valuations(
 
     n_total = len(valuations_df)
     if n_total == 0:
-        st.info("No rows to write into stock_monthly_valuations after processing.")
+        st.info("No rows to export after processing.")
         return
 
-    st.write(f"Total valuation rows to upload: {n_total}")
+    st.write(f"Total valuation rows to export: {n_total}")
 
-    # Clean infinities and NaNs
+    # Clean infinities; leave NaNs as blanks in Excel
     valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
-    valuations_df = valuations_df.where(pd.notnull(valuations_df), None)
 
     # --------------------------------------------------------------
-    # 5) Upload in 5-year blocks with executemany batches
+    # 5) Build 5-year Excel dumps with download buttons
     # --------------------------------------------------------------
     years = valuations_df["month_end"].apply(lambda d: d.year)
-    min_year = years.min()
-    max_year = years.max()
+    min_year = int(years.min())
+    max_year = int(years.max())
 
-    insert_sql = text(
-        """
-        INSERT INTO fundlab.stock_monthly_valuations (
-            isin,
-            month_end,
-            ttm_sales,
-            ttm_pat,
-            book_value,
-            ps,
-            pe,
-            pb
-        )
-        VALUES (
-            :isin,
-            :month_end,
-            :ttm_sales,
-            :ttm_pat,
-            :book_value,
-            :ps,
-            :pe,
-            :pb
-        );
-        """
-    )
-
-    progress = st.progress(0.0, text="Uploading stock valuations...")
-    processed = 0
+    st.write(f"Exporting blocks from {min_year} to {max_year} in {year_block}-year steps:")
 
     for block_start_year in range(min_year, max_year + 1, year_block):
         block_end_year = min(block_start_year + year_block - 1, max_year)
@@ -2037,48 +2016,26 @@ def rebuild_stock_monthly_valuations(
             continue
 
         st.write(
-            f"Uploading years {block_start_year}–{block_end_year} "
-            f"({len(block_df)} rows)..."
+            f"Block {block_start_year}–{block_end_year}: {len(block_df):,} rows"
         )
 
-        # One transaction per 5-year block
-        with engine.begin() as conn:
-            for start_idx in range(0, len(block_df), batch_size):
-                end_idx = min(start_idx + batch_size, len(block_df))
-                chunk = block_df.iloc[start_idx:end_idx]
+        # In-memory Excel
+        buffer = io.BytesIO()
+        # Ensure column order matches table definition
+        block_df[
+            ["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]
+        ].to_excel(buffer, index=False)
+        buffer.seek(0)
 
-                rows = []
-                for _, r in chunk.iterrows():
-                    rows.append(
-                        {
-                            "isin": str(r["isin"]).strip(),
-                            "month_end": r["month_end"],
-                            "ttm_sales": r["ttm_sales"],
-                            "ttm_pat": r["ttm_pat"],
-                            "book_value": r["book_value"],
-                            "ps": r["ps"],
-                            "pe": r["pe"],
-                            "pb": r["pb"],
-                        }
-                    )
+        st.download_button(
+            label=f"Download valuations {block_start_year}–{block_end_year}",
+            data=buffer,
+            file_name=f"stock_monthly_valuations_{block_start_year}_{block_end_year}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
-                if rows:
-                    conn.execute(insert_sql, rows)
+    st.success("Valuation Excel exports ready. Download each block and upload to Supabase.")
 
-                processed += len(chunk)
-                progress.progress(
-                    processed / n_total,
-                    text=(
-                        f"Uploading stock valuations... "
-                        f"{processed:,} / {n_total:,} rows"
-                    ),
-                )
-
-    progress.progress(1.0, text="Stock valuations upload complete.")
-    st.success(
-        f"Stock monthly valuations rebuilt for {n_total:,} (isin, month_end) rows "
-        f"between {start_date} and {end_date}."
-    )
 
 
 def rebuild_fund_monthly_valuations(
