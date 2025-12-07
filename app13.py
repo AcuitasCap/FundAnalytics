@@ -1295,6 +1295,139 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
 
 
 
+def upload_stock_monthly_valuations_from_excel(
+    uploaded_file,
+    batch_size: int = 10_000,
+):
+    """
+    Read a single Excel workbook containing stock monthly valuations
+    and bulk-insert into fundlab.stock_monthly_valuations using UNNEST.
+
+    Expected columns in Excel (case-sensitive):
+        isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
+
+    Assumptions:
+        - fundlab.stock_monthly_valuations already exists
+        - No UNIQUE / FK constraints that will explode on insert
+    """
+    if uploaded_file is None:
+        st.warning("Please select an Excel file first.")
+        return
+
+    st.write("Reading Excel file for stock valuations upload...")
+
+    try:
+        df = pd.read_excel(uploaded_file)  # default engine (openpyxl)
+    except Exception as e:
+        st.error(f"Failed to read Excel file: {e}")
+        return
+
+    required_cols = [
+        "isin",
+        "month_end",
+        "ttm_sales",
+        "ttm_pat",
+        "book_value",
+        "ps",
+        "pe",
+        "pb",
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns in Excel: {missing}")
+        return
+
+    # Keep only what we need, in correct order
+    df = df[required_cols].copy()
+
+    # Basic cleaning
+    df["isin"] = df["isin"].astype(str).str.strip()
+
+    df["month_end"] = pd.to_datetime(df["month_end"], errors="coerce").dt.date
+
+    for col in ["ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Drop obviously bad rows
+    df = df.dropna(subset=["isin", "month_end"])
+    if df.empty:
+        st.warning("No usable rows (isin + month_end) found in the file.")
+        return
+
+    # Deduplicate on (isin, month_end) just to be safe
+    before = len(df)
+    df = df.sort_values(["isin", "month_end"]).drop_duplicates(
+        subset=["isin", "month_end"],
+        keep="last",
+    )
+    after = len(df)
+
+    if after < before:
+        st.write(f"Deduplicated {(before - after):,} duplicate (isin, month_end) rows.")
+
+    n_total = len(df)
+    st.write(f"Prepared {n_total:,} rows for upload.")
+
+    # Replace inf with NaN, then NaN with None so psycopg2 gets NULLs
+    df = df.replace({np.inf: np.nan, -np.inf: np.nan})
+    df = df.where(pd.notnull(df), None)
+
+    # ----------------- UNNEST-based bulk insert -----------------
+    insert_sql = text(
+        """
+        INSERT INTO fundlab.stock_monthly_valuations (
+            isin,
+            month_end,
+            ttm_sales,
+            ttm_pat,
+            book_value,
+            ps,
+            pe,
+            pb
+        )
+        SELECT
+            UNNEST(:isin_array::text[]),
+            UNNEST(:month_end_array::date[]),
+            UNNEST(:ttm_sales_array::numeric[]),
+            UNNEST(:ttm_pat_array::numeric[]),
+            UNNEST(:book_value_array::numeric[]),
+            UNNEST(:ps_array::numeric[]),
+            UNNEST(:pe_array::numeric[]),
+            UNNEST(:pb_array::numeric[]);
+        """
+    )
+
+    engine = get_engine()
+    progress = st.progress(0.0, text="Uploading to Supabase...")
+    uploaded = 0
+
+    with engine.begin() as conn:
+        for start in range(0, n_total, batch_size):
+            end = min(start + batch_size, n_total)
+            chunk = df.iloc[start:end]
+
+            params = {
+                "isin_array": chunk["isin"].tolist(),
+                "month_end_array": chunk["month_end"].tolist(),
+                "ttm_sales_array": chunk["ttm_sales"].tolist(),
+                "ttm_pat_array": chunk["ttm_pat"].tolist(),
+                "book_value_array": chunk["book_value"].tolist(),
+                "ps_array": chunk["ps"].tolist(),
+                "pe_array": chunk["pe"].tolist(),
+                "pb_array": chunk["pb"].tolist(),
+            }
+
+            conn.execute(insert_sql, params)
+
+            uploaded += len(chunk)
+            progress.progress(
+                uploaded / n_total,
+                text=f"Uploading to Supabase... {uploaded:,} / {n_total:,} rows",
+            )
+
+    progress.progress(1.0, text="Upload complete.")
+    st.success(f"Uploaded {n_total:,} stock valuation rows to Supabase.")
+
 
 
 
@@ -6069,7 +6202,16 @@ def housekeeping_page():
 
     if st.button("5. Refresh fund valuations"):
         rebuild_fund_monthly_valuations()
-        st.success("Fund valuations updated")     
+        st.success("Fund valuations updated")
+
+    if st.button("6. Upload precomputed stock valuations to DB"):
+        uploaded_val_file = st.file_uploader(
+        "Select a stock valuations Excel workbook (.xlsx)",
+        type=["xlsx"],
+        key="stock_val_upload",
+        )
+        upload_stock_monthly_valuations_from_excel(uploaded_val_file)
+        st.success("Fund valuations updated")      
 
 
 
