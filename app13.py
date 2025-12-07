@@ -2599,7 +2599,9 @@ def compute_portfolio_valuations_timeseries(
       - 'Historical valuations of current portfolio'
 
     Returns DataFrame with columns:
-      month_end (datetime64[ns]), series ('Focus fund' / 'Universe median (others)'), value
+      month_end (datetime64[ns]),
+      series ('Focus fund' / 'Universe median (others)'),
+      value (float)
     """
 
     if not fund_ids or focus_fund_id not in fund_ids:
@@ -2609,375 +2611,308 @@ def compute_portfolio_valuations_timeseries(
     if not other_fund_ids:
         raise ValueError("Need at least one other fund to compute universe median.")
 
+    # Map UI selections to DB column names
+    metric_map = {
+        "P/S": "ps",
+        "P/E": "pe",
+        "P/B": "pb",
+    }
+    metric_key = metric_map.get(metric_choice)
+    if metric_key is None:
+        raise ValueError(f"Unsupported metric_choice: {metric_choice}")
+
+    # Segment labels in DB and UI are already aligned:
+    # 'Financials', 'Non-financials', 'Total'
+    segment_value = segment_choice
+
     engine = get_engine()
 
-    # Monthly grid for requested period (as proper datetimes)
-    month_range = pd.date_range(start_date, end_date, freq="M")
-    if len(month_range) == 0:
-        return pd.DataFrame()
-
-    # ---------------------------------------------------------------------
-    # 1) Fetch holdings (Domestic Equities only) for relevant funds/months
-    # ---------------------------------------------------------------------
-    with engine.begin() as conn:
-        if mode == "Valuations of historical portfolios":
-            # Use actual historical portfolios
-            holdings_sql = text(
+    # ------------------------------------------------------------------
+    # MODE 1: Valuations of historical portfolios
+    # ------------------------------------------------------------------
+    if mode == "Valuations of historical portfolios":
+        # Here we DO NOT recompute from holdings; we trust and use the
+        # precomputed values stored in fundlab.fund_monthly_valuations,
+        # which were built using weighted-average-of-stock-multiples.
+        with engine.begin() as conn:
+            sql = text(
                 """
                 SELECT
-                    fp.fund_id,
-                    fp.month_end,
-                    fp.isin,
-                    fp.holding_weight AS weight_pct,
-                    fp.asset_type,
-                    sm.is_financial
-                FROM fundlab.fund_portfolio fp
-                JOIN fundlab.stock_master sm
-                  ON sm.isin = fp.isin
-                WHERE fp.fund_id = ANY(:fund_ids)
-                  AND fp.month_end BETWEEN :start_date AND :end_date
-                  AND fp.asset_type = 'Domestic Equities'
-                ORDER BY fp.fund_id, fp.month_end, fp.isin;
+                    fund_id,
+                    month_end,
+                    segment,
+                    ps,
+                    pe,
+                    pb
+                FROM fundlab.fund_monthly_valuations
+                WHERE fund_id = ANY(:fund_ids)
+                  AND month_end BETWEEN :start_date AND :end_date
+                  AND segment = :segment;
                 """
             )
-            holdings = pd.read_sql(
-                holdings_sql,
+            df = pd.read_sql(
+                sql,
                 conn,
                 params={
                     "fund_ids": fund_ids,
                     "start_date": start_date,
                     "end_date": end_date,
+                    "segment": segment_value,
                 },
             )
-        else:
-            # Historical valuations of current portfolio:
-            # For each fund, use the latest portfolio snapshot <= end_date.
-            anchor_sql = text(
-                """
+
+        if df.empty:
+            return pd.DataFrame(columns=["month_end", "series", "value"])
+
+        # Pick the chosen metric column
+        df["value"] = pd.to_numeric(df[metric_key], errors="coerce")
+        df = df.dropna(subset=["value"])
+        if df.empty:
+            return pd.DataFrame(columns=["month_end", "series", "value"])
+
+        # Ensure month_end is a proper datetime
+        df["month_end"] = pd.to_datetime(df["month_end"], errors="coerce").dt.normalize()
+        df = df.dropna(subset=["month_end"])
+        if df.empty:
+            return pd.DataFrame(columns=["month_end", "series", "value"])
+
+        # Build focus series
+        focus = df[df["fund_id"] == focus_fund_id].copy()
+        if focus.empty:
+            return pd.DataFrame(columns=["month_end", "series", "value"])
+        focus = focus[["month_end", "value"]]
+        focus["series"] = "Focus fund"
+
+        # Build universe-median (others) series
+        others = df[df["fund_id"].isin(other_fund_ids)].copy()
+        if others.empty:
+            return pd.DataFrame(columns=["month_end", "series", "value"])
+
+        median_others = (
+            others.groupby("month_end", as_index=False)["value"]
+            .median()
+            .rename(columns={"value": "value_median"})
+        )
+        median_others["series"] = "Universe median (others)"
+        median_others = median_others.rename(columns={"value_median": "value"})[
+            ["month_end", "value", "series"]
+        ]
+
+        df_chart = pd.concat([focus, median_others], ignore_index=True)
+        df_chart = df_chart.sort_values(["month_end", "series"]).reset_index(drop=True)
+        return df_chart
+
+    # ------------------------------------------------------------------
+    # MODE 2: Historical valuations of current portfolio
+    # ------------------------------------------------------------------
+    if mode != "Historical valuations of current portfolio":
+        raise ValueError(f"Unsupported mode: {mode}")
+
+    # Monthly grid for requested period (as proper datetimes, end-of-month)
+    month_range = pd.date_range(start_date, end_date, freq="M")
+    if len(month_range) == 0:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
+    month_range = month_range.normalize()
+
+    with engine.begin() as conn:
+        # 1) Get "anchor" portfolios for each fund:
+        #    latest month_end <= end_date (Domestic Equities only)
+        anchor_sql = text(
+            """
+            SELECT fund_id, MAX(month_end) AS anchor_month_end
+            FROM fundlab.fund_portfolio
+            WHERE fund_id = ANY(:fund_ids)
+              AND month_end <= :end_date
+            GROUP BY fund_id;
+            """
+        )
+        anchors = pd.read_sql(
+            anchor_sql, conn, params={"fund_ids": fund_ids, "end_date": end_date}
+        )
+
+        if anchors.empty:
+            raise ValueError("No portfolio data found on or before the valuation end date.")
+
+        holdings_sql = text(
+            """
+            SELECT
+                fp.fund_id,
+                fp.month_end,
+                fp.isin,
+                fp.holding_weight AS weight_pct,
+                fp.asset_type,
+                sm.is_financial
+            FROM fundlab.fund_portfolio fp
+            JOIN fundlab.stock_master sm
+              ON sm.isin = fp.isin
+            JOIN (
                 SELECT fund_id, MAX(month_end) AS anchor_month_end
                 FROM fundlab.fund_portfolio
                 WHERE fund_id = ANY(:fund_ids)
                   AND month_end <= :end_date
-                GROUP BY fund_id;
-                """
-            )
-            anchors = pd.read_sql(
-                anchor_sql, conn, params={"fund_ids": fund_ids, "end_date": end_date}
-            )
-
-            if anchors.empty:
-                raise ValueError("No portfolio data found on or before the valuation end date.")
-
-            holdings_sql = text(
-                """
-                SELECT
-                    fp.fund_id,
-                    fp.month_end,
-                    fp.isin,
-                    fp.holding_weight AS weight_pct,
-                    fp.asset_type,
-                    sm.is_financial
-                FROM fundlab.fund_portfolio fp
-                JOIN fundlab.stock_master sm
-                  ON sm.isin = fp.isin
-                JOIN (
-                    SELECT fund_id, MAX(month_end) AS anchor_month_end
-                    FROM fundlab.fund_portfolio
-                    WHERE fund_id = ANY(:fund_ids)
-                      AND month_end <= :end_date
-                    GROUP BY fund_id
-                ) a
-                  ON a.fund_id = fp.fund_id
-                 AND a.anchor_month_end = fp.month_end
-                WHERE fp.asset_type = 'Domestic Equities'
-                ORDER BY fp.fund_id, fp.month_end, fp.isin;
-                """
-            )
-            anchor_holdings = pd.read_sql(
-                holdings_sql,
-                conn,
-                params={"fund_ids": fund_ids, "end_date": end_date},
-            )
-            if anchor_holdings.empty:
-                raise ValueError("No portfolio data found for the latest month for selected funds.")
-
-            # Replicate anchor snapshot across all months in the requested range
-            base = []
-            for m in month_range:
-                tmp = anchor_holdings.copy()
-                tmp["month_end"] = m
-                base.append(tmp)
-            holdings = pd.concat(base, ignore_index=True)
-
-    if holdings.empty:
-        return pd.DataFrame()
-
-    # Normalize month_end to datetime64[ns]
-    try:
-        # If driver returns "30-06-2023" style strings
-        holdings["month_end"] = pd.to_datetime(
-            holdings["month_end"], format="%d-%m-%Y", errors="raise"
+                GROUP BY fund_id
+            ) a
+              ON a.fund_id = fp.fund_id
+             AND a.anchor_month_end = fp.month_end
+            WHERE fp.asset_type = 'Domestic Equities'
+            ORDER BY fp.fund_id, fp.month_end, fp.isin;
+            """
         )
-    except Exception:
-        holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
-    holdings["month_end"] = holdings["month_end"].dt.normalize()
+        anchor_holdings = pd.read_sql(
+            holdings_sql, conn, params={"fund_ids": fund_ids, "end_date": end_date}
+        )
 
-    # ---------------------------------------------------------------------
-    # 2) Segment filter
-    # ---------------------------------------------------------------------
+    if anchor_holdings.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
+
+    # Clean holdings
+    anchor_holdings["isin"] = anchor_holdings["isin"].astype(str).str.strip()
+    # Normalize anchor month_end just for consistency (not used later)
+    anchor_holdings["month_end"] = pd.to_datetime(
+        anchor_holdings["month_end"], errors="coerce"
+    ).dt.normalize()
+
+    # Segment filter at anchor level
     if segment_choice == "Financials":
-        holdings = holdings[holdings["is_financial"].astype(bool)].copy()
+        anchor_holdings = anchor_holdings[anchor_holdings["is_financial"].astype(bool)].copy()
     elif segment_choice == "Non-financials":
-        holdings = holdings[~holdings["is_financial"].astype(bool)].copy()
-    # 'Total' → no extra filter
+        anchor_holdings = anchor_holdings[~anchor_holdings["is_financial"].astype(bool)].copy()
+    # 'Total' → keep all
 
-    if holdings.empty:
-        return pd.DataFrame()
+    if anchor_holdings.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # ---------------------------------------------------------------------
-    # 3) Rebase weights within (fund_id, month_end) to Domestic Equities = 100
-    # ---------------------------------------------------------------------
-    holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
-    sum_w = holdings.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
-    holdings = holdings[sum_w > 0].copy()
-    if holdings.empty:
-        return pd.DataFrame()
+    # Rebase weights within each (fund_id, anchor_month) so Domestic = 100%
+    anchor_holdings["weight_pct"] = pd.to_numeric(
+        anchor_holdings["weight_pct"], errors="coerce"
+    )
+    sum_w = anchor_holdings.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
+    anchor_holdings = anchor_holdings[sum_w > 0].copy()
+    if anchor_holdings.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    holdings["w_domestic"] = holdings["weight_pct"] / sum_w
+    anchor_holdings["w_domestic"] = anchor_holdings["weight_pct"] / sum_w
 
-    # Ensure clean ISINs
-    holdings["isin"] = holdings["isin"].astype(str).str.strip()
-    all_isins = sorted(holdings["isin"].dropna().unique().tolist())
+    # For valuation, we only need fund_id, isin, w_domestic (weights fixed across time)
+    base_holdings = anchor_holdings[["fund_id", "isin", "w_domestic"]].copy()
+    base_holdings["isin"] = base_holdings["isin"].astype(str).str.strip()
+
+    all_isins = sorted(base_holdings["isin"].dropna().unique().tolist())
     if not all_isins:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    min_month = month_range.min().normalize()
-    max_month = month_range.max().normalize()
+    # Fetch stock-level multiples for these ISINs over the month_range
+    min_month = month_range.min()
+    max_month = month_range.max()
 
-    # ---------------------------------------------------------------------
-    # 4) Fetch market cap + quarterly & annual fundamentals (once)
-    # ---------------------------------------------------------------------
     with engine.begin() as conn:
-        # Market cap from stock_price (price_date → month_end)
-        mc_sql = text(
+        vals_sql = text(
             """
             SELECT
                 isin,
-                price_date AS month_end,
-                market_cap
-            FROM fundlab.stock_price
+                month_end,
+                ps,
+                pe,
+                pb
+            FROM fundlab.stock_monthly_valuations
             WHERE isin = ANY(:isins)
-              AND price_date BETWEEN :start_date AND :end_date;
+              AND month_end BETWEEN :start_date AND :end_date;
             """
         )
-        mc = pd.read_sql(
-            mc_sql,
+        vals = pd.read_sql(
+            vals_sql,
             conn,
-            params={"isins": all_isins, "start_date": min_month, "end_date": max_month},
+            params={
+                "isins": all_isins,
+                "start_date": min_month,
+                "end_date": max_month,
+            },
         )
-        if not mc.empty:
-            mc["isin"] = mc["isin"].astype(str).str.strip()
-            mc["month_end"] = pd.to_datetime(mc["month_end"], errors="coerce").dt.normalize()
 
-        # Quarterly sales & PAT
-        q_sql = text(
-            """
-            SELECT isin, period_end, sales, pat
-            FROM fundlab.stock_quarterly_financials
-            WHERE isin = ANY(:isins)
-              AND is_consolidated = TRUE
-              AND period_end <= :end_date
-            ORDER BY isin, period_end;
-            """
-        )
-        qdf = pd.read_sql(
-            q_sql, conn, params={"isins": all_isins, "end_date": max_month}
-        )
-        if not qdf.empty:
-            qdf["isin"] = qdf["isin"].astype(str).str.strip()
-            qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
+    if vals.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-        # Annual book value
-        bv_sql = text(
-            """
-            SELECT isin, year_end, book_value
-            FROM fundlab.stock_annual_book_value
-            WHERE isin = ANY(:isins)
-              AND is_consolidated = TRUE
-              AND year_end <= :end_date
-            ORDER BY isin, year_end;
-            """
-        )
-        bvdf = pd.read_sql(
-            bv_sql, conn, params={"isins": all_isins, "end_date": max_month}
-        )
-        if not bvdf.empty:
-            bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
-            bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
+    vals["isin"] = vals["isin"].astype(str).str.strip()
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
+    vals = vals.dropna(subset=["isin", "month_end"])
+    if vals.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # ---------------------------------------------------------------------
-    # 5) Build TTM sales / PAT from quarterly data (per ISIN)
-    # ---------------------------------------------------------------------
-    if not qdf.empty:
-        qdf = qdf.sort_values(["isin", "period_end"])
-        qdf["ttm_sales"] = (
-            qdf.groupby("isin")["sales"]
-            .rolling(window=4, min_periods=4)
-            .sum()
-            .reset_index(level=0, drop=True)
-        )
-        qdf["ttm_pat"] = (
-            qdf.groupby("isin")["pat"]
-            .rolling(window=4, min_periods=4)
-            .sum()
-            .reset_index(level=0, drop=True)
-        )
-        qdf_ttm = qdf[["isin", "period_end", "ttm_sales", "ttm_pat"]].dropna(
-            how="all", subset=["ttm_sales", "ttm_pat"]
-        )
-    else:
-        qdf_ttm = pd.DataFrame(columns=["isin", "period_end", "ttm_sales", "ttm_pat"])
+    # Restrict to the actual months for which we have valuations
+    valid_months = sorted(vals["month_end"].dropna().unique().tolist())
+    if not valid_months:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # ---------------------------------------------------------------------
-    # 6) Attach MC and fundamentals to holdings (as-of each month)
-    # ---------------------------------------------------------------------
-    # Merge market cap on (isin, month_end)
-    if not mc.empty:
-        holdings = holdings.merge(
-            mc[["isin", "month_end", "market_cap"]].rename(columns={"market_cap": "mc"}),
-            on=["isin", "month_end"],
-            how="left",
-        )
-    else:
-        holdings["mc"] = np.nan
+    # Build cross-join: (fund_id, isin, w_domestic) × month_end
+    months_df = pd.DataFrame({"month_end": valid_months})
+    # Cross join via dummy key
+    base_holdings["_key"] = 1
+    months_df["_key"] = 1
+    combo = base_holdings.merge(months_df, on="_key").drop(columns=["_key"])
 
-    # ---- As-of TTM sales / PAT (no merge_asof; manual alignment with searchsorted) ----
-    holdings = holdings.reset_index(drop=True)
-    holdings["ttm_sales"] = np.nan
-    holdings["ttm_pat"] = np.nan
-
-    if not qdf_ttm.empty:
-        qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
-
-        for isin, sub_ttm in qdf_ttm.groupby("isin"):
-            mask = holdings["isin"] == isin
-            if not mask.any():
-                continue
-
-            h_idx = holdings.index[mask]
-            h_dates = holdings.loc[h_idx, "month_end"].values.astype("datetime64[ns]")
-            q_dates = sub_ttm["period_end"].values.astype("datetime64[ns]")
-
-            # For each month_end, find last period_end <= month_end
-            pos = np.searchsorted(q_dates, h_dates, side="right") - 1
-            valid = pos >= 0
-            if not np.any(valid):
-                continue
-
-            aligned_sales = np.full(h_dates.shape, np.nan)
-            aligned_pat = np.full(h_dates.shape, np.nan)
-            aligned_sales[valid] = sub_ttm["ttm_sales"].values[pos[valid]]
-            aligned_pat[valid] = sub_ttm["ttm_pat"].values[pos[valid]]
-
-            holdings.loc[h_idx, "ttm_sales"] = aligned_sales
-            holdings.loc[h_idx, "ttm_pat"] = aligned_pat
-
-    # ---- As-of book value (manual alignment with searchsorted) ----
-    holdings["book_value"] = np.nan
-    if not bvdf.empty:
-        bvdf = bvdf.sort_values(["isin", "year_end"]).reset_index(drop=True)
-
-        for isin, sub_bv in bvdf.groupby("isin"):
-            mask = holdings["isin"] == isin
-            if not mask.any():
-                continue
-
-            h_idx = holdings.index[mask]
-            h_dates = holdings.loc[h_idx, "month_end"].values.astype("datetime64[ns]")
-            b_dates = sub_bv["year_end"].values.astype("datetime64[ns]")
-
-            pos = np.searchsorted(b_dates, h_dates, side="right") - 1
-            valid = pos >= 0
-            if not np.any(valid):
-                continue
-
-            aligned_bv = np.full(h_dates.shape, np.nan)
-            aligned_bv[valid] = sub_bv["book_value"].values[pos[valid]]
-
-            holdings.loc[h_idx, "book_value"] = aligned_bv
-
-    # ---------------------------------------------------------------------
-    # 7) Metric-specific filters & portfolio-level aggregation
-    # ---------------------------------------------------------------------
-    metric = metric_choice.upper().replace("/", "")
-    df = holdings.copy()
-
-    # Exclude stocks with zero/missing MC
-    df["mc"] = pd.to_numeric(df["mc"], errors="coerce").fillna(0.0)
-    df = df[df["mc"] > 0].copy()
-    if df.empty:
-        return pd.DataFrame()
-
-    if metric == "PS":
-        df["denom"] = pd.to_numeric(df["ttm_sales"], errors="coerce")
-    elif metric == "PE":
-        df["denom"] = pd.to_numeric(df["ttm_pat"], errors="coerce")
-    elif metric == "PB":
-        df["denom"] = pd.to_numeric(df["book_value"], errors="coerce")
-    else:
-        raise ValueError(f"Unsupported metric: {metric_choice}")
-
-    df = df[df["denom"] > 0].copy()
-    if df.empty:
-        return pd.DataFrame()
-
-    # Rebase weights again after excluding bad stocks
-    sum_w2 = df.groupby(["fund_id", "month_end"])["w_domestic"].transform("sum")
-    df = df[sum_w2 > 0].copy()
-    if df.empty:
-        return pd.DataFrame()
-
-    df["w_final"] = df["w_domestic"] / sum_w2
-
-    # Compute numerator & denominator
-    df["w_mc"] = df["w_final"] * df["mc"]
-    df["w_denom"] = df["w_final"] * df["denom"]
-
-    agg = (
-        df.groupby(["fund_id", "month_end"], as_index=False)
-        .agg(num=("w_mc", "sum"), den=("w_denom", "sum"))
+    # Join stock-level multiples
+    df = combo.merge(
+        vals[["isin", "month_end", "ps", "pe", "pb"]],
+        on=["isin", "month_end"],
+        how="left",
     )
-    agg = agg[agg["den"] > 0].copy()
+
+    # Choose metric column and ensure numeric
+    df["metric"] = pd.to_numeric(df[metric_key], errors="coerce")
+    df = df[df["metric"] > 0].copy()  # drop zero/negative/NaN metrics
+    if df.empty:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
+
+    # Weighted average of stock-level multiples within each (fund_id, month_end)
+    def _agg_weighted_metric(group: pd.DataFrame) -> float | None:
+        w = pd.to_numeric(group["w_domestic"], errors="coerce").fillna(0.0)
+        if (w <= 0).all():
+            return None
+        sum_w = float(w.sum())
+        if sum_w <= 0:
+            return None
+        w_norm = w / sum_w
+        m = group["metric"].to_numpy()
+        return float((w_norm * m).sum())
+
+    agg_list = []
+    for (fid, m_end), grp in df.groupby(["fund_id", "month_end"], sort=True):
+        val = _agg_weighted_metric(grp)
+        if val is None or np.isnan(val):
+            continue
+        agg_list.append({"fund_id": int(fid), "month_end": m_end, "value": val})
+
+    if not agg_list:
+        return pd.DataFrame(columns=["month_end", "series", "value"])
+
+    agg = pd.DataFrame(agg_list)
+    agg["month_end"] = pd.to_datetime(agg["month_end"], errors="coerce").dt.normalize()
+    agg = agg.dropna(subset=["month_end", "value"])
+
     if agg.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    agg["value"] = agg["num"] / agg["den"]
-    # month_end is already datetime64[ns]
-
-    # ---------------------------------------------------------------------
-    # 8) Build chart-ready series: Focus fund vs Universe median (others)
-    # ---------------------------------------------------------------------
+    # Focus fund vs universe median (others)
     focus = agg[agg["fund_id"] == focus_fund_id].copy()
     others = agg[agg["fund_id"].isin(other_fund_ids)].copy()
-
     if focus.empty or others.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["month_end", "series", "value"])
+
+    focus = focus[["month_end", "value"]]
+    focus["series"] = "Focus fund"
 
     median_others = (
         others.groupby("month_end", as_index=False)["value"]
         .median()
         .rename(columns={"value": "value_median"})
     )
-
-    focus["series"] = "Focus fund"
-    focus_chart = focus[["month_end", "value", "series"]]
-
     median_others["series"] = "Universe median (others)"
-    median_chart = median_others.rename(columns={"value_median": "value"})[
+    median_others = median_others.rename(columns={"value_median": "value"})[
         ["month_end", "value", "series"]
     ]
 
-    df_chart = pd.concat([focus_chart, median_chart], ignore_index=True)
+    df_chart = pd.concat([focus, median_others], ignore_index=True)
+    df_chart = df_chart.sort_values(["month_end", "series"]).reset_index(drop=True)
     return df_chart
 
 
