@@ -1711,21 +1711,13 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     return pivot
 
 
-import datetime as dt
-import io
-
-import numpy as np
-import pandas as pd
-import streamlit as st
-from sqlalchemy import text
-
 def rebuild_stock_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
     year_block: int = 5,
 ):
     """
-    Housekeeping job (full-history export to Excel):
+    Housekeeping job (full-history export to a single Excel file):
 
     1) Reads monthly market cap from fundlab.stock_price
     2) Attaches TTM sales / PAT (from stock_quarterly_financials, consolidated)
@@ -1734,7 +1726,8 @@ def rebuild_stock_monthly_valuations(
           - only positive denominators
           - ratios capped to abs(value) <= 1000 (else NULL)
     5) Does NOT write to Supabase.
-       Instead, produces 5-year-wise Excel files for manual upload.
+       Instead, produces a single Excel file with 5-year sheets
+       for manual upload.
 
     Output columns (aligned to fundlab.stock_monthly_valuations):
       isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
@@ -1990,51 +1983,54 @@ def rebuild_stock_monthly_valuations(
         st.info("No rows to export after processing.")
         return
 
-    st.write(f"Total valuation rows to export: {n_total}")
+    st.write(f"Total valuation rows to export: {n_total:,}")
 
-    # Clean infinities; leave NaNs as blanks in Excel
     valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
 
     # --------------------------------------------------------------
-    # 5) Build 5-year Excel dumps with download buttons
+    # 5) Create ONE Excel file with 5-year sheets + single download
     # --------------------------------------------------------------
     years = valuations_df["month_end"].apply(lambda d: d.year)
     min_year = int(years.min())
     max_year = int(years.max())
 
-    st.write(f"Exporting blocks from {min_year} to {max_year} in {year_block}-year steps:")
+    st.write(
+        f"Preparing Excel workbook with sheets in {year_block}-year blocks "
+        f"from {min_year} to {max_year}..."
+    )
 
-    for block_start_year in range(min_year, max_year + 1, year_block):
-        block_end_year = min(block_start_year + year_block - 1, max_year)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        for block_start_year in range(min_year, max_year + 1, year_block):
+            block_end_year = min(block_start_year + year_block - 1, max_year)
 
-        block_mask = valuations_df["month_end"].between(
-            dt.date(block_start_year, 1, 1),
-            dt.date(block_end_year, 12, 31),
-        )
-        block_df = valuations_df.loc[block_mask].copy()
-        if block_df.empty:
-            continue
+            block_mask = valuations_df["month_end"].between(
+                dt.date(block_start_year, 1, 1),
+                dt.date(block_end_year, 12, 31),
+            )
+            block_df = valuations_df.loc[block_mask].copy()
+            if block_df.empty:
+                continue
 
-        st.write(
-            f"Block {block_start_year}–{block_end_year}: {len(block_df):,} rows"
-        )
+            sheet_name = f"{block_start_year}_{block_end_year}"
+            st.write(
+                f"Sheet {sheet_name}: {len(block_df):,} rows"
+            )
 
-        # In-memory Excel
-        buffer = io.BytesIO()
-        # Ensure column order matches table definition
-        block_df[
-            ["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]
-        ].to_excel(buffer, index=False)
-        buffer.seek(0)
+            block_df[
+                ["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]
+            ].to_excel(writer, sheet_name=sheet_name, index=False)
 
-        st.download_button(
-            label=f"Download valuations {block_start_year}–{block_end_year}",
-            data=buffer,
-            file_name=f"stock_monthly_valuations_{block_start_year}_{block_end_year}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    buffer.seek(0)
 
-    st.success("Valuation Excel exports ready. Download each block and upload to Supabase.")
+    st.download_button(
+        label="Download ALL stock valuations (multi-sheet Excel)",
+        data=buffer,
+        file_name="stock_monthly_valuations_all_years.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
 
 
