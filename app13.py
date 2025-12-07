@@ -2192,8 +2192,6 @@ def rebuild_stock_monthly_valuations(
 
     st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
-
-
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
@@ -2206,14 +2204,14 @@ def rebuild_fund_monthly_valuations(
     and stores them in fundlab.fund_monthly_valuations.
 
     Logic:
-      1) Pull fund_portfolio holdings for Domestic Equities between start_date & end_date,
-         joined with stock_master to get is_financial.
+      1) Pull fund_portfolio holdings for Domestic Equities over an effective date
+         range that overlaps with stock_monthly_valuations.
       2) Rebase holding_weight within (fund_id, month_end) so Domestic Equities = 100%.
       3) Join to fundlab.stock_monthly_valuations on (isin, month_end).
       4) For each (fund_id, month_end, segment) and metric (P/S, P/E, P/B):
            - Segment = 'Total' / 'Financials' / 'Non-financials'
            - For chosen segment:
-               * Filter to stocks with metric > 0 (ps, pe, pb) and not null.
+               * Filter to stocks with metric > 0 and not null.
                * Let w_i = w_domestic (rebased domestic weight).
                * Let W = sum(w_i) over eligible stocks.
                * Weighted metric = sum( (w_i / W) * metric_i ).
@@ -2224,12 +2222,13 @@ def rebuild_fund_monthly_valuations(
     engine = get_engine()
 
     # --------------------------------------------------------------
-    # 0) Auto-derive date range if not provided
+    # 0) Work out effective date range (overlap of fund_portfolio & stock_valuations)
     # --------------------------------------------------------------
     with engine.begin() as conn:
+        # 0a) Fund portfolio range (if start/end not supplied)
         if start_date is None or end_date is None:
             if fund_ids:
-                rng = conn.execute(
+                rng_fund = conn.execute(
                     text(
                         """
                         SELECT
@@ -2242,7 +2241,7 @@ def rebuild_fund_monthly_valuations(
                     {"fund_ids": fund_ids},
                 ).fetchone()
             else:
-                rng = conn.execute(
+                rng_fund = conn.execute(
                     text(
                         """
                         SELECT
@@ -2253,17 +2252,51 @@ def rebuild_fund_monthly_valuations(
                     )
                 ).fetchone()
 
-            if not rng or rng.min_d is None or rng.max_d is None:
+            if not rng_fund or rng_fund.min_d is None or rng_fund.max_d is None:
                 st.warning("No data in fundlab.fund_portfolio to infer date range.")
                 return
 
             if start_date is None:
-                start_date = rng.min_d
+                start_date = rng_fund.min_d
             if end_date is None:
-                end_date = rng.max_d
+                end_date = rng_fund.max_d
+
+        # 0b) Stock valuations range
+        rng_val = conn.execute(
+            text(
+                """
+                SELECT
+                    MIN(month_end)::date AS min_d,
+                    MAX(month_end)::date AS max_d
+                FROM fundlab.stock_monthly_valuations;
+                """
+            )
+        ).fetchone()
+
+        if not rng_val or rng_val.min_d is None or rng_val.max_d is None:
+            st.warning("No data in fundlab.stock_monthly_valuations.")
+            return
+
+        # 0c) Overlap of the two ranges
+        effective_start = max(start_date, rng_val.min_d)
+        effective_end = min(end_date, rng_val.max_d)
+
+        if effective_start > effective_end:
+            st.warning(
+                f"No overlap between fund_portfolio range "
+                f"({start_date}–{end_date}) and stock_monthly_valuations range "
+                f"({rng_val.min_d}–{rng_val.max_d}). Nothing to compute."
+            )
+            return
+
+    # From here on, only use the overlapped window
+    st.info(
+        f"Rebuilding fund monthly valuations for overlap range "
+        f"{effective_start} to {effective_end}."
+    )
 
     # --------------------------------------------------------------
-    # 1) Fetch holdings (Domestic Equities only) for the period
+    # 1) Fetch holdings (Domestic Equities only) for the overlap period
     # --------------------------------------------------------------
     with engine.begin() as conn:
         if fund_ids:
@@ -2289,8 +2322,8 @@ def rebuild_fund_monthly_valuations(
                 holdings_sql,
                 conn,
                 params={
-                    "start_date": start_date,
-                    "end_date": end_date,
+                    "start_date": effective_start,
+                    "end_date": effective_end,
                     "fund_ids": fund_ids,
                 },
             )
@@ -2316,14 +2349,13 @@ def rebuild_fund_monthly_valuations(
                 holdings_sql,
                 conn,
                 params={
-                    "start_date": start_date,
-                    "end_date": end_date,
+                    "start_date": effective_start,
+                    "end_date": effective_end,
                 },
             )
 
-
     if holdings.empty:
-        st.info("No fund_portfolio holdings found in the given period.")
+        st.info("No fund_portfolio holdings found in the overlap period.")
         return
 
     # Clean holdings
@@ -2349,19 +2381,18 @@ def rebuild_fund_monthly_valuations(
 
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
 
-        # --------------------------------------------------------------
-    # 3) Join to stock_monthly_valuations
-    #    (Pull ALL isins for the date range; filter via merge)
     # --------------------------------------------------------------
-    min_month = holdings["month_end"].min()
-    max_month = holdings["month_end"].max()
-
+    # 3) Join to stock_monthly_valuations (also limited to overlap)
+    # --------------------------------------------------------------
     with engine.begin() as conn:
         val_sql = text(
             """
             SELECT
                 isin,
                 month_end,
+                ttm_sales,
+                ttm_pat,
+                book_value,
                 ps,
                 pe,
                 pb
@@ -2373,19 +2404,20 @@ def rebuild_fund_monthly_valuations(
             val_sql,
             conn,
             params={
-                "start_date": min_month,
-                "end_date": max_month,
+                "start_date": effective_start,
+                "end_date": effective_end,
             },
         )
 
     if vals.empty:
-        st.info("No stock_monthly_valuations rows found for the given period.")
+        st.info("No stock_monthly_valuations rows found in the overlap period.")
         return
 
     vals["isin"] = vals["isin"].astype(str).str.strip()
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
+    vals = vals.dropna(subset=["isin", "month_end"])
 
-    # Merge valuations into holdings (this implicitly filters to holdings' ISINs)
+    # Merge valuations into holdings
     df = holdings.merge(
         vals,
         on=["isin", "month_end"],
@@ -2393,11 +2425,14 @@ def rebuild_fund_monthly_valuations(
         suffixes=("", "_val"),
     )
 
+    if df.empty:
+        st.info("Holdings and stock_monthly_valuations did not overlap on (isin, month_end).")
+        return
+
     # If no valuations at all, nothing to do
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
         st.info("All merged valuations are NaN; nothing to write.")
         return
-
 
     # --------------------------------------------------------------
     # 4) Compute fund-level valuations: P/S, P/E, P/B by segment
@@ -2405,7 +2440,7 @@ def rebuild_fund_monthly_valuations(
     segments = ["Total", "Financials", "Non-financials"]
     records = []
 
-    # We operate fund-by-fund, month-by-month
+    # Convert is_financial to bool; NaNs treated as False (i.e. Non-financial)
     df["is_financial"] = df["is_financial"].astype(bool)
 
     for (fund_id, month_end), grp in df.groupby(["fund_id", "month_end"]):
@@ -2422,16 +2457,12 @@ def rebuild_fund_monthly_valuations(
             if seg_grp.empty:
                 continue
 
-            # For diagnostics: total domestic weight in this segment before dropping bad stocks
             total_weight_seg = float(seg_grp["w_domestic"].sum())
 
-            # Metric-wise computations
             ps_val = np.nan
             pe_val = np.nan
             pb_val = np.nan
-            stock_count = 0  # we will track max count among metrics
 
-            # Helper to compute weighted avg of any given metric column name
             def _weighted_metric(col_name: str) -> tuple[float, int, float]:
                 g = seg_grp.copy()
                 g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
@@ -2440,23 +2471,19 @@ def rebuild_fund_monthly_valuations(
                     return (np.nan, 0, 0.0)
 
                 w = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
-                sum_w = float(w.sum())
-                if sum_w <= 0:
+                sum_w_local = float(w.sum())
+                if sum_w_local <= 0:
                     return (np.nan, 0, 0.0)
 
-                w_rebased = w / sum_w
+                w_rebased = w / sum_w_local
                 metric = g[col_name].to_numpy()
                 value = float((w_rebased * metric).sum())
-                return (value, len(g), sum_w)
+                return (value, len(g), sum_w_local)
 
-            # P/S
-            ps_val, ps_count, ps_wsum = _weighted_metric("ps")
-            # P/E
-            pe_val, pe_count, pe_wsum = _weighted_metric("pe")
-            # P/B
-            pb_val, pb_count, pb_wsum = _weighted_metric("pb")
+            ps_val, ps_count, _ = _weighted_metric("ps")
+            pe_val, pe_count, _ = _weighted_metric("pe")
+            pb_val, pb_count, _ = _weighted_metric("pb")
 
-            # If all three are NaN, skip writing a row
             if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
                 continue
 
@@ -2481,12 +2508,11 @@ def rebuild_fund_monthly_valuations(
         return
 
     df_out = pd.DataFrame.from_records(records)
+    n = len(df_out)
 
     # --------------------------------------------------------------
     # 5) Batched upsert into fundlab.fund_monthly_valuations
     # --------------------------------------------------------------
-    n = len(df_out)
-
     insert_sql = text(
         """
         INSERT INTO fundlab.fund_monthly_valuations (
@@ -2544,9 +2570,8 @@ def rebuild_fund_monthly_valuations(
 
     st.success(
         f"Fund monthly valuations rebuilt: {n} (fund, month, segment) rows "
-        f"between {start_date} and {end_date}."
+        f"between {effective_start} and {effective_end}."
     )
-
 
 
 def compute_portfolio_valuations_timeseries(
