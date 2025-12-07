@@ -6204,14 +6204,26 @@ def housekeeping_page():
         rebuild_fund_monthly_valuations()
         st.success("Fund valuations updated")
 
-    if st.button("6. Upload precomputed stock valuations to DB"):
-        uploaded_val_file = st.file_uploader(
+    st.markdown("---")
+    st.subheader("Upload precomputed stock valuations to DB")
+
+    # 1) Always show file uploader
+    uploaded_val_file = st.file_uploader(
         "Select a stock valuations Excel workbook (.xlsx)",
         type=["xlsx"],
         key="stock_val_upload",
-        )
-        upload_stock_monthly_valuations_from_excel(uploaded_val_file)
-        st.success("Fund valuations updated")      
+    )
+
+    if uploaded_val_file is not None:
+        st.write(f"Selected file: **{uploaded_val_file.name}**")
+
+    # 2) Separate button that uses the selected file
+    if st.button("6. Upload this workbook to Supabase"):
+        if uploaded_val_file is None:
+            st.warning("Please select an Excel file first.")
+        else:
+            upload_stock_monthly_valuations_from_excel(uploaded_val_file)
+      
 
 
 
