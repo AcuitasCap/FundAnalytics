@@ -2192,110 +2192,85 @@ def rebuild_stock_monthly_valuations(
 
     st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
-
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
     fund_ids: list[int] | None = None,
-    batch_size: int = 5000,
 ):
     """
-    Housekeeping job:
-    Precomputes 'valuations of historical portfolios' for all (or selected) funds
-    and stores them in fundlab.fund_monthly_valuations.
+    Housekeeping job (CSV version):
 
-    Key behaviour:
-      - Works only over the overlap between:
-          * fundlab.fund_portfolio.month_end
-          * fundlab.stock_monthly_valuations.month_end
-      - Computes P/S, P/E, P/B for segments:
-          * 'Total'
-          * 'Financials'
-          * 'Non-financials'
-      - Rebased weights: within (fund_id, month_end), Domestic Equities = 100%.
-      - Incremental:
-          * Only INSERTs rows for (fund_id, month_end, segment) that do NOT
-            already exist in fundlab.fund_monthly_valuations.
-          * Uses ON CONFLICT to be safe, but we pre-filter to avoid unnecessary work.
-      - Batched executemany insert with a Streamlit progress bar.
+    1) Figures out the date range to process:
+         - If start_date / end_date are given, use them.
+         - Else infer from fundlab.fund_portfolio.
+    2) Pulls Domestic Equity holdings in that period (optionally for selected funds),
+       joined with stock_master to get is_financial.
+    3) Rebases holding_weight within (fund_id, month_end) so Domestic Equities = 100%.
+    4) Joins to fundlab.stock_monthly_valuations on (isin, month_end).
+    5) For each (fund_id, month_end, segment = Total/Financials/Non-financials)
+       computes weighted P/S, P/E, P/B as:
+          - Filter to ps/pe/pb > 0 and not null.
+          - Weights = rebased domestic weights within the segment, normalized
+            over stocks with valid metric values.
+    6) Before computing, it looks at fundlab.fund_monthly_valuations and
+       **skips any (fund_id, month_end, segment) that already exist**.
+    7) Instead of writing to Supabase, it exposes a CSV download with only
+       the *new* rows to be uploaded manually via the Supabase UI.
+
+    Notes:
+      - This avoids all UNNEST / executemany issues with large arrays.
+      - You can periodically run this, download the CSV, and import it into
+        fundlab.fund_monthly_valuations (using Supabase UI's CSV import).
     """
+
     engine = get_engine()
 
     # --------------------------------------------------------------
-    # 0) Work out effective date range (overlap of fund_portfolio & stock_valuations)
+    # 0) Derive date range from fund_portfolio if needed
     # --------------------------------------------------------------
     with engine.begin() as conn:
-        # 0a) Fund portfolio range (if start/end not supplied)
         if start_date is None or end_date is None:
             if fund_ids:
-                rng_fund = conn.execute(
+                rng = conn.execute(
                     text(
                         """
                         SELECT
                             MIN(month_end)::date AS min_d,
                             MAX(month_end)::date AS max_d
                         FROM fundlab.fund_portfolio
-                        WHERE fund_id = ANY(:fund_ids);
+                        WHERE fund_id = ANY(:fund_ids)
                         """
                     ),
                     {"fund_ids": fund_ids},
                 ).fetchone()
             else:
-                rng_fund = conn.execute(
+                rng = conn.execute(
                     text(
                         """
                         SELECT
                             MIN(month_end)::date AS min_d,
                             MAX(month_end)::date AS max_d
-                        FROM fundlab.fund_portfolio;
+                        FROM fundlab.fund_portfolio
                         """
                     )
                 ).fetchone()
 
-            if not rng_fund or rng_fund.min_d is None or rng_fund.max_d is None:
+            if not rng or rng.min_d is None or rng.max_d is None:
                 st.warning("No data in fundlab.fund_portfolio to infer date range.")
                 return
 
             if start_date is None:
-                start_date = rng_fund.min_d
+                start_date = rng.min_d
             if end_date is None:
-                end_date = rng_fund.max_d
+                end_date = rng.max_d
 
-        # 0b) Stock valuations range
-        rng_val = conn.execute(
-            text(
-                """
-                SELECT
-                    MIN(month_end)::date AS min_d,
-                    MAX(month_end)::date AS max_d
-                FROM fundlab.stock_monthly_valuations;
-                """
-            )
-        ).fetchone()
-
-        if not rng_val or rng_val.min_d is None or rng_val.max_d is None:
-            st.warning("No data in fundlab.stock_monthly_valuations.")
-            return
-
-        # 0c) Overlap of the two ranges
-        effective_start = max(start_date, rng_val.min_d)
-        effective_end = min(end_date, rng_val.max_d)
-
-        if effective_start > effective_end:
-            st.warning(
-                f"No overlap between fund_portfolio range "
-                f"({start_date}–{end_date}) and stock_monthly_valuations range "
-                f"({rng_val.min_d}–{rng_val.max_d}). Nothing to compute."
-            )
-            return
-
-    st.info(
-        f"Rebuilding fund monthly valuations for overlap range "
-        f"{effective_start} to {effective_end}."
-    )
+    # Just for safety: enforce date order
+    if start_date > end_date:
+        st.error(f"Invalid date range: start_date {start_date} > end_date {end_date}.")
+        return
 
     # --------------------------------------------------------------
-    # 1) Fetch holdings (Domestic Equities only) for the overlap period
+    # 1) Fetch holdings (Domestic Equities only) for the period
     # --------------------------------------------------------------
     with engine.begin() as conn:
         if fund_ids:
@@ -2314,15 +2289,15 @@ def rebuild_fund_monthly_valuations(
                 WHERE fp.month_end BETWEEN :start_date AND :end_date
                   AND fp.asset_type = 'Domestic Equities'
                   AND fp.fund_id = ANY(:fund_ids)
-                ORDER BY fp.fund_id, fp.month_end, fp.isin;
+                ORDER BY fp.fund_id, fp.month_end, fp.isin
                 """
             )
             holdings = pd.read_sql(
                 holdings_sql,
                 conn,
                 params={
-                    "start_date": effective_start,
-                    "end_date": effective_end,
+                    "start_date": start_date,
+                    "end_date": end_date,
                     "fund_ids": fund_ids,
                 },
             )
@@ -2341,20 +2316,20 @@ def rebuild_fund_monthly_valuations(
                   ON fp.isin = sm.isin
                 WHERE fp.month_end BETWEEN :start_date AND :end_date
                   AND fp.asset_type = 'Domestic Equities'
-                ORDER BY fp.fund_id, fp.month_end, fp.isin;
+                ORDER BY fp.fund_id, fp.month_end, fp.isin
                 """
             )
             holdings = pd.read_sql(
                 holdings_sql,
                 conn,
                 params={
-                    "start_date": effective_start,
-                    "end_date": effective_end,
+                    "start_date": start_date,
+                    "end_date": end_date,
                 },
             )
 
     if holdings.empty:
-        st.info("No fund_portfolio holdings found in the overlap period.")
+        st.info("No fund_portfolio holdings found in the given period.")
         return
 
     # Clean holdings
@@ -2381,8 +2356,12 @@ def rebuild_fund_monthly_valuations(
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
 
     # --------------------------------------------------------------
-    # 3) Join to stock_monthly_valuations (also limited to overlap)
+    # 3) Pull stock valuations only for relevant ISINs and dates
     # --------------------------------------------------------------
+    all_isins = sorted(holdings["isin"].unique().tolist())
+    min_month = holdings["month_end"].min()
+    max_month = holdings["month_end"].max()
+
     with engine.begin() as conn:
         val_sql = text(
             """
@@ -2396,25 +2375,26 @@ def rebuild_fund_monthly_valuations(
                 pe,
                 pb
             FROM fundlab.stock_monthly_valuations
-            WHERE month_end BETWEEN :start_date AND :end_date;
+            WHERE isin = ANY(:isins)
+              AND month_end BETWEEN :start_date AND :end_date
             """
         )
         vals = pd.read_sql(
             val_sql,
             conn,
             params={
-                "start_date": effective_start,
-                "end_date": effective_end,
+                "isins": all_isins,
+                "start_date": min_month,
+                "end_date": max_month,
             },
         )
 
     if vals.empty:
-        st.info("No stock_monthly_valuations rows found in the overlap period.")
+        st.info("No stock_monthly_valuations rows found for the given holdings.")
         return
 
     vals["isin"] = vals["isin"].astype(str).str.strip()
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
-    vals = vals.dropna(subset=["isin", "month_end"])
 
     # Merge valuations into holdings
     df = holdings.merge(
@@ -2424,28 +2404,99 @@ def rebuild_fund_monthly_valuations(
         suffixes=("", "_val"),
     )
 
-    if df.empty:
-        st.info("Holdings and stock_monthly_valuations did not overlap on (isin, month_end).")
-        return
-
     # If no valuations at all, nothing to do
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
         st.info("All merged valuations are NaN; nothing to write.")
         return
 
     # --------------------------------------------------------------
-    # 4) Compute fund-level valuations: P/S, P/E, P/B by segment
+    # 4) Load existing fund_monthly_valuations to support incremental runs
     # --------------------------------------------------------------
-    segments = ["Total", "Financials", "Non-financials"]
-    records = []
+    with engine.begin() as conn:
+        if fund_ids:
+            existing_sql = text(
+                """
+                SELECT fund_id, month_end, segment
+                FROM fundlab.fund_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date
+                  AND fund_id = ANY(:fund_ids)
+                """
+            )
+            existing_rows = conn.execute(
+                existing_sql,
+                {"start_date": start_date, "end_date": end_date, "fund_ids": fund_ids},
+            ).fetchall()
+        else:
+            existing_sql = text(
+                """
+                SELECT fund_id, month_end, segment
+                FROM fundlab.fund_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date
+                """
+            )
+            existing_rows = conn.execute(
+                existing_sql,
+                {"start_date": start_date, "end_date": end_date},
+            ).fetchall()
 
-    # Convert is_financial to bool; NaNs treated as False (i.e. Non-financial)
+    existing_keys: set[tuple[int, dt.date, str]] = set()
+    for r in existing_rows:
+        # r.month_end should already be a date; keep as-is
+        existing_keys.add((int(r.fund_id), r.month_end, str(r.segment)))
+
+    # --------------------------------------------------------------
+    # 5) Compute fund-level valuations: P/S, P/E, P/B by segment
+    # --------------------------------------------------------------
     df["is_financial"] = df["is_financial"].astype(bool)
 
-    for (fund_id, month_end), grp in df.groupby(["fund_id", "month_end"]):
+    segments = ["Total", "Financials", "Non-financials"]
+    records: list[dict] = []
+
+    grouped = df.groupby(["fund_id", "month_end"], sort=True)
+    n_groups = len(grouped)
+
+    progress = st.progress(0)
+    status_placeholder = st.empty()
+
+    if n_groups == 0:
+        st.info("No (fund, month_end) groups after merge; nothing to compute.")
+        return
+
+    for i, ((fund_id, month_end), grp) in enumerate(grouped, start=1):
         grp = grp.copy()
 
+        # convert month_end to python date for key comparisons
+        if isinstance(month_end, pd.Timestamp):
+            month_end_date = month_end.date()
+        else:
+            # should be datetime.date already
+            month_end_date = month_end
+
+        # Helper to compute weighted avg of any given metric column name
+        def _weighted_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
+            g = seg_grp.copy()
+            g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
+            g = g[g[col_name] > 0].copy()
+            if g.empty:
+                return (np.nan, 0, 0.0)
+
+            w = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
+            sum_w = float(w.sum())
+            if sum_w <= 0:
+                return (np.nan, 0, 0.0)
+
+            w_rebased = w / sum_w
+            metric = g[col_name].to_numpy()
+            value = float((w_rebased * metric).sum())
+            return (value, len(g), sum_w)
+
         for seg in segments:
+            key = (int(fund_id), month_end_date, seg)
+
+            # Skip if this combination already exists in Supabase
+            if key in existing_keys:
+                continue
+
             if seg == "Financials":
                 seg_grp = grp[grp["is_financial"]].copy()
             elif seg == "Non-financials":
@@ -2458,32 +2509,12 @@ def rebuild_fund_monthly_valuations(
 
             total_weight_seg = float(seg_grp["w_domestic"].sum())
 
-            ps_val = np.nan
-            pe_val = np.nan
-            pb_val = np.nan
-
-            def _weighted_metric(col_name: str) -> tuple[float, int, float]:
-                g = seg_grp.copy()
-                g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
-                g = g[g[col_name] > 0].copy()
-                if g.empty:
-                    return (np.nan, 0, 0.0)
-
-                w = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
-                sum_w_local = float(w.sum())
-                if sum_w_local <= 0:
-                    return (np.nan, 0, 0.0)
-
-                w_rebased = w / sum_w_local
-                metric = g[col_name].to_numpy()
-                value = float((w_rebased * metric).sum())
-                return (value, len(g), sum_w_local)
-
-            ps_val, ps_count, _ = _weighted_metric("ps")
-            pe_val, pe_count, _ = _weighted_metric("pe")
-            pb_val, pb_count, _ = _weighted_metric("pb")
+            ps_val, ps_count, _ = _weighted_metric(seg_grp, "ps")
+            pe_val, pe_count, _ = _weighted_metric(seg_grp, "pe")
+            pb_val, pb_count, _ = _weighted_metric(seg_grp, "pb")
 
             if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
+                # No usable metrics for this segment
                 continue
 
             stock_count = max(ps_count, pe_count, pb_count)
@@ -2491,7 +2522,7 @@ def rebuild_fund_monthly_valuations(
             records.append(
                 {
                     "fund_id": int(fund_id),
-                    "month_end": month_end,
+                    "month_end": month_end_date,
                     "segment": seg,
                     "ps": None if np.isnan(ps_val) else float(ps_val),
                     "pe": None if np.isnan(pe_val) else float(pe_val),
@@ -2502,176 +2533,49 @@ def rebuild_fund_monthly_valuations(
                 }
             )
 
+        # Update progress bar
+        if n_groups > 0:
+            pct = int(i * 100 / n_groups)
+            progress.progress(min(pct, 100))
+            if i % 50 == 0 or i == n_groups:
+                status_placeholder.text(f"Processed {i} / {n_groups} fund-month groups")
+
+    progress.empty()
+    status_placeholder.empty()
+
     if not records:
-        st.info("No fund-level valuation records to write (all segments/metrics empty).")
+        st.success(
+            f"No *new* fund_monthly_valuations rows needed between "
+            f"{start_date} and {end_date}. Table already up to date for this range."
+        )
         return
 
     df_out = pd.DataFrame.from_records(records)
-    # Normalise month_end to plain date (not Timestamp) for binding
-    df_out["month_end"] = pd.to_datetime(df_out["month_end"]).dt.date
+    df_out.sort_values(["fund_id", "month_end", "segment"], inplace=True)
 
-    # --------------------------------------------------------------
-    # 5) Incremental filter: keep only rows that DON'T already exist
-    #    in fundlab.fund_monthly_valuations for this date range/funds.
-    # --------------------------------------------------------------
-    with engine.begin() as conn:
-        if fund_ids:
-            existing_sql = text(
-                """
-                SELECT fund_id, month_end, segment
-                FROM fundlab.fund_monthly_valuations
-                WHERE month_end BETWEEN :start_date AND :end_date
-                  AND fund_id = ANY(:fund_ids);
-                """
-            )
-            existing = pd.read_sql(
-                existing_sql,
-                conn,
-                params={
-                    "start_date": effective_start,
-                    "end_date": effective_end,
-                    "fund_ids": fund_ids,
-                },
-            )
-        else:
-            existing_sql = text(
-                """
-                SELECT fund_id, month_end, segment
-                FROM fundlab.fund_monthly_valuations
-                WHERE month_end BETWEEN :start_date AND :end_date;
-                """
-            )
-            existing = pd.read_sql(
-                existing_sql,
-                conn,
-                params={
-                    "start_date": effective_start,
-                    "end_date": effective_end,
-                },
-            )
-
-    if not existing.empty:
-        # Build a set of existing keys
-        existing["month_end"] = pd.to_datetime(existing["month_end"]).dt.date
-        existing["key"] = (
-            existing["fund_id"].astype(str)
-            + "|"
-            + existing["month_end"].astype(str)
-            + "|"
-            + existing["segment"].astype(str)
-        )
-        existing_keys = set(existing["key"].tolist())
-
-        df_out = df_out.copy()
-        df_out["key"] = (
-            df_out["fund_id"].astype(str)
-            + "|"
-            + df_out["month_end"].astype(str)
-            + "|"
-            + df_out["segment"].astype(str)
-        )
-        before = len(df_out)
-        df_out = df_out[~df_out["key"].isin(existing_keys)].drop(columns=["key"])
-        after = len(df_out)
-        skipped = before - after
-        if skipped > 0:
-            st.info(f"Skipped {skipped} existing (fund, month, segment) rows.")
-    else:
-        # No existing rows in that range; nothing to skip
-        pass
-
-    n = len(df_out)
-    if n == 0:
-        st.info("Nothing new to insert into fund_monthly_valuations.")
-        return
-
-    # --------------------------------------------------------------
-    # 6) Batched upsert into fundlab.fund_monthly_valuations (executemany)
-    #     + progress bar
-    # --------------------------------------------------------------
-    insert_sql = text(
-        """
-        INSERT INTO fundlab.fund_monthly_valuations (
-            fund_id,
-            month_end,
-            segment,
-            ps,
-            pe,
-            pb,
-            stock_count,
-            total_weight,
-            notes
-        )
-        VALUES (
-            :fund_id,
-            :month_end,
-            :segment,
-            :ps,
-            :pe,
-            :pb,
-            :stock_count,
-            :total_weight,
-            :notes
-        )
-        ON CONFLICT (fund_id, month_end, segment)
-        DO UPDATE SET
-            ps           = EXCLUDED.ps,
-            pe           = EXCLUDED.pe,
-            pb           = EXCLUDED.pb,
-            stock_count  = EXCLUDED.stock_count,
-            total_weight = EXCLUDED.total_weight,
-            notes        = EXCLUDED.notes,
-            updated_at   = NOW();
-        """
+    st.write(
+        f"Prepared **{len(df_out)}** new (fund_id, month_end, segment) valuation rows "
+        f"between {start_date} and {end_date} that do *not* yet exist in "
+        f"`fundlab.fund_monthly_valuations`."
     )
 
-    progress_bar = st.progress(0.0)
-    engine = get_engine()
+    # Show a small preview
+    st.dataframe(df_out.head(50))
 
-    try:
-        with engine.begin() as conn:
-            total_batches = max(1, math.ceil(n / batch_size))
-            for batch_idx, start_idx in enumerate(range(0, n, batch_size), start=1):
-                end_idx = min(start_idx + batch_size, n)
-                chunk = df_out.iloc[start_idx:end_idx].copy()
-
-                # Convert to list-of-dicts for executemany
-                rows = chunk[
-                    [
-                        "fund_id",
-                        "month_end",
-                        "segment",
-                        "ps",
-                        "pe",
-                        "pb",
-                        "stock_count",
-                        "total_weight",
-                        "notes",
-                    ]
-                ].to_dict(orient="records")
-
-                conn.execute(insert_sql, rows)
-
-                # Update progress bar
-                progress = batch_idx / total_batches
-                progress_bar.progress(progress)
-    except Exception as e:
-        progress_bar.progress(0.0)
-        st.error("❌ Error during insert into fund_monthly_valuations")
-        import traceback
-
-        st.code("".join(traceback.format_exc()))
-        orig = getattr(e, "orig", None)
-        if orig is not None:
-            st.write("Original DB error:", orig)
-        return
-
-    progress_bar.progress(1.0)
-    st.success(
-        f"Fund monthly valuations rebuilt: {n} new (fund, month, segment) rows "
-        f"between {effective_start} and {effective_end}."
+    # Offer CSV download for manual Supabase import
+    csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download fund_monthly_valuations CSV (new rows only)",
+        data=csv_bytes,
+        file_name="fund_monthly_valuations_delta.csv",
+        mime="text/csv",
     )
 
+    st.info(
+        "Upload this CSV into Supabase (fundlab.fund_monthly_valuations). "
+        "Because we only included rows that don't already exist for this date range, "
+        "it will act as an incremental update."
+    )
 
 
 def compute_portfolio_valuations_timeseries(
