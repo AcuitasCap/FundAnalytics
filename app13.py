@@ -1806,7 +1806,9 @@ def rebuild_stock_monthly_valuations(
     max_month = base["month_end"].max()
 
     st.write(f"Distinct ISINs in price data: {len(all_isins)}")
-    st.write(f"Month_end range in price data: {min_month.date()} → {max_month.date()}")
+    st.write(
+        f"Month_end range in price data: {min_month.date()} → {max_month.date()}"
+    )
 
     # --------------------------------------------------------------
     # 2) Fetch quarterly & annual fundamentals once
@@ -1973,7 +1975,9 @@ def rebuild_stock_monthly_valuations(
     ).dt.date
 
     valuations_df = valuations_df.dropna(subset=["isin", "month_end"])
-    valuations_df = valuations_df.sort_values(["month_end", "isin"]).reset_index(drop=True)
+    valuations_df = valuations_df.sort_values(["month_end", "isin"]).reset_index(
+        drop=True
+    )
 
     n_total = len(valuations_df)
     if n_total == 0:
@@ -1982,6 +1986,7 @@ def rebuild_stock_monthly_valuations(
 
     st.write(f"Total valuation rows to upload: {n_total}")
 
+    # Clean infinities and NaNs
     valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
     valuations_df = valuations_df.where(pd.notnull(valuations_df), None)
 
@@ -2031,49 +2036,49 @@ def rebuild_stock_monthly_valuations(
         if block_df.empty:
             continue
 
-            st.write(
-                f"Uploading years {block_start_year}–{block_end_year} "
-                f"({len(block_df)} rows)..."
-            )
+        st.write(
+            f"Uploading years {block_start_year}–{block_end_year} "
+            f"({len(block_df)} rows)..."
+        )
 
-            # One transaction per 5-year block
-            with engine.begin() as conn:
-                for start_idx in range(0, len(block_df), batch_size):
-                    end_idx = min(start_idx + batch_size, len(block_df))
-                    chunk = block_df.iloc[start_idx:end_idx]
+        # One transaction per 5-year block
+        with engine.begin() as conn:
+            for start_idx in range(0, len(block_df), batch_size):
+                end_idx = min(start_idx + batch_size, len(block_df))
+                chunk = block_df.iloc[start_idx:end_idx]
 
-                    rows = []
-                    for _, r in chunk.iterrows():
-                        rows.append(
-                            {
-                                "isin": str(r["isin"]).strip(),
-                                "month_end": r["month_end"],
-                                "ttm_sales": r["ttm_sales"],
-                                "ttm_pat": r["ttm_pat"],
-                                "book_value": r["book_value"],
-                                "ps": r["ps"],
-                                "pe": r["pe"],
-                                "pb": r["pb"],
-                            }
-                        )
-
-                    if rows:
-                        conn.execute(insert_sql, rows)
-
-                    processed += len(chunk)
-                    progress.progress(
-                        processed / n_total,
-                        text=(
-                            f"Uploading stock valuations... "
-                            f"{processed:,} / {n_total:,} rows"
-                        ),
+                rows = []
+                for _, r in chunk.iterrows():
+                    rows.append(
+                        {
+                            "isin": str(r["isin"]).strip(),
+                            "month_end": r["month_end"],
+                            "ttm_sales": r["ttm_sales"],
+                            "ttm_pat": r["ttm_pat"],
+                            "book_value": r["book_value"],
+                            "ps": r["ps"],
+                            "pe": r["pe"],
+                            "pb": r["pb"],
+                        }
                     )
 
-        progress.progress(1.0, text="Stock valuations upload complete.")
-        st.success(
-            f"Stock monthly valuations rebuilt for {n_total:,} (isin, month_end) rows "
-            f"between {start_date} and {end_date}."
-        )
+                if rows:
+                    conn.execute(insert_sql, rows)
+
+                processed += len(chunk)
+                progress.progress(
+                    processed / n_total,
+                    text=(
+                        f"Uploading stock valuations... "
+                        f"{processed:,} / {n_total:,} rows"
+                    ),
+                )
+
+    progress.progress(1.0, text="Stock valuations upload complete.")
+    st.success(
+        f"Stock monthly valuations rebuilt for {n_total:,} (isin, month_end) rows "
+        f"between {start_date} and {end_date}."
+    )
 
 
 def rebuild_fund_monthly_valuations(
