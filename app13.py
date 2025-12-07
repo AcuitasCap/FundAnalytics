@@ -2192,6 +2192,7 @@ def rebuild_stock_monthly_valuations(
 
     st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
+
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
@@ -2203,21 +2204,20 @@ def rebuild_fund_monthly_valuations(
     Precomputes 'valuations of historical portfolios' for all (or selected) funds
     and stores them in fundlab.fund_monthly_valuations.
 
-    Logic:
-      1) Pull fund_portfolio holdings for Domestic Equities over an effective date
-         range that overlaps with stock_monthly_valuations.
-      2) Rebase holding_weight within (fund_id, month_end) so Domestic Equities = 100%.
-      3) Join to fundlab.stock_monthly_valuations on (isin, month_end).
-      4) For each (fund_id, month_end, segment) and metric (P/S, P/E, P/B):
-           - Segment = 'Total' / 'Financials' / 'Non-financials'
-           - For chosen segment:
-               * Filter to stocks with metric > 0 and not null.
-               * Let w_i = w_domestic (rebased domestic weight).
-               * Let W = sum(w_i) over eligible stocks.
-               * Weighted metric = sum( (w_i / W) * metric_i ).
-           - Store ps, pe, pb in fund_monthly_valuations.
-      5) Upsert using UNNEST-based batch insert with
-         ON CONFLICT (fund_id, month_end, segment) DO UPDATE.
+    Key behaviour:
+      - Works only over the overlap between:
+          * fundlab.fund_portfolio.month_end
+          * fundlab.stock_monthly_valuations.month_end
+      - Computes P/S, P/E, P/B for segments:
+          * 'Total'
+          * 'Financials'
+          * 'Non-financials'
+      - Rebased weights: within (fund_id, month_end), Domestic Equities = 100%.
+      - Incremental:
+          * Only INSERTs rows for (fund_id, month_end, segment) that do NOT
+            already exist in fundlab.fund_monthly_valuations.
+          * Uses ON CONFLICT to be safe, but we pre-filter to avoid unnecessary work.
+      - Batched executemany insert with a Streamlit progress bar.
     """
     engine = get_engine()
 
@@ -2289,7 +2289,6 @@ def rebuild_fund_monthly_valuations(
             )
             return
 
-    # From here on, only use the overlapped window
     st.info(
         f"Rebuilding fund monthly valuations for overlap range "
         f"{effective_start} to {effective_end}."
@@ -2508,10 +2507,87 @@ def rebuild_fund_monthly_valuations(
         return
 
     df_out = pd.DataFrame.from_records(records)
-    n = len(df_out)
+    # Normalise month_end to plain date (not Timestamp) for binding
+    df_out["month_end"] = pd.to_datetime(df_out["month_end"]).dt.date
 
     # --------------------------------------------------------------
-    # 5) Batched upsert into fundlab.fund_monthly_valuations
+    # 5) Incremental filter: keep only rows that DON'T already exist
+    #    in fundlab.fund_monthly_valuations for this date range/funds.
+    # --------------------------------------------------------------
+    with engine.begin() as conn:
+        if fund_ids:
+            existing_sql = text(
+                """
+                SELECT fund_id, month_end, segment
+                FROM fundlab.fund_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date
+                  AND fund_id = ANY(:fund_ids);
+                """
+            )
+            existing = pd.read_sql(
+                existing_sql,
+                conn,
+                params={
+                    "start_date": effective_start,
+                    "end_date": effective_end,
+                    "fund_ids": fund_ids,
+                },
+            )
+        else:
+            existing_sql = text(
+                """
+                SELECT fund_id, month_end, segment
+                FROM fundlab.fund_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date;
+                """
+            )
+            existing = pd.read_sql(
+                existing_sql,
+                conn,
+                params={
+                    "start_date": effective_start,
+                    "end_date": effective_end,
+                },
+            )
+
+    if not existing.empty:
+        # Build a set of existing keys
+        existing["month_end"] = pd.to_datetime(existing["month_end"]).dt.date
+        existing["key"] = (
+            existing["fund_id"].astype(str)
+            + "|"
+            + existing["month_end"].astype(str)
+            + "|"
+            + existing["segment"].astype(str)
+        )
+        existing_keys = set(existing["key"].tolist())
+
+        df_out = df_out.copy()
+        df_out["key"] = (
+            df_out["fund_id"].astype(str)
+            + "|"
+            + df_out["month_end"].astype(str)
+            + "|"
+            + df_out["segment"].astype(str)
+        )
+        before = len(df_out)
+        df_out = df_out[~df_out["key"].isin(existing_keys)].drop(columns=["key"])
+        after = len(df_out)
+        skipped = before - after
+        if skipped > 0:
+            st.info(f"Skipped {skipped} existing (fund, month, segment) rows.")
+    else:
+        # No existing rows in that range; nothing to skip
+        pass
+
+    n = len(df_out)
+    if n == 0:
+        st.info("Nothing new to insert into fund_monthly_valuations.")
+        return
+
+    # --------------------------------------------------------------
+    # 6) Batched upsert into fundlab.fund_monthly_valuations (executemany)
+    #     + progress bar
     # --------------------------------------------------------------
     insert_sql = text(
         """
@@ -2526,16 +2602,17 @@ def rebuild_fund_monthly_valuations(
             total_weight,
             notes
         )
-        SELECT
-            unnest(:fund_ids),
-            unnest(:month_ends),
-            unnest(:segments),
-            unnest(:ps_vals),
-            unnest(:pe_vals),
-            unnest(:pb_vals),
-            unnest(:stock_counts),
-            unnest(:total_weights),
-            unnest(:notes)
+        VALUES (
+            :fund_id,
+            :month_end,
+            :segment,
+            :ps,
+            :pe,
+            :pb,
+            :stock_count,
+            :total_weight,
+            :notes
+        )
         ON CONFLICT (fund_id, month_end, segment)
         DO UPDATE SET
             ps           = EXCLUDED.ps,
@@ -2548,30 +2625,53 @@ def rebuild_fund_monthly_valuations(
         """
     )
 
+    progress_bar = st.progress(0.0)
     engine = get_engine()
-    with engine.begin() as conn:
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            chunk = df_out.iloc[start:end]
 
-            params = {
-                "fund_ids":      list(chunk["fund_id"].astype(int)),
-                "month_ends":    list(pd.to_datetime(chunk["month_end"]).dt.date),
-                "segments":      list(chunk["segment"].astype(str)),
-                "ps_vals":       list(chunk["ps"]),
-                "pe_vals":       list(chunk["pe"]),
-                "pb_vals":       list(chunk["pb"]),
-                "stock_counts":  list(chunk["stock_count"].astype(int)),
-                "total_weights": list(chunk["total_weight"].astype(float)),
-                "notes":         list(chunk["notes"]),
-            }
+    try:
+        with engine.begin() as conn:
+            total_batches = max(1, math.ceil(n / batch_size))
+            for batch_idx, start_idx in enumerate(range(0, n, batch_size), start=1):
+                end_idx = min(start_idx + batch_size, n)
+                chunk = df_out.iloc[start_idx:end_idx].copy()
 
-            conn.execute(insert_sql, params)
+                # Convert to list-of-dicts for executemany
+                rows = chunk[
+                    [
+                        "fund_id",
+                        "month_end",
+                        "segment",
+                        "ps",
+                        "pe",
+                        "pb",
+                        "stock_count",
+                        "total_weight",
+                        "notes",
+                    ]
+                ].to_dict(orient="records")
 
+                conn.execute(insert_sql, rows)
+
+                # Update progress bar
+                progress = batch_idx / total_batches
+                progress_bar.progress(progress)
+    except Exception as e:
+        progress_bar.progress(0.0)
+        st.error("❌ Error during insert into fund_monthly_valuations")
+        import traceback
+
+        st.code("".join(traceback.format_exc()))
+        orig = getattr(e, "orig", None)
+        if orig is not None:
+            st.write("Original DB error:", orig)
+        return
+
+    progress_bar.progress(1.0)
     st.success(
-        f"Fund monthly valuations rebuilt: {n} (fund, month, segment) rows "
+        f"Fund monthly valuations rebuilt: {n} new (fund, month, segment) rows "
         f"between {effective_start} and {effective_end}."
     )
+
 
 
 def compute_portfolio_valuations_timeseries(
