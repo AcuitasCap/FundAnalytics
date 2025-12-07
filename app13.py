@@ -5442,40 +5442,39 @@ def portfolio_fundamentals_page():
         st.warning("No funds found for selected categories.")
         return
 
-    # Map: label → fund_id
-    fund_labels = [
-        f"{row['fund_name']} ({row['category_name']})"
+    # Map: label → fund_id (we'll reuse fund_options later in the page)
+    fund_options = {
+        f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
         for _, row in funds_df.iterrows()
-    ]
-    fund_ids_map = {
-        label: row["fund_id"]
-        for label, (_, row) in zip(fund_labels, funds_df.iterrows())
     }
 
-    # Insert "All" as the first option
     all_option = "All"
-    multiselect_options = [all_option] + fund_labels
+    multiselect_options = [all_option] + list(fund_options.keys())
 
-    # Multiselect UI
-    selected_labels = st.multiselect(
+    # Multiselect UI (default: none selected)
+    selected_raw_labels = st.multiselect(
         "Funds",
         options=multiselect_options,
-        default=[]  # Default: none selected
+        default=[],
     )
 
-    # Logic for "All"
-    if all_option in selected_labels:
-        # User selected "All" → select all real funds
-        final_selected_labels = fund_labels
+    # Apply "All" logic
+    if all_option in selected_raw_labels:
+        # If "All" is selected, use all real fund labels
+        selected_fund_labels = list(fund_options.keys())
     else:
-        final_selected_labels = selected_labels
+        # Otherwise use whatever the user picked, excluding "All" if present
+        selected_fund_labels = [
+            label for label in selected_raw_labels if label != all_option
+        ]
 
     # Convert labels → fund IDs
-    selected_fund_ids = [fund_ids_map[label] for label in final_selected_labels]
+    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
 
     if not selected_fund_ids:
         st.info("Please select at least one fund.")
         return
+
 
 
     # 3) Date range selectors (month & year separately)
