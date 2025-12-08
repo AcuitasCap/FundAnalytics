@@ -5469,8 +5469,18 @@ def portfolio_quality_page():
         st.info("Please select at least one fund.")
         return
 
-    # 3) Date range selectors (month & year separately)
-    st.subheader("3. Select period (March / September portfolios only)")
+    # 3) Focus fund (single-select from chosen funds)
+    st.subheader("3. Focus fund")
+    focus_fund_label = st.selectbox(
+        "Focus fund",
+        options=selected_fund_labels,
+        index=0,
+        key="pq_focus_fund",
+    )
+    focus_fund_id = fund_options[focus_fund_label]
+
+    # 4) Date range selectors (month & year separately)
+    st.subheader("4. Select period (March / September portfolios only)")
 
     current_year = dt.date.today().year
     years = list(range(current_year - 15, current_year + 1))
@@ -5513,8 +5523,8 @@ def portfolio_quality_page():
         st.error("Start date must be earlier than end date.")
         return
 
-    # 4) Segment radio buttons
-    st.subheader("4. Segment")
+    # 5) Segment radio buttons
+    st.subheader("5. Segment")
     segment_choice = st.radio(
         "Show metrics for:",
         options=["Financials", "Non-financials", "Total"],
@@ -5522,7 +5532,16 @@ def portfolio_quality_page():
         key="pq_segment",
     )
 
-    # 5) Fetch data & compute RoE / RoCE
+    # 6) Comparison mode: individual funds vs universe median
+    st.subheader("6. Comparison mode")
+    comparison_mode = st.radio(
+        "Compare focus fund against:",
+        options=["Universe median", "Individual funds"],
+        horizontal=True,
+        key="pq_comparison_mode",
+    )
+
+    # 7) Fetch data & compute RoE / RoCE
     with st.spinner("Computing portfolio fundamentals..."):
         roe_roce_dict = load_stock_roe_roce()
         df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
@@ -5538,53 +5557,101 @@ def portfolio_quality_page():
         st.warning("No fundamentals could be computed (check data availability).")
         return
 
-    # 6) RoE / RoCE time series chart
-    st.subheader("5. RoE / RoCE time series")
+    # 8) RoE / RoCE time series chart
+    st.subheader("7. RoE / RoCE time series")
 
-    df_chart = df_result.dropna(subset=["metric"]).copy()
+    # Build chart dataset depending on comparison mode
+    df_result = df_result.dropna(subset=["metric"]).copy()
+    if df_result.empty:
+        st.info("No data to plot for selected filters.")
+        return
+
+    if comparison_mode == "Universe median":
+        focus_df = df_result[df_result["fund_id"] == focus_fund_id].copy()
+        others_df = df_result[df_result["fund_id"] != focus_fund_id].copy()
+
+        if focus_df.empty or others_df.empty:
+            st.warning(
+                "Universe median comparison requires at least the focus fund plus one other fund. "
+                "Showing individual funds instead."
+            )
+            df_chart = df_result.copy()
+        else:
+            median_others = (
+                others_df.groupby("month_end", as_index=False)["metric"]
+                .median()
+                .rename(columns={"metric": "metric_median"})
+            )
+            median_others["fund_name"] = "Universe median (others)"
+            median_others["fund_id"] = -1
+            median_others = median_others.rename(columns={"metric_median": "metric"})
+
+            df_chart = pd.concat([focus_df, median_others], ignore_index=True)
+    else:
+        # Individual funds: use all selected funds as before
+        df_chart = df_result.copy()
+
     df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
 
-    if df_chart.empty:
-        st.info("No data to plot for selected filters.")
+    # Robust y-axis domain across whichever subset we're plotting
+    y_min = float(df_chart["metric"].min())
+    y_max = float(df_chart["metric"].max())
+    if y_min == y_max:
+        padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
+        domain = (y_min - padding, y_max + padding)
     else:
-        y_min = float(df_chart["metric"].min())
-        y_max = float(df_chart["metric"].max())
-        if y_min == y_max:
-            padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
-            domain = (y_min - padding, y_max + padding)
-        else:
-            padding = (y_max - y_min) * 0.1
-            domain = (y_min - padding, y_max + padding)
+        padding = (y_max - y_min) * 0.1
+        domain = (y_min - padding, y_max + padding)
 
-        chart = (
-            alt.Chart(df_chart)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X(
-                    "month_end:T",
-                    title="Period",
-                    axis=alt.Axis(format="%b %Y", labelAngle=-45),
-                ),
-                y=alt.Y(
-                    "metric:Q",
-                    title="RoE / RoCE (%)",
-                    scale=alt.Scale(domain=domain),
-                ),
-                color=alt.Color("fund_name:N", title="Fund"),
-                tooltip=[
-                    alt.Tooltip("fund_name:N", title="Fund"),
-                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                    alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
-                ],
-            )
-            .properties(height=400)
+    chart = (
+        alt.Chart(df_chart)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(
+                "month_end:T",
+                title="Period",
+                axis=alt.Axis(format="%b %Y", labelAngle=-45),
+            ),
+            y=alt.Y(
+                "metric:Q",
+                title="RoE / RoCE (%)",
+                scale=alt.Scale(domain=domain),
+            ),
+            color=alt.Color("fund_name:N", title="Fund / Series"),
+            tooltip=[
+                alt.Tooltip("fund_name:N", title="Fund / Series"),
+                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
+            ],
         )
-        st.altair_chart(chart, use_container_width=True)
+        .properties(height=400)
+    )
+    st.altair_chart(chart, use_container_width=True)
 
-    # 7) Underlying data table (funds in rows, periods in columns)
-    st.subheader("6. Underlying data")
+    # 9) Underlying data table (funds/series in rows, periods in columns)
+    st.subheader("8. Underlying data")
 
-    df_table = df_result.copy()
+    if comparison_mode == "Universe median":
+        focus_df = df_result[df_result["fund_id"] == focus_fund_id].copy()
+        others_df = df_result[df_result["fund_id"] != focus_fund_id].copy()
+
+        if focus_df.empty or others_df.empty:
+            # Fall back to full table
+            df_table = df_result.copy()
+        else:
+            median_others = (
+                others_df.groupby("month_end", as_index=False)["metric"]
+                .median()
+                .rename(columns={"metric": "metric_median"})
+            )
+            median_others["fund_name"] = "Universe median (others)"
+            median_others["fund_id"] = -1
+            median_others = median_others.rename(columns={"metric_median": "metric"})
+
+            df_table = pd.concat([focus_df, median_others], ignore_index=True)
+    else:
+        df_table = df_result.copy()
+
     df_table["month_end"] = pd.to_datetime(df_table["month_end"])
     df_table["period_date"] = df_table["month_end"]
 
@@ -5601,8 +5668,8 @@ def portfolio_quality_page():
     df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
     st.dataframe(df_pivot.style.format("{:.2f}"))
 
-    # 8) Quality bucket exposures (Q1–Q4)
-    st.subheader("7. Quality bucket exposures (Q1–Q4)")
+    # 10) Quality bucket exposures (Q1–Q4) – still based on full df_result universe
+    st.subheader("9. Quality bucket exposures (Q1–Q4)")
 
     if df_result.empty or not selected_fund_ids:
         st.info("No data available to compute Q1–Q4 quality bucket exposures.")
@@ -5663,7 +5730,7 @@ def portfolio_quality_page():
                 "month_end", var_name="Quartile", value_name="Exposure"
             )
 
-            chart = (
+            chart_q = (
                 alt.Chart(chart_long)
                 .mark_area()
                 .encode(
@@ -5682,7 +5749,7 @@ def portfolio_quality_page():
                 )
                 .properties(height=400)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart_q, use_container_width=True)
 
         st.dataframe(
             quality_table.style.format("{:.1f}"),
