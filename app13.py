@@ -5412,9 +5412,9 @@ def performance_page():
                 st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
 
 
-def portfolio_fundamentals_page():
+def portfolio_quality_page():
     home_button()
-    st.header("Portfolio fundamentals – return on capital & valuations")
+    st.header("Portfolio quality – return on capital & quality buckets")
 
     # 1) Category selector (checkboxes)
     categories = fetch_categories()
@@ -5427,7 +5427,7 @@ def portfolio_fundamentals_page():
     cols = st.columns(min(4, len(categories)))
     for i, cat in enumerate(categories):
         col = cols[i % len(cols)]
-        if col.checkbox(cat, value=False, key=f"cat_{cat}"):
+        if col.checkbox(cat, value=False, key=f"pq_cat_{cat}"):
             selected_categories.append(cat)
 
     if not selected_categories:
@@ -5442,7 +5442,7 @@ def portfolio_fundamentals_page():
         st.warning("No funds found for selected categories.")
         return
 
-    # Map: label → fund_id (we'll reuse fund_options later in the page)
+    # Map: label → fund_id (we'll reuse fund_options later on this page)
     fund_options = {
         f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
         for _, row in funds_df.iterrows()
@@ -5451,38 +5451,29 @@ def portfolio_fundamentals_page():
     all_option = "All"
     multiselect_options = [all_option] + list(fund_options.keys())
 
-    # Multiselect UI (default: none selected)
     selected_raw_labels = st.multiselect(
         "Funds",
         options=multiselect_options,
         default=[],
+        key="pq_funds_multiselect",
     )
 
-    # Apply "All" logic
     if all_option in selected_raw_labels:
-        # If "All" is selected, use all real fund labels
         selected_fund_labels = list(fund_options.keys())
     else:
-        # Otherwise use whatever the user picked, excluding "All" if present
-        selected_fund_labels = [
-            label for label in selected_raw_labels if label != all_option
-        ]
+        selected_fund_labels = [lbl for lbl in selected_raw_labels if lbl != all_option]
 
-    # Convert labels → fund IDs
     selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
 
     if not selected_fund_ids:
         st.info("Please select at least one fund.")
         return
 
-
-
     # 3) Date range selectors (month & year separately)
     st.subheader("3. Select period (March / September portfolios only)")
 
     current_year = dt.date.today().year
     years = list(range(current_year - 15, current_year + 1))
-
     month_options = [3, 9]  # Mar, Sep
 
     col1, col2 = st.columns(2)
@@ -5491,13 +5482,13 @@ def portfolio_fundamentals_page():
             "Start year",
             options=years,
             index=0,
-            key="pf_start_year",
+            key="pq_start_year",
         )
         start_month = st.selectbox(
             "Start month",
             options=month_options,
-            index=0,  # default: Mar
-            key="pf_start_month",
+            index=0,
+            key="pq_start_month",
             format_func=lambda m: "Mar" if m == 3 else "Sep",
         )
     with col2:
@@ -5505,13 +5496,13 @@ def portfolio_fundamentals_page():
             "End year",
             options=years,
             index=len(years) - 1,
-            key="pf_end_year",
+            key="pq_end_year",
         )
         end_month = st.selectbox(
             "End month",
             options=month_options,
-            index=1,  # default: Sep
-            key="pf_end_month",
+            index=1,
+            key="pq_end_month",
             format_func=lambda m: "Mar" if m == 3 else "Sep",
         )
 
@@ -5528,9 +5519,10 @@ def portfolio_fundamentals_page():
         "Show metrics for:",
         options=["Financials", "Non-financials", "Total"],
         horizontal=True,
+        key="pq_segment",
     )
 
-    # 5) Fetch data & compute
+    # 5) Fetch data & compute RoE / RoCE
     with st.spinner("Computing portfolio fundamentals..."):
         roe_roce_dict = load_stock_roe_roce()
         df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
@@ -5555,7 +5547,6 @@ def portfolio_fundamentals_page():
     if df_chart.empty:
         st.info("No data to plot for selected filters.")
     else:
-        # Robust y-axis domain so differences are clearly visible
         y_min = float(df_chart["metric"].min())
         y_max = float(df_chart["metric"].max())
         if y_min == y_max:
@@ -5572,7 +5563,7 @@ def portfolio_fundamentals_page():
                 x=alt.X(
                     "month_end:T",
                     title="Period",
-                    axis=alt.Axis(format="%b %Y", labelAngle=-45),  # e.g., "Mar 2018"
+                    axis=alt.Axis(format="%b %Y", labelAngle=-45),
                 ),
                 y=alt.Y(
                     "metric:Q",
@@ -5588,7 +5579,6 @@ def portfolio_fundamentals_page():
             )
             .properties(height=400)
         )
-
         st.altair_chart(chart, use_container_width=True)
 
     # 7) Underlying data table (funds in rows, periods in columns)
@@ -5608,40 +5598,31 @@ def portfolio_fundamentals_page():
         .sort_index(axis=1)
     )
 
-    # Relabel columns as "Mar 2018", "Sep 2018", etc.
     df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
-
     st.dataframe(df_pivot.style.format("{:.2f}"))
 
     # 8) Quality bucket exposures (Q1–Q4)
     st.subheader("7. Quality bucket exposures (Q1–Q4)")
 
-    # Only proceed if we actually have results and at least one fund selected
     if df_result.empty or not selected_fund_ids:
         st.info("No data available to compute Q1–Q4 quality bucket exposures.")
         return
 
-    # Use the same month-end universe as the RoE/RoCE results
     month_ends_list = sorted(
         pd.to_datetime(df_result["month_end"]).dt.date.unique()
     )
-
     if not month_ends_list:
         st.info("No periods found to compute quality buckets.")
         return
 
-    # Choose which fund to view for quality buckets
     quality_fund_label = st.selectbox(
         "Select fund for quality bucket view",
         options=selected_fund_labels,
         index=0,
-        key="quality_fund_select",
+        key="pq_quality_fund_select",
     )
-
-    # Map label → fund_id using fund_options
     quality_fund_id = fund_options[quality_fund_label]
 
-    # Compute bucket exposures for the selected fund
     quality_table = compute_quality_bucket_exposure(quality_fund_id, month_ends_list)
 
     if quality_table is None or quality_table.empty:
@@ -5649,36 +5630,21 @@ def portfolio_fundamentals_page():
             "No Q1–Q4 quality bucket data available for the selected fund and period."
         )
     else:
-        # Caption: show which fund this refers to
         st.caption(f"Quality bucket exposure for: {quality_fund_label}")
 
-        # --- Quality quartile chart for selected fund (just before the data table) ---
-
-                # --- Quality quartile chart for selected fund (just before the data table) ---
-
         chart_df = quality_table.copy()
-
         quartile_labels = {"Q1", "Q2", "Q3", "Q4"}
 
-        # Case 1: Q1–Q4 are columns and we have an explicit month_end column
         if "month_end" in chart_df.columns and quartile_labels.issubset(set(chart_df.columns)):
             chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
             chart_df = chart_df.set_index("month_end")
-
         else:
-            # Most likely: Q1–Q4 are the INDEX (like your current pivot)
             index_labels = set(chart_df.index.astype(str))
             if quartile_labels.issubset(index_labels):
-                # Transpose so that:
-                #   index  = month_end
-                #   columns = Q1–Q4
                 chart_df = chart_df.T
-
-            # Now treat index as month_end
             chart_df.index = pd.to_datetime(chart_df.index, errors="coerce")
             chart_df = chart_df[chart_df.index.notna()]
 
-        # Keep only the quartile columns that are actually present
         quartile_cols = [c for c in ["Q1", "Q2", "Q3", "Q4"] if c in chart_df.columns]
 
         if not quartile_cols:
@@ -5693,8 +5659,9 @@ def portfolio_fundamentals_page():
             chart_df_alt = chart_df.reset_index().rename(columns={"index": "month_end"})
             chart_df_alt["month_end"] = pd.to_datetime(chart_df_alt["month_end"])
 
-            # Melt to long format for altair
-            chart_long = chart_df_alt.melt("month_end", var_name="Quartile", value_name="Exposure")
+            chart_long = chart_df_alt.melt(
+                "month_end", var_name="Quartile", value_name="Exposure"
+            )
 
             chart = (
                 alt.Chart(chart_long)
@@ -5703,7 +5670,7 @@ def portfolio_fundamentals_page():
                     x=alt.X(
                         "month_end:T",
                         title="Period",
-                        axis=alt.Axis(format="%b %Y", labelAngle=-45)   # <-- MMM YYYY format
+                        axis=alt.Axis(format="%b %Y", labelAngle=-45),
                     ),
                     y=alt.Y("Exposure:Q", title="Exposure (%)"),
                     color=alt.Color("Quartile:N", title="Quality Quartile"),
@@ -5715,28 +5682,84 @@ def portfolio_fundamentals_page():
                 )
                 .properties(height=400)
             )
-
             st.altair_chart(chart, use_container_width=True)
 
-        # Underlying table (same as before)
         st.dataframe(
             quality_table.style.format("{:.1f}"),
             use_container_width=True,
         )
 
-    # 9) Portfolio valuations
-    st.subheader("6. Portfolio valuations")
+
+def portfolio_valuations_page():
+    home_button()
+    st.header("Portfolio valuations")
+
+    # 1) Category selector (checkboxes)
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found in fund_master.")
+        return
+
+    st.subheader("1. Select categories")
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=False, key=f"pv_cat_{cat}"):
+            selected_categories.append(cat)
+
+    if not selected_categories:
+        st.info("Please select at least one category.")
+        return
+
+    # 2) Fund multi-select with "All" option
+    st.subheader("2. Select funds")
+
+    funds_df = fetch_funds_for_categories(selected_categories)
+    if funds_df.empty:
+        st.warning("No funds found for selected categories.")
+        return
+
+    fund_options = {
+        f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
+        for _, row in funds_df.iterrows()
+    }
+
+    all_option = "All"
+    multiselect_options = [all_option] + list(fund_options.keys())
+
+    selected_raw_labels = st.multiselect(
+        "Funds",
+        options=multiselect_options,
+        default=[],
+        key="pv_funds_multiselect",
+    )
+
+    if all_option in selected_raw_labels:
+        selected_fund_labels = list(fund_options.keys())
+    else:
+        selected_fund_labels = [
+            label for label in selected_raw_labels if label != all_option
+        ]
+
+    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
+
+    if not selected_fund_ids:
+        st.info("Please select at least one fund.")
+        return
+
+    # 3) Portfolio valuations controls
+    st.subheader("3. Valuation settings")
 
     # Focus fund: single-select from already selected funds
     focus_fund_label = st.selectbox(
         "Focus fund",
         options=selected_fund_labels,
         index=0,
-        key="val_focus_fund",
+        key="pv_focus_fund",
     )
     focus_fund_id = fund_options[focus_fund_label]
 
-    # Valuation period selectors (independent of RoE period)
     current_year = dt.date.today().year
     years_val = list(range(current_year - 15, current_year + 1))
     months_val = list(range(1, 13))
@@ -5750,13 +5773,13 @@ def portfolio_fundamentals_page():
             "Valuation start year",
             options=years_val,
             index=0,
-            key="val_start_year",
+            key="pv_val_start_year",
         )
         val_start_month = st.selectbox(
             "Valuation start month",
             options=months_val,
             index=0,
-            key="val_start_month",
+            key="pv_val_start_month",
             format_func=month_name,
         )
     with colv2:
@@ -5764,13 +5787,13 @@ def portfolio_fundamentals_page():
             "Valuation end year",
             options=years_val,
             index=len(years_val) - 1,
-            key="val_end_year",
+            key="pv_val_end_year",
         )
         val_end_month = st.selectbox(
             "Valuation end month",
             options=months_val,
             index=dt.date.today().month - 1,
-            key="val_end_month",
+            key="pv_val_end_month",
             format_func=month_name,
         )
 
@@ -5781,7 +5804,6 @@ def portfolio_fundamentals_page():
         st.error("Valuation start date must be earlier than end date.")
         return
 
-    # Valuation mode
     val_mode = st.radio(
         "Valuation mode",
         options=[
@@ -5789,24 +5811,25 @@ def portfolio_fundamentals_page():
             "Historical valuations of current portfolio",
         ],
         horizontal=False,
-        key="val_mode",
+        key="pv_val_mode",
     )
 
-    # Segment (reusing same semantics)
     val_segment = st.radio(
         "Segment for valuations",
         options=["Financials", "Non-financials", "Total"],
         horizontal=True,
-        key="val_segment",
+        key="pv_val_segment",
     )
 
-    # Metric: P/S, P/B, P/E
     val_metric = st.radio(
         "Valuation metric",
         options=["P/S", "P/B", "P/E"],
         horizontal=True,
-        key="val_metric",
+        key="pv_val_metric",
     )
+
+    # 4) Compute valuations
+    st.subheader("4. Valuation time series")
 
     with st.spinner("Computing portfolio valuations..."):
         try:
@@ -5828,39 +5851,35 @@ def portfolio_fundamentals_page():
 
     if df_val.empty:
         st.info("No valuation data available for the selected filters.")
-    else:
-        df_val["month_end"] = pd.to_datetime(df_val["month_end"])
+        return
 
-        val_chart = (
-            alt.Chart(df_val)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X(
-                    "month_end:T",
-                    title="Period",
-                    axis=alt.Axis(format="%b %Y", labelAngle=-45),
-                ),
-                y=alt.Y(
-                    "value:Q",
-                    title=f"{val_metric} (x)",
-                ),
-                color=alt.Color("series:N", title="Series"),
-                tooltip=[
-                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                    alt.Tooltip("series:N", title="Series"),
-                    alt.Tooltip("value:Q", title=f"{val_metric} (x)", format=".2f"),
-                ],
-            )
-            .properties(height=400)
+    df_val["month_end"] = pd.to_datetime(df_val["month_end"])
+
+    val_chart = (
+        alt.Chart(df_val)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(
+                "month_end:T",
+                title="Period",
+                axis=alt.Axis(format="%b %Y", labelAngle=-45),
+            ),
+            y=alt.Y(
+                "value:Q",
+                title=f"{val_metric} (x)",
+            ),
+            color=alt.Color("series:N", title="Series"),
+            tooltip=[
+                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                alt.Tooltip("series:N", title="Series"),
+                alt.Tooltip("value:Q", title=f"{val_metric} (x)", format=".2f"),
+            ],
         )
-        st.altair_chart(val_chart, use_container_width=True)
+        .properties(height=400)
+    )
+    st.altair_chart(val_chart, use_container_width=True)
 
-
-
-
-
-    
-
+ 
 
 
 def portfolio_page():
@@ -6580,37 +6599,45 @@ def home_page():
 
     st.markdown(
         """
-        This app currently has three main sections:
+        This app currently has these main sections:
 
         - **Performance** – NAV-based rolling returns, yearly returns, P2P, and PDF export.
-        - **Fundamentals** – Portfolio-level RoE / RoCE using stock-level metrics and portfolios.
+        - **Portfolio quality** – RoE / RoCE and quality buckets based on portfolios.
+        - **Portfolio valuations** – P/E, P/B, P/S for funds vs peers.
         - **Portfolio** – Holdings explorer, active share, look-through.
+        - **Update DB** – Upload and refresh raw datasets.
+        - **Housekeeping** – Rebuild precomputed tables and diagnostics.
 
-        Use the links below to jump directly to a section.
-                """
+        Use the buttons below to jump directly to a section.
+        """
     )
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
         if st.button("📈 Performance"):
             st.session_state["page"] = "Performance"
             st.rerun()
     with col2:
-        if st.button("📊 Fundamentals"):
-            st.session_state["page"] = "Fundamentals"
+        if st.button("📊 Portfolio quality"):
+            st.session_state["page"] = "Portfolio quality"
             st.rerun()
     with col3:
+        if st.button("💹 Portfolio valuations"):
+            st.session_state["page"] = "Portfolio valuations"
+            st.rerun()
+    with col4:
         if st.button("📂 Portfolio"):
             st.session_state["page"] = "Portfolio"
             st.rerun()
-    with col4:
+    with col5:
         if st.button("🛠️ Update DB"):
             st.session_state["page"] = "Update DB"
             st.rerun()
-    with col5:
+    with col6:
         if st.button("🧹 Housekeeping"):
             st.session_state["page"] = "Housekeeping"
             st.rerun()
+
 
 
 
@@ -6628,8 +6655,10 @@ def main():
         home_page()
     elif page == "Performance":
         performance_page()
-    elif page == "Fundamentals":
-        portfolio_fundamentals_page()
+    elif page == "Portfolio quality":
+        portfolio_quality_page()
+    elif page == "Portfolio valuations":
+        portfolio_valuations_page()
     elif page == "Portfolio":
         portfolio_page()
     elif page == "Update DB":
