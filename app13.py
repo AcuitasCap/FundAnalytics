@@ -6614,19 +6614,30 @@ def home_page():
 
     st.subheader("Navigation")
 
-    for label, page in [
-        ("📈 Performance", "Performance"),
-        ("📊 Portfolio quality", "Portfolio quality"),
-        ("💹 Portfolio valuations", "Portfolio valuations"),
-        ("📂 Portfolio look-through / active share", "Portfolio"),
-        ("🛠️ Update DB", "Update DB"),
-        ("🧹 Housekeeping", "Housekeeping"),
-    ]:
-        with st.container():
-            if st.button(label):
-                st.session_state["page"] = page
-                st.rerun()
-        st.markdown("---")
+    if st.button("📈 Performance"):
+        st.session_state["page"] = "Performance"
+        st.rerun()
+
+    if st.button("📊 Portfolio quality"):
+        st.session_state["page"] = "Portfolio quality"
+        st.rerun()
+
+    if st.button("💹 Portfolio valuations"):
+        st.session_state["page"] = "Portfolio valuations"
+        st.rerun()
+
+    if st.button("📂 Portfolio"):
+        st.session_state["page"] = "Portfolio"
+        st.rerun()
+
+    if st.button("🛠️ Update DB"):
+        st.session_state["page"] = "Update DB"
+        st.rerun()
+
+    if st.button("🧹 Housekeeping"):
+        st.session_state["page"] = "Housekeeping"
+        st.rerun()
+
 
 
 
