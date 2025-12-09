@@ -5810,8 +5810,9 @@ def portfolio_quality_page():
     st.header("Portfolio quality – return on capital & quality buckets")
 
     # --- 1) Shared filters inside a form ---
-    with st.form("pq_filters"):
-        # 1A) Categories + funds + focus
+    with st.form("pq_main_filters"):
+
+        # (A) Category + funds + focus fund
         (
             selected_fund_ids,
             selected_fund_labels,
@@ -5820,10 +5821,10 @@ def portfolio_quality_page():
             fund_options,
         ) = quality_category_and_fund_selector()
 
-        # 1B) Period
+        # (B) Period selection (start & end dates)
         start_date, end_date = quality_period_selector()
 
-        # 1C) Choose which analysis to run
+        # (C) Choose which analysis to run
         st.subheader("5. Choose analysis")
         view_mode = st.radio(
             "What do you want to analyse?",
@@ -5835,27 +5836,16 @@ def portfolio_quality_page():
             key="pq_view_mode",
         )
 
-        # 1D) Segment (applies to RoC section, currently not to quartiles)
-        st.subheader("6. Segment")
-        segment_choice = st.radio(
-            "Show metrics for:",
-            options=["Financials", "Non-financials", "Total"],
-            horizontal=True,
-            key="pq_segment",
-        )
+        # (D) FIRST UPDATE BUTTON (applies to filters above)
+        update_main = st.form_submit_button("Update", type="primary")
 
-        # 1E) Update button
-        update = st.form_submit_button("Update", type="primary")
-
-    # --- 2) First-run behaviour ---
-    # We want the page to show something on first load without needing a click.
+    # --- First-run behavior ---
     if "pq_initialized" not in st.session_state:
         st.session_state["pq_initialized"] = True
-        # only auto-update if we actually have some funds selected
         if selected_fund_ids:
-            update = True
+            update_main = True
 
-    # --- 3) Validation after form submission ---
+    # --- Validate mandatory selections after main-update ---
     if not selected_fund_ids:
         st.info("Please select at least one fund in the universe.")
         return
@@ -5864,13 +5854,39 @@ def portfolio_quality_page():
         st.error("Start date must be earlier than end date.")
         return
 
-    # If user hasn’t clicked Update (and it’s not first load), don’t run heavy code
-    if not update:
-        st.info("Adjust filters above and click **Update** to recompute.")
+    # If user hasn't hit Update-main and it's not first run,
+    # don't run anything yet
+    if not update_main:
+        st.info("Adjust filters above and click **Update**.")
         return
 
-    # --- 4) Run ONLY the selected heavy section ---
+    # ----------------------------------------------------------
+    #                   MODE 1: ROC vs PEERS
+    # ----------------------------------------------------------
     if view_mode == "Return on capital vs peers / universe":
+
+        # Show segment selector ONLY for mode 1
+        st.subheader("6. Segment")
+        segment_choice = st.radio(
+            "Show metrics for:",
+            options=["Financials", "Non-financials", "Total"],
+            horizontal=True,
+            key="pq_segment",
+        )
+
+        # SECOND UPDATE BUTTON (applies only to mode 1)
+        update_segment = st.button("Update Segment View", type="primary")
+
+        # Run heavy subsection only after segment update or first-run
+        if not update_segment and not st.session_state.get("pq_mode1_initialized"):
+            st.session_state["pq_mode1_initialized"] = True
+            update_segment = True
+
+        if not update_segment:
+            st.info("Select segment and click **Update Segment View**.")
+            return
+
+        # Run ROC section
         render_quality_roc_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
@@ -5882,15 +5898,24 @@ def portfolio_quality_page():
         )
         return
 
+    # ----------------------------------------------------------
+    #                   MODE 2: QUALITY QUARTILES
+    # ----------------------------------------------------------
     if view_mode == "Quality quartile exposures (Q1–Q4)":
+
+        # IMPORTANT:
+        # - No segment selector here
+        # - No second update button
+        # - No additional focus fund selector; use top-level focus_fund_id
+
         render_quality_quartiles_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
-            focus_fund_id=focus_fund_id,
+            focus_fund_id=focus_fund_id,         # still passed, but not for re-selection
             focus_fund_label=focus_fund_label,
             start_date=start_date,
             end_date=end_date,
-            segment_choice=segment_choice,
+            segment_choice="Total",              # quartiles ignore segment
             fund_options=fund_options,
         )
         return
