@@ -3590,7 +3590,6 @@ def quality_period_selector():
 
 # --- Split quality page into SECTION 1: RoE/RoCE-like return on capital vs peers / universe and 2. Q1–Q4 exposures --- START ---
 
-
 def render_quality_roc_section(
     selected_fund_ids: list[int],
     selected_fund_labels: list[str],
@@ -3599,15 +3598,12 @@ def render_quality_roc_section(
     start_date: date,
     end_date: date,
     segment_choice: str,
+    comparison_mode: str,
 ):
-    st.subheader("6. Comparison mode")
-
-    comparison_mode = st.radio(
-        "Compare focus fund against:",
-        options=["Universe median", "Individual funds"],
-        horizontal=True,
-        key="pq_comparison_mode",
-    )
+    """
+    comparison_mode is either "Universe median" or "Individual funds",
+    chosen in the main function.
+    """
 
     with st.spinner("Computing portfolio fundamentals..."):
         df_result = get_portfolio_fundamentals_cached(
@@ -3654,21 +3650,14 @@ def render_quality_roc_section(
 
     df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
 
-    st.subheader("7. Return on capital (5-period median RoE / RoCE)")
+    st.subheader("Return on capital (5-period median RoE / RoCE)")
 
     chart = (
         alt.Chart(df_chart)
         .mark_line(point=True)
         .encode(
-            x=alt.X(
-                "month_end:T",
-                title="Period",
-                axis=alt.Axis(format="%b %Y"),
-            ),
-            y=alt.Y(
-                "metric:Q",
-                title="Portfolio metric (%)",
-            ),
+            x=alt.X("month_end:T", title="Period", axis=alt.Axis(format="%b %Y")),
+            y=alt.Y("metric:Q", title="Portfolio metric (%)"),
             color=alt.Color("fund_name:N", title="Fund"),
             tooltip=[
                 alt.Tooltip("fund_name:N", title="Fund"),
@@ -3681,17 +3670,13 @@ def render_quality_roc_section(
 
     st.altair_chart(chart, use_container_width=True)
 
-    # Optional: data table for debugging
     df_pivot = df_chart.pivot_table(
         index="fund_name",
         columns=df_chart["month_end"].dt.strftime("%b %Y"),
         values="metric",
         aggfunc="first",
     )
-    st.dataframe(
-        df_pivot.style.format("{:.1f}"),
-        use_container_width=True,
-    )
+    st.dataframe(df_pivot.style.format("{:.1f}"), use_container_width=True)
 
 
 # --- SECTION 2: Quality quartile exposures (Q1–Q4) ---
@@ -5812,7 +5797,10 @@ def portfolio_quality_page():
     home_button()
     st.header("Portfolio quality – return on capital & quality buckets")
 
-    # --- 1) Categories + funds + focus fund (OUTSIDE the form, dynamic) ---
+    # --------------------------------------------------
+    # 1–3: Categories → Universe → Focus fund
+    # (OUTSIDE the form, dynamic & hierarchical)
+    # --------------------------------------------------
     (
         selected_fund_ids,
         selected_fund_labels,
@@ -5822,15 +5810,18 @@ def portfolio_quality_page():
     ) = quality_category_and_fund_selector()
 
     if not selected_fund_ids:
-        # quality_category_and_fund_selector already showed a message
+        # quality_category_and_fund_selector already shows guidance
         return
 
-    # --- 2) Period + mode + segment INSIDE a form ---
+    # --------------------------------------------------
+    # 4–6: Period + Analysis mode + first UPDATE
+    # (INSIDE a form)
+    # --------------------------------------------------
     with st.form("pq_filters"):
-        # 2A) Period (start & end)
+        # 4) Period
         start_date, end_date = quality_period_selector()
 
-        # 2B) Choose analysis mode
+        # 5) Analysis mode
         st.subheader("5. Choose analysis")
         view_mode = st.radio(
             "What do you want to analyse?",
@@ -5842,39 +5833,68 @@ def portfolio_quality_page():
             key="pq_view_mode",
         )
 
-        # 2C) Segment selector ONLY relevant for Mode 1
-        segment_choice = "Total"  # default / used for fundamentals + quartiles
-        if view_mode == "Return on capital vs peers / universe":
-            st.subheader("6. Segment")
-            segment_choice = st.radio(
-                "Show metrics for:",
-                options=["Financials", "Non-financials", "Total"],
-                horizontal=True,
-                key="pq_segment",
-            )
+        # 6) First update button
+        update_main = st.form_submit_button("Update", type="primary")
 
-        # 2D) Single UPDATE button for all of the above
-        update = st.form_submit_button("Update", type="primary")
+    # --- track whether main filters have ever been applied ---
+    filters_applied = st.session_state.get("pq_filters_applied", False)
+    if update_main:
+        filters_applied = True
+        st.session_state["pq_filters_applied"] = True
 
-    # --- 3) First-run behaviour: auto-run once if we have a universe ---
-    if "pq_initialized" not in st.session_state:
-        st.session_state["pq_initialized"] = True
-        if selected_fund_ids:
-            update = True
-
-    # --- 4) Basic validation ---
+    # Basic validation
     if start_date > end_date:
         st.error("Start date must be earlier than end date.")
         return
 
-    if not update:
-        st.info("Adjust filters above and click **Update**.")
+    # If user hasn’t applied filters at least once, don’t go further
+    if not filters_applied:
+        st.info("Set period and analysis mode, then click **Update** above.")
         return
 
-    # --- 5) Run ONLY the selected heavy section ---
+    # --------------------------------------------------
+    # 7: Mode-specific selectors (OUTSIDE form)
+    # --------------------------------------------------
+    segment_choice = "Total"       # default
+    comparison_mode = None         # only used in Mode 1
 
-    # MODE 1: RoC vs peers / universe
     if view_mode == "Return on capital vs peers / universe":
+        # 7.1.a – Segment selector (only for Mode 1)
+        st.subheader("6. Segment")
+        segment_choice = st.radio(
+            "Show metrics for:",
+            options=["Financials", "Non-financials", "Total"],
+            horizontal=True,
+            key="pq_segment",
+        )
+
+        # 7.1.b – Comparison mode
+        st.subheader("7. Comparison mode")
+        comparison_mode = st.radio(
+            "Compare focus fund against:",
+            options=["Universe median", "Individual funds"],
+            horizontal=True,
+            key="pq_comparison_mode",
+        )
+    else:
+        # 7.2 – Mode 2: no further selection required
+        st.markdown("**Analysis:** Quality quartile exposures for the focus fund "
+                    "(total domestic equities).")
+
+    # --------------------------------------------------
+    # 8: Second update button that actually renders charts
+    # --------------------------------------------------
+    run_charts = st.button("Show results", type="primary", key="pq_show_results")
+
+    if not run_charts:
+        st.info("Click **Show results** to run the analysis.")
+        return
+
+    # --------------------------------------------------
+    # Route to the correct heavy section
+    # --------------------------------------------------
+    if view_mode == "Return on capital vs peers / universe":
+        # Mode 1
         render_quality_roc_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
@@ -5883,22 +5903,20 @@ def portfolio_quality_page():
             start_date=start_date,
             end_date=end_date,
             segment_choice=segment_choice,
+            comparison_mode=comparison_mode or "Universe median",
         )
-        return
-
-    # MODE 2: Quality quartile exposures (Q1–Q4)
-    if view_mode == "Quality quartile exposures (Q1–Q4)":
+    else:
+        # Mode 2
         render_quality_quartiles_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
-            focus_fund_id=focus_fund_id,        # from top-level selector
+            focus_fund_id=focus_fund_id,        # chosen at top
             focus_fund_label=focus_fund_label,
             start_date=start_date,
             end_date=end_date,
             segment_choice="Total",             # quartiles are total domestic equities
             fund_options=fund_options,
         )
-        return
 
 
 # New page: Portfolio quality split into two sections with conditionals to optimize performmance - END
