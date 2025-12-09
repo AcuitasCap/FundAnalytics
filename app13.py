@@ -3413,6 +3413,407 @@ def compute_portfolio_fundamentals(df_portfolio, roe_roce_dict, segment_choice):
     result = result.sort_values(["fund_name", "month_end"])
     return result
 
+# --- CACHED HEAVY HELPERS FOR QUALITY PAGE Start ---
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_portfolio_fundamentals_cached(
+    fund_ids: list[int],
+    start_date: date,
+    end_date: date,
+    segment_choice: str,
+) -> pd.DataFrame:
+    """
+    Wrapper around load_stock_roe_roce + fetch_portfolio_raw + compute_portfolio_fundamentals,
+    cached for 30 minutes.
+    """
+    if not fund_ids:
+        return pd.DataFrame(columns=["fund_id", "fund_name", "month_end", "metric"])
+
+    roe_roce_dict = load_stock_roe_roce()
+    df_portfolio = fetch_portfolio_raw(fund_ids, start_date, end_date)
+    if df_portfolio.empty:
+        return pd.DataFrame(columns=["fund_id", "fund_name", "month_end", "metric"])
+
+    df_result = compute_portfolio_fundamentals(
+        df_portfolio,
+        roe_roce_dict,
+        segment_choice,
+    )
+    return df_result
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def compute_quality_bucket_exposure_cached(
+    fund_id: int,
+    month_ends: list[date],
+) -> pd.DataFrame:
+    """
+    Cached wrapper around compute_quality_bucket_exposure.
+    """
+    return compute_quality_bucket_exposure(fund_id, month_ends)
+
+# --- CACHED HEAVY HELPERS FOR QUALITY PAGE end ---
+
+# --- SHARED SELECTORS FOR QUALITY PAGE  Start---
+
+def quality_category_and_fund_selector():
+    """
+    1) Category selector (checkboxes)
+    2) Fund multi-select (from selected categories)
+    3) Focus fund single-select (from selected funds)
+
+    Returns:
+        selected_fund_ids: list[int]
+        selected_fund_labels: list[str]
+        focus_fund_id: int
+        focus_fund_label: str
+        fund_options: dict[label -> fund_id]
+    """
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found in fund_master.")
+        return [], [], None, None, {}
+
+    st.subheader("1. Select categories")
+    selected_categories = []
+    cols = st.columns(min(4, len(categories)))
+    for i, cat in enumerate(categories):
+        col = cols[i % len(cols)]
+        if col.checkbox(cat, value=False, key=f"pq_cat_{cat}"):
+            selected_categories.append(cat)
+
+    if not selected_categories:
+        st.info("Please select at least one category.")
+        return [], [], None, None, {}
+
+    # 2) Fund multi-select
+    st.subheader("2. Select funds (universe)")
+    df_funds = fetch_funds_for_categories(selected_categories)
+    if df_funds.empty:
+        st.warning("No funds found for the selected categories.")
+        return [], [], None, None, {}
+
+    fund_options = {
+        f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
+        for _, row in df_funds.iterrows()
+    }
+    fund_labels = sorted(fund_options.keys())
+
+    all_option = "All funds in selected categories"
+    raw_labels = [all_option] + fund_labels
+
+    selected_raw_labels = st.multiselect(
+        "Select funds for analysis",
+        options=raw_labels,
+        default=[all_option],
+        key="pq_funds_multiselect",
+    )
+
+    if all_option in selected_raw_labels:
+        selected_fund_labels = fund_labels
+    else:
+        selected_fund_labels = [lbl for lbl in selected_raw_labels if lbl != all_option]
+
+    if not selected_fund_labels:
+        st.info("Please select at least one fund.")
+        return [], [], None, None, {}
+
+    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
+
+    # 3) Focus fund
+    st.subheader("3. Focus fund")
+    focus_fund_label = st.selectbox(
+        "Focus fund",
+        options=selected_fund_labels,
+        index=0,
+        key="pq_focus_fund",
+    )
+    focus_fund_id = fund_options[focus_fund_label]
+
+    return selected_fund_ids, selected_fund_labels, focus_fund_id, focus_fund_label, fund_options
+
+
+def quality_period_and_segment_selector():
+    """
+    4) Period selector (March / September portfolios)
+    5) Segment radio buttons
+    Returns:
+        start_date: date
+        end_date: date
+        segment_choice: str
+    """
+    st.subheader("4. Select period (March / September portfolios only)")
+
+    current_year = dt.date.today().year
+    years = list(range(current_year - 15, current_year + 1))
+    month_options = [3, 9]  # Mar, Sep
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_year = st.selectbox(
+            "Start year",
+            options=years,
+            index=0,
+            key="pq_start_year",
+        )
+        start_month = st.selectbox(
+            "Start month",
+            options=month_options,
+            index=0,
+            key="pq_start_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
+    with col2:
+        end_year = st.selectbox(
+            "End year",
+            options=years,
+            index=len(years) - 1,
+            key="pq_end_year",
+        )
+        end_month = st.selectbox(
+            "End month",
+            options=month_options,
+            index=1,
+            key="pq_end_month",
+            format_func=lambda m: "Mar" if m == 3 else "Sep",
+        )
+
+    start_date = month_year_to_last_day(start_year, start_month)
+    end_date = month_year_to_last_day(end_year, end_month)
+
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        st.stop()
+
+    st.subheader("5. Segment")
+    segment_choice = st.radio(
+        "Show metrics for:",
+        options=["Financials", "Non-financials", "Total"],
+        horizontal=True,
+        key="pq_segment",
+    )
+
+    return start_date, end_date, segment_choice
+
+# --- SHARED SELECTORS FOR QUALITY PAGE  End---
+
+
+# --- Split quality page into SECTION 1: RoE/RoCE-like return on capital vs peers / universe and 2. Q1–Q4 exposures --- START ---
+
+
+def render_quality_roc_section(
+    selected_fund_ids: list[int],
+    selected_fund_labels: list[str],
+    focus_fund_id: int,
+    focus_fund_label: str,
+    start_date: date,
+    end_date: date,
+    segment_choice: str,
+):
+    st.subheader("6. Comparison mode")
+
+    comparison_mode = st.radio(
+        "Compare focus fund against:",
+        options=["Universe median", "Individual funds"],
+        horizontal=True,
+        key="pq_comparison_mode",
+    )
+
+    with st.spinner("Computing portfolio fundamentals..."):
+        df_result = get_portfolio_fundamentals_cached(
+            selected_fund_ids,
+            start_date,
+            end_date,
+            segment_choice,
+        )
+
+    if df_result.empty:
+        st.warning("No fundamentals could be computed (check data availability).")
+        return
+
+    df_result["month_end"] = pd.to_datetime(df_result["month_end"])
+
+    # Focus fund series
+    focus_df = df_result[df_result["fund_id"] == focus_fund_id].copy()
+    if focus_df.empty:
+        st.warning("No data for the focus fund in the selected period.")
+        return
+
+    other_ids = [fid for fid in selected_fund_ids if fid != focus_fund_id]
+
+    if comparison_mode == "Universe median" and other_ids:
+        others = df_result[df_result["fund_id"].isin(other_ids)].copy()
+        if others.empty:
+            st.warning("No data for peer funds; falling back to focus fund only.")
+            df_chart = focus_df.copy()
+        else:
+            median_others = (
+                others.groupby("month_end")["metric"]
+                .median()
+                .reset_index()
+                .rename(columns={"metric": "metric_median"})
+            )
+            median_others["fund_name"] = "Universe median (others)"
+            median_others["fund_id"] = -1
+            median_others = median_others.rename(columns={"metric_median": "metric"})
+
+            df_chart = pd.concat([focus_df, median_others], ignore_index=True)
+    else:
+        # Individual funds: use all selected funds (including focus fund)
+        df_chart = df_result[df_result["fund_id"].isin(selected_fund_ids)].copy()
+
+    df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
+
+    st.subheader("7. Return on capital (5-period median RoE / RoCE)")
+
+    chart = (
+        alt.Chart(df_chart)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(
+                "month_end:T",
+                title="Period",
+                axis=alt.Axis(format="%b %Y"),
+            ),
+            y=alt.Y(
+                "metric:Q",
+                title="Portfolio metric (%)",
+            ),
+            color=alt.Color("fund_name:N", title="Fund"),
+            tooltip=[
+                alt.Tooltip("fund_name:N", title="Fund"),
+                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                alt.Tooltip("metric:Q", title="Metric", format=".1f"),
+            ],
+        )
+        .properties(height=400)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
+    # Optional: data table for debugging
+    df_pivot = df_chart.pivot_table(
+        index="fund_name",
+        columns=df_chart["month_end"].dt.strftime("%b %Y"),
+        values="metric",
+        aggfunc="first",
+    )
+    st.dataframe(
+        df_pivot.style.format("{:.1f}"),
+        use_container_width=True,
+    )
+
+
+# --- SECTION 2: Quality quartile exposures (Q1–Q4) ---
+
+def render_quality_quartiles_section(
+    selected_fund_ids: list[int],
+    selected_fund_labels: list[str],
+    focus_fund_id: int,
+    focus_fund_label: str,
+    start_date: date,
+    end_date: date,
+    segment_choice: str,
+    fund_options: dict[str, int],
+):
+    st.subheader("8. Quality quartile exposures (Q1–Q4)")
+
+    if not selected_fund_ids:
+        st.info("No funds selected.")
+        return
+
+    with st.spinner("Preparing periods for quartile exposures..."):
+        df_result = get_portfolio_fundamentals_cached(
+            selected_fund_ids,
+            start_date,
+            end_date,
+            segment_choice,
+        )
+
+    if df_result.empty:
+        st.info("No data available to compute Q1–Q4 quality bucket exposures.")
+        return
+
+    df_result["month_end"] = pd.to_datetime(df_result["month_end"])
+    all_month_ends = sorted(df_result["month_end"].dt.date.unique())
+    if not all_month_ends:
+        st.info("No periods found to compute quality buckets.")
+        return
+
+    default_idx = (
+        selected_fund_labels.index(focus_fund_label)
+        if focus_fund_label in selected_fund_labels
+        else 0
+    )
+    quality_fund_label = st.selectbox(
+        "Select fund for quality bucket view",
+        options=selected_fund_labels,
+        index=default_idx,
+        key="pq_quality_fund",
+    )
+    quality_fund_id = fund_options[quality_fund_label]
+
+    # Filter month_ends where this fund actually has data
+    fund_months = sorted(
+        df_result[df_result["fund_id"] == quality_fund_id]["month_end"].dt.date.unique()
+    )
+    if not fund_months:
+        st.info("No periods found for the selected fund to compute quality buckets.")
+        return
+
+    with st.spinner("Computing quality bucket exposures..."):
+        quality_table = compute_quality_bucket_exposure_cached(
+            quality_fund_id,
+            fund_months,
+        )
+
+    if quality_table.empty:
+        st.info("No quality bucket data available.")
+        return
+
+    # Chart: stack Q1–Q4 over time (ignore 'Total' row for chart)
+    table_for_chart = quality_table.drop(index="Total", errors="ignore")
+    chart_df = table_for_chart.T.reset_index().rename(columns={"index": "month_end"})
+    chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
+
+    chart_long = chart_df.melt(
+        "month_end", var_name="Quartile", value_name="Exposure"
+    )
+
+    chart_q = (
+        alt.Chart(chart_long)
+        .mark_area()
+        .encode(
+            x=alt.X(
+                "month_end:T",
+                title="Period",
+                axis=alt.Axis(format="%b %Y"),
+            ),
+            y=alt.Y(
+                "Exposure:Q",
+                title="Exposure (% of domestic equities)",
+            ),
+            color=alt.Color("Quartile:N", title="Quartile"),
+            tooltip=[
+                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+                alt.Tooltip("Quartile:N", title="Quartile"),
+                alt.Tooltip("Exposure:Q", title="Exposure (%)", format=".1f"),
+            ],
+        )
+        .properties(height=400)
+    )
+
+    st.altair_chart(chart_q, use_container_width=True)
+
+    # Raw table (including 'Total' row)
+    st.dataframe(
+        quality_table.style.format("{:.1f}"),
+        use_container_width=True,
+    )
+
+
+# --- Split quality page into SECTION 1: RoE/RoCE-like return on capital vs peers / universe and 2. Q1–Q4 exposures --- END ---
+
 
 def fetch_fund_portfolio_timeseries(fund_id, start_date, end_date, freq):
     """
@@ -5412,350 +5813,66 @@ def performance_page():
                 st.error(f"PDF generation failed: {e}. Ensure 'kaleido' and 'reportlab' are installed.")
 
 
+# New page: Portfolio quality split into two sections with conditionals to optimize performmance - START
+
 def portfolio_quality_page():
     home_button()
     st.header("Portfolio quality – return on capital & quality buckets")
 
-    # 1) Category selector (checkboxes)
-    categories = fetch_categories()
-    if not categories:
-        st.warning("No categories found in fund_master.")
-        return
-
-    st.subheader("1. Select categories")
-    selected_categories = []
-    cols = st.columns(min(4, len(categories)))
-    for i, cat in enumerate(categories):
-        col = cols[i % len(cols)]
-        if col.checkbox(cat, value=False, key=f"pq_cat_{cat}"):
-            selected_categories.append(cat)
-
-    if not selected_categories:
-        st.info("Please select at least one category.")
-        return
-
-    # 2) Fund multi-select with "All" option
-    st.subheader("2. Select funds")
-
-    funds_df = fetch_funds_for_categories(selected_categories)
-    if funds_df.empty:
-        st.warning("No funds found for selected categories.")
-        return
-
-    # Map: label → fund_id (we'll reuse fund_options later on this page)
-    fund_options = {
-        f"{row['fund_name']} ({row['category_name']})": row["fund_id"]
-        for _, row in funds_df.iterrows()
-    }
-
-    all_option = "All"
-    multiselect_options = [all_option] + list(fund_options.keys())
-
-    selected_raw_labels = st.multiselect(
-        "Funds",
-        options=multiselect_options,
-        default=[],
-        key="pq_funds_multiselect",
-    )
-
-    if all_option in selected_raw_labels:
-        selected_fund_labels = list(fund_options.keys())
-    else:
-        selected_fund_labels = [lbl for lbl in selected_raw_labels if lbl != all_option]
-
-    selected_fund_ids = [fund_options[label] for label in selected_fund_labels]
+    # --- 1) Category + fund + focus fund selection (shared) ---
+    (
+        selected_fund_ids,
+        selected_fund_labels,
+        focus_fund_id,
+        focus_fund_label,
+        fund_options,
+    ) = quality_category_and_fund_selector()
 
     if not selected_fund_ids:
-        st.info("Please select at least one fund.")
-        return
+        return  # message already shown inside selector
 
-    # 3) Focus fund (single-select from chosen funds)
-    st.subheader("3. Focus fund")
-    focus_fund_label = st.selectbox(
-        "Focus fund",
-        options=selected_fund_labels,
-        index=0,
-        key="pq_focus_fund",
-    )
-    focus_fund_id = fund_options[focus_fund_label]
+    # --- 2) Period + segment selection (shared) ---
+    start_date, end_date, segment_choice = quality_period_and_segment_selector()
 
-    # 4) Date range selectors (month & year separately)
-    st.subheader("4. Select period (March / September portfolios only)")
-
-    current_year = dt.date.today().year
-    years = list(range(current_year - 15, current_year + 1))
-    month_options = [3, 9]  # Mar, Sep
-
-    col1, col2 = st.columns(2)
-    with col1:
-        start_year = st.selectbox(
-            "Start year",
-            options=years,
-            index=0,
-            key="pq_start_year",
-        )
-        start_month = st.selectbox(
-            "Start month",
-            options=month_options,
-            index=0,
-            key="pq_start_month",
-            format_func=lambda m: "Mar" if m == 3 else "Sep",
-        )
-    with col2:
-        end_year = st.selectbox(
-            "End year",
-            options=years,
-            index=len(years) - 1,
-            key="pq_end_year",
-        )
-        end_month = st.selectbox(
-            "End month",
-            options=month_options,
-            index=1,
-            key="pq_end_month",
-            format_func=lambda m: "Mar" if m == 3 else "Sep",
-        )
-
-    start_date = month_year_to_last_day(start_year, start_month)
-    end_date = month_year_to_last_day(end_year, end_month)
-
-    if start_date > end_date:
-        st.error("Start date must be earlier than end date.")
-        return
-
-    # 5) Segment radio buttons
-    st.subheader("5. Segment")
-    segment_choice = st.radio(
-        "Show metrics for:",
-        options=["Financials", "Non-financials", "Total"],
+    # --- 3) Choose which analysis to run ---
+    st.subheader("6. Choose analysis")
+    view_mode = st.radio(
+        "What do you want to analyse?",
+        options=[
+            "Return on capital vs peers / universe",
+            "Quality quartile exposures (Q1–Q4)",
+        ],
         horizontal=True,
-        key="pq_segment",
+        key="pq_view_mode",
     )
 
-    # 6) Comparison mode: individual funds vs universe median
-    st.subheader("6. Comparison mode")
-    comparison_mode = st.radio(
-        "Compare focus fund against:",
-        options=["Universe median", "Individual funds"],
-        horizontal=True,
-        key="pq_comparison_mode",
-    )
-
-    # 7) Fetch data & compute RoE / RoCE
-    with st.spinner("Computing portfolio fundamentals..."):
-        roe_roce_dict = load_stock_roe_roce()
-        df_portfolio = fetch_portfolio_raw(selected_fund_ids, start_date, end_date)
-        if df_portfolio.empty:
-            st.warning("No portfolio data found for selected funds and period.")
-            return
-
-        df_result = compute_portfolio_fundamentals(
-            df_portfolio, roe_roce_dict, segment_choice
+    # --- 4) Run ONLY the selected heavy section ---
+    if view_mode == "Return on capital vs peers / universe":
+        render_quality_roc_section(
+            selected_fund_ids=selected_fund_ids,
+            selected_fund_labels=selected_fund_labels,
+            focus_fund_id=focus_fund_id,
+            focus_fund_label=focus_fund_label,
+            start_date=start_date,
+            end_date=end_date,
+            segment_choice=segment_choice,
         )
-
-    if df_result.empty:
-        st.warning("No fundamentals could be computed (check data availability).")
         return
 
-    # 8) RoE / RoCE time series chart
-    st.subheader("7. RoE / RoCE time series")
-
-    # Build chart dataset depending on comparison mode
-    df_result = df_result.dropna(subset=["metric"]).copy()
-    if df_result.empty:
-        st.info("No data to plot for selected filters.")
+    if view_mode == "Quality quartile exposures (Q1–Q4)":
+        render_quality_quartiles_section(
+            selected_fund_ids=selected_fund_ids,
+            selected_fund_labels=selected_fund_labels,
+            focus_fund_id=focus_fund_id,
+            focus_fund_label=focus_fund_label,
+            start_date=start_date,
+            end_date=end_date,
+            segment_choice=segment_choice,
+            fund_options=fund_options,
+        )
         return
 
-    if comparison_mode == "Universe median":
-        focus_df = df_result[df_result["fund_id"] == focus_fund_id].copy()
-        others_df = df_result[df_result["fund_id"] != focus_fund_id].copy()
-
-        if focus_df.empty or others_df.empty:
-            st.warning(
-                "Universe median comparison requires at least the focus fund plus one other fund. "
-                "Showing individual funds instead."
-            )
-            df_chart = df_result.copy()
-        else:
-            median_others = (
-                others_df.groupby("month_end", as_index=False)["metric"]
-                .median()
-                .rename(columns={"metric": "metric_median"})
-            )
-            median_others["fund_name"] = "Universe median (others)"
-            median_others["fund_id"] = -1
-            median_others = median_others.rename(columns={"metric_median": "metric"})
-
-            df_chart = pd.concat([focus_df, median_others], ignore_index=True)
-    else:
-        # Individual funds: use all selected funds as before
-        df_chart = df_result.copy()
-
-    df_chart["month_end"] = pd.to_datetime(df_chart["month_end"])
-
-    # Robust y-axis domain across whichever subset we're plotting
-    y_min = float(df_chart["metric"].min())
-    y_max = float(df_chart["metric"].max())
-    if y_min == y_max:
-        padding = max(1.0, abs(y_min) * 0.1 if y_min != 0 else 1.0)
-        domain = (y_min - padding, y_max + padding)
-    else:
-        padding = (y_max - y_min) * 0.1
-        domain = (y_min - padding, y_max + padding)
-
-    chart = (
-        alt.Chart(df_chart)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "month_end:T",
-                title="Period",
-                axis=alt.Axis(format="%b %Y", labelAngle=-45),
-            ),
-            y=alt.Y(
-                "metric:Q",
-                title="RoE / RoCE (%)",
-                scale=alt.Scale(domain=domain),
-            ),
-            color=alt.Color("fund_name:N", title="Fund / Series"),
-            tooltip=[
-                alt.Tooltip("fund_name:N", title="Fund / Series"),
-                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                alt.Tooltip("metric:Q", title="RoE / RoCE (%)", format=".2f"),
-            ],
-        )
-        .properties(height=400)
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-    # 9) Underlying data table (funds/series in rows, periods in columns)
-    st.subheader("8. Underlying data")
-
-    if comparison_mode == "Universe median":
-        focus_df = df_result[df_result["fund_id"] == focus_fund_id].copy()
-        others_df = df_result[df_result["fund_id"] != focus_fund_id].copy()
-
-        if focus_df.empty or others_df.empty:
-            # Fall back to full table
-            df_table = df_result.copy()
-        else:
-            median_others = (
-                others_df.groupby("month_end", as_index=False)["metric"]
-                .median()
-                .rename(columns={"metric": "metric_median"})
-            )
-            median_others["fund_name"] = "Universe median (others)"
-            median_others["fund_id"] = -1
-            median_others = median_others.rename(columns={"metric_median": "metric"})
-
-            df_table = pd.concat([focus_df, median_others], ignore_index=True)
-    else:
-        df_table = df_result.copy()
-
-    df_table["month_end"] = pd.to_datetime(df_table["month_end"])
-    df_table["period_date"] = df_table["month_end"]
-
-    df_pivot = (
-        df_table.pivot_table(
-            index="fund_name",
-            columns="period_date",
-            values="metric",
-        )
-        .sort_index(axis=0)
-        .sort_index(axis=1)
-    )
-
-    df_pivot.columns = [col.strftime("%b %Y") for col in df_pivot.columns]
-    st.dataframe(df_pivot.style.format("{:.2f}"))
-
-    # 10) Quality bucket exposures (Q1–Q4) – still based on full df_result universe
-    st.subheader("9. Quality bucket exposures (Q1–Q4)")
-
-    if df_result.empty or not selected_fund_ids:
-        st.info("No data available to compute Q1–Q4 quality bucket exposures.")
-        return
-
-    month_ends_list = sorted(
-        pd.to_datetime(df_result["month_end"]).dt.date.unique()
-    )
-    if not month_ends_list:
-        st.info("No periods found to compute quality buckets.")
-        return
-
-    quality_fund_label = st.selectbox(
-        "Select fund for quality bucket view",
-        options=selected_fund_labels,
-        index=0,
-        key="pq_quality_fund_select",
-    )
-    quality_fund_id = fund_options[quality_fund_label]
-
-    quality_table = compute_quality_bucket_exposure(quality_fund_id, month_ends_list)
-
-    if quality_table is None or quality_table.empty:
-        st.info(
-            "No Q1–Q4 quality bucket data available for the selected fund and period."
-        )
-    else:
-        st.caption(f"Quality bucket exposure for: {quality_fund_label}")
-
-        chart_df = quality_table.copy()
-        quartile_labels = {"Q1", "Q2", "Q3", "Q4"}
-
-        if "month_end" in chart_df.columns and quartile_labels.issubset(set(chart_df.columns)):
-            chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
-            chart_df = chart_df.set_index("month_end")
-        else:
-            index_labels = set(chart_df.index.astype(str))
-            if quartile_labels.issubset(index_labels):
-                chart_df = chart_df.T
-            chart_df.index = pd.to_datetime(chart_df.index, errors="coerce")
-            chart_df = chart_df[chart_df.index.notna()]
-
-        quartile_cols = [c for c in ["Q1", "Q2", "Q3", "Q4"] if c in chart_df.columns]
-
-        if not quartile_cols:
-            st.info("Quality table does not have Q1–Q4 columns to chart.")
-        else:
-            chart_df = chart_df[quartile_cols].sort_index()
-
-            st.markdown(
-                "#### Quality quartile mix over time (rebased to domestic equity = 100%)"
-            )
-
-            chart_df_alt = chart_df.reset_index().rename(columns={"index": "month_end"})
-            chart_df_alt["month_end"] = pd.to_datetime(chart_df_alt["month_end"])
-
-            chart_long = chart_df_alt.melt(
-                "month_end", var_name="Quartile", value_name="Exposure"
-            )
-
-            chart_q = (
-                alt.Chart(chart_long)
-                .mark_area()
-                .encode(
-                    x=alt.X(
-                        "month_end:T",
-                        title="Period",
-                        axis=alt.Axis(format="%b %Y", labelAngle=-45),
-                    ),
-                    y=alt.Y("Exposure:Q", title="Exposure (%)"),
-                    color=alt.Color("Quartile:N", title="Quality Quartile"),
-                    tooltip=[
-                        alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                        alt.Tooltip("Quartile:N", title="Quartile"),
-                        alt.Tooltip("Exposure:Q", title="Exposure (%)", format=".1f"),
-                    ],
-                )
-                .properties(height=400)
-            )
-            st.altair_chart(chart_q, use_container_width=True)
-
-        st.dataframe(
-            quality_table.style.format("{:.1f}"),
-            use_container_width=True,
-        )
-
+# New page: Portfolio quality split into two sections with conditionals to optimize performmance - END
 
 def portfolio_valuations_page():
     home_button()
