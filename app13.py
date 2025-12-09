@@ -5809,43 +5809,67 @@ def portfolio_quality_page():
     home_button()
     st.header("Portfolio quality – return on capital & quality buckets")
 
-    # --- 1) Category + fund + focus fund selection (shared) ---
-    (
-        selected_fund_ids,
-        selected_fund_labels,
-        focus_fund_id,
-        focus_fund_label,
-        fund_options,
-    ) = quality_category_and_fund_selector()
+    # --- 1) Shared filters inside a form ---
+    with st.form("pq_filters"):
+        # 1A) Categories + funds + focus
+        (
+            selected_fund_ids,
+            selected_fund_labels,
+            focus_fund_id,
+            focus_fund_label,
+            fund_options,
+        ) = quality_category_and_fund_selector()
 
+        # 1B) Period
+        start_date, end_date = quality_period_selector()
+
+        # 1C) Choose which analysis to run
+        st.subheader("5. Choose analysis")
+        view_mode = st.radio(
+            "What do you want to analyse?",
+            options=[
+                "Return on capital vs peers / universe",
+                "Quality quartile exposures (Q1–Q4)",
+            ],
+            horizontal=True,
+            key="pq_view_mode",
+        )
+
+        # 1D) Segment (applies to RoC section, currently not to quartiles)
+        st.subheader("6. Segment")
+        segment_choice = st.radio(
+            "Show metrics for:",
+            options=["Financials", "Non-financials", "Total"],
+            horizontal=True,
+            key="pq_segment",
+        )
+
+        # 1E) Update button
+        update = st.form_submit_button("Update", type="primary")
+
+    # --- 2) First-run behaviour ---
+    # We want the page to show something on first load without needing a click.
+    if "pq_initialized" not in st.session_state:
+        st.session_state["pq_initialized"] = True
+        # only auto-update if we actually have some funds selected
+        if selected_fund_ids:
+            update = True
+
+    # --- 3) Validation after form submission ---
     if not selected_fund_ids:
-        return  # message already shown inside selector
+        st.info("Please select at least one fund in the universe.")
+        return
 
-    # --- 2) Period selection (shared) ---
-    start_date, end_date = quality_period_selector()
+    if start_date > end_date:
+        st.error("Start date must be earlier than end date.")
+        return
 
-    # --- 3) Choose which analysis to run ---
-    st.subheader("5. Choose analysis")
-    view_mode = st.radio(
-        "What do you want to analyse?",
-        options=[
-            "Return on capital vs peers / universe",
-            "Quality quartile exposures (Q1–Q4)",
-        ],
-        horizontal=True,
-        key="pq_view_mode",
-    )
+    # If user hasn’t clicked Update (and it’s not first load), don’t run heavy code
+    if not update:
+        st.info("Adjust filters above and click **Update** to recompute.")
+        return
 
-    # --- 4) Segment selector (now AFTER the view-mode radio) ---
-    st.subheader("6. Segment")
-    segment_choice = st.radio(
-        "Show metrics for:",
-        options=["Financials", "Non-financials", "Total"],
-        horizontal=True,
-        key="pq_segment",
-    )
-
-    # --- 5) Run ONLY the selected heavy section ---
+    # --- 4) Run ONLY the selected heavy section ---
     if view_mode == "Return on capital vs peers / universe":
         render_quality_roc_section(
             selected_fund_ids=selected_fund_ids,
