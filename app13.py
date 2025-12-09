@@ -3703,21 +3703,28 @@ def render_quality_quartiles_section(
     focus_fund_label: str,
     start_date: date,
     end_date: date,
-    segment_choice: str,
+    segment_choice: str,          # currently unused, kept for signature compatibility
     fund_options: dict[str, int],
 ):
-    st.subheader("8. Quality quartile exposures (Q1–Q4)")
+    st.subheader("7. Quality quartile exposures (Q1–Q4)")
 
     if not selected_fund_ids:
         st.info("No funds selected.")
         return
 
-    with st.spinner("Preparing periods for quartile exposures..."):
+    # Use the TOP-LEVEL focus fund directly – no extra selector here
+    quality_fund_id = focus_fund_id
+    quality_fund_label = focus_fund_label
+
+    # Reuse portfolio fundamentals to get consistent month_ends universe
+    with st.spinner(
+        f"Preparing periods for quartile exposures for {quality_fund_label}..."
+    ):
         df_result = get_portfolio_fundamentals_cached(
             selected_fund_ids,
             start_date,
             end_date,
-            segment_choice,
+            segment_choice,   # quartiles ignore it, but fundamentals don’t mind
         )
 
     if df_result.empty:
@@ -3730,28 +3737,19 @@ def render_quality_quartiles_section(
         st.info("No periods found to compute quality buckets.")
         return
 
-    default_idx = (
-        selected_fund_labels.index(focus_fund_label)
-        if focus_fund_label in selected_fund_labels
-        else 0
-    )
-    quality_fund_label = st.selectbox(
-        "Select fund for quality bucket view",
-        options=selected_fund_labels,
-        index=default_idx,
-        key="pq_quality_fund",
-    )
-    quality_fund_id = fund_options[quality_fund_label]
-
-    # Filter month_ends where this fund actually has data
+    # Filter month_ends where THIS focus fund actually has data
     fund_months = sorted(
         df_result[df_result["fund_id"] == quality_fund_id]["month_end"].dt.date.unique()
     )
     if not fund_months:
-        st.info("No periods found for the selected fund to compute quality buckets.")
+        st.info(
+            f"No periods found for {quality_fund_label} to compute quality buckets."
+        )
         return
 
-    with st.spinner("Computing quality bucket exposures..."):
+    with st.spinner(
+        f"Computing quality bucket exposures for {quality_fund_label}..."
+    ):
         quality_table = compute_quality_bucket_exposure_cached(
             quality_fund_id,
             fund_months,
@@ -3761,13 +3759,18 @@ def render_quality_quartiles_section(
         st.info("No quality bucket data available.")
         return
 
+    # Title with fund name
+    st.markdown(f"**Fund:** {quality_fund_label}")
+
     # Chart: stack Q1–Q4 over time (ignore 'Total' row for chart)
     table_for_chart = quality_table.drop(index="Total", errors="ignore")
     chart_df = table_for_chart.T.reset_index().rename(columns={"index": "month_end"})
     chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])
 
     chart_long = chart_df.melt(
-        "month_end", var_name="Quartile", value_name="Exposure"
+        "month_end",
+        var_name="Quartile",
+        value_name="Exposure",
     )
 
     chart_q = (
