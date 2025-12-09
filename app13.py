@@ -3532,15 +3532,12 @@ def quality_category_and_fund_selector():
 
     return selected_fund_ids, selected_fund_labels, focus_fund_id, focus_fund_label, fund_options
 
-
-def quality_period_and_segment_selector():
+def quality_period_selector():
     """
-    4) Period selector (March / September portfolios)
-    5) Segment radio buttons
+    Period selector (March / September portfolios).
     Returns:
         start_date: date
         end_date: date
-        segment_choice: str
     """
     st.subheader("4. Select period (March / September portfolios only)")
 
@@ -3585,15 +3582,8 @@ def quality_period_and_segment_selector():
         st.error("Start date must be earlier than end date.")
         st.stop()
 
-    st.subheader("5. Segment")
-    segment_choice = st.radio(
-        "Show metrics for:",
-        options=["Financials", "Non-financials", "Total"],
-        horizontal=True,
-        key="pq_segment",
-    )
+    return start_date, end_date
 
-    return start_date, end_date, segment_choice
 
 # --- SHARED SELECTORS FOR QUALITY PAGE  End---
 
@@ -5831,11 +5821,11 @@ def portfolio_quality_page():
     if not selected_fund_ids:
         return  # message already shown inside selector
 
-    # --- 2) Period + segment selection (shared) ---
-    start_date, end_date, segment_choice = quality_period_and_segment_selector()
+    # --- 2) Period selection (shared) ---
+    start_date, end_date = quality_period_selector()
 
     # --- 3) Choose which analysis to run ---
-    st.subheader("6. Choose analysis")
+    st.subheader("5. Choose analysis")
     view_mode = st.radio(
         "What do you want to analyse?",
         options=[
@@ -5846,7 +5836,16 @@ def portfolio_quality_page():
         key="pq_view_mode",
     )
 
-    # --- 4) Run ONLY the selected heavy section ---
+    # --- 4) Segment selector (now AFTER the view-mode radio) ---
+    st.subheader("6. Segment")
+    segment_choice = st.radio(
+        "Show metrics for:",
+        options=["Financials", "Non-financials", "Total"],
+        horizontal=True,
+        key="pq_segment",
+    )
+
+    # --- 5) Run ONLY the selected heavy section ---
     if view_mode == "Return on capital vs peers / universe":
         render_quality_roc_section(
             selected_fund_ids=selected_fund_ids,
@@ -5871,6 +5870,7 @@ def portfolio_quality_page():
             fund_options=fund_options,
         )
         return
+
 
 # New page: Portfolio quality split into two sections with conditionals to optimize performmance - END
 
