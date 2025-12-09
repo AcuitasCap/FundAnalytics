@@ -5814,7 +5814,6 @@ def portfolio_quality_page():
 
     # --- 1) Shared filters inside a form ---
     with st.form("pq_main_filters"):
-
         # (A) Category + funds + focus fund
         (
             selected_fund_ids,
@@ -5839,16 +5838,10 @@ def portfolio_quality_page():
             key="pq_view_mode",
         )
 
-        # (D) FIRST UPDATE BUTTON (applies to filters above)
+        # MAIN UPDATE (used just to commit filter changes; no extra gating)
         update_main = st.form_submit_button("Update", type="primary")
 
-    # --- First-run behavior ---
-    if "pq_initialized" not in st.session_state:
-        st.session_state["pq_initialized"] = True
-        if selected_fund_ids:
-            update_main = True
-
-    # --- Validate mandatory selections after main-update ---
+    # --- 2) Basic validation (regardless of update_main) ---
     if not selected_fund_ids:
         st.info("Please select at least one fund in the universe.")
         return
@@ -5857,11 +5850,10 @@ def portfolio_quality_page():
         st.error("Start date must be earlier than end date.")
         return
 
-    # If user hasn't hit Update-main and it's not first run,
-    # don't run anything yet
-    if not update_main:
-        st.info("Adjust filters above and click **Update**.")
-        return
+    # NOTE:
+    # We DO NOT block on `if not update_main:` here.
+    # The form already ensures that this code only re-runs when the user hits Update
+    # (plus initial load). So no extra "Adjust filters..." guard is needed.
 
     # ----------------------------------------------------------
     #                   MODE 1: ROC vs PEERS
@@ -5880,16 +5872,11 @@ def portfolio_quality_page():
         # SECOND UPDATE BUTTON (applies only to mode 1)
         update_segment = st.button("Update Segment View", type="primary")
 
-        # Run heavy subsection only after segment update or first-run
-        if not update_segment and not st.session_state.get("pq_mode1_initialized"):
-            st.session_state["pq_mode1_initialized"] = True
-            update_segment = True
-
         if not update_segment:
             st.info("Select segment and click **Update Segment View**.")
             return
 
-        # Run ROC section
+        # Run ROC section (heavy work uses cached helpers)
         render_quality_roc_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
@@ -5914,11 +5901,11 @@ def portfolio_quality_page():
         render_quality_quartiles_section(
             selected_fund_ids=selected_fund_ids,
             selected_fund_labels=selected_fund_labels,
-            focus_fund_id=focus_fund_id,         # still passed, but not for re-selection
+            focus_fund_id=focus_fund_id,        # selected at the top
             focus_fund_label=focus_fund_label,
             start_date=start_date,
             end_date=end_date,
-            segment_choice="Total",              # quartiles ignore segment
+            segment_choice="Total",             # quartiles are total domestic equities
             fund_options=fund_options,
         )
         return
