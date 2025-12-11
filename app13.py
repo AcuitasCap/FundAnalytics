@@ -3239,6 +3239,37 @@ def compute_portfolio_valuations_timeseries(
     return df_chart
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_portfolio_valuations_timeseries(
+    fund_ids,
+    focus_fund_id,
+    start_date,
+    end_date,
+    segment_choice,
+    metric_choice,
+    mode,
+):
+    """
+    Cached wrapper for compute_portfolio_valuations_timeseries.
+
+    Caches results for 30 minutes for a given combination of:
+    - fund_ids (universe)
+    - focus_fund_id
+    - start_date / end_date
+    - segment_choice
+    - metric_choice
+    - mode
+    """
+    return compute_portfolio_valuations_timeseries(
+        fund_ids=fund_ids,
+        focus_fund_id=focus_fund_id,
+        start_date=start_date,
+        end_date=end_date,
+        segment_choice=segment_choice,
+        metric_choice=metric_choice,
+        mode=mode,
+    )
+
 
 
 def get_median_metric_for_stock(roe_roce_dict, isin, eval_date, is_financial):
@@ -6037,6 +6068,7 @@ def portfolio_quality_page():
 
 # New page: Portfolio quality split into two sections with conditionals to optimize performmance - END
 
+
 def portfolio_valuations_page():
     home_button()
     st.header("Portfolio valuations")
@@ -6098,7 +6130,7 @@ def portfolio_valuations_page():
     # 3) Portfolio valuations controls
     st.subheader("3. Valuation settings")
 
-    # Focus fund: single-select from already selected funds
+    # 3.a Focus fund: single-select from already selected funds
     focus_fund_label = st.selectbox(
         "Focus fund",
         options=selected_fund_labels,
@@ -6114,73 +6146,109 @@ def portfolio_valuations_page():
     def month_name(m: int) -> str:
         return dt.date(2000, m, 1).strftime("%b")
 
-    colv1, colv2 = st.columns(2)
-    with colv1:
-        val_start_year = st.selectbox(
-            "Valuation start year",
-            options=years_val,
-            index=0,
-            key="pv_val_start_year",
-        )
-        val_start_month = st.selectbox(
-            "Valuation start month",
-            options=months_val,
-            index=0,
-            key="pv_val_start_month",
-            format_func=month_name,
-        )
-    with colv2:
-        val_end_year = st.selectbox(
-            "Valuation end year",
-            options=years_val,
-            index=len(years_val) - 1,
-            key="pv_val_end_year",
-        )
-        val_end_month = st.selectbox(
-            "Valuation end month",
-            options=months_val,
-            index=dt.date.today().month - 1,
-            key="pv_val_end_month",
-            format_func=month_name,
+    # === Form: period + mode + segment + metric + Update ===
+    st.subheader("4. Period and valuation options")
+
+    with st.form("pv_controls"):
+        colv1, colv2 = st.columns(2)
+        with colv1:
+            val_start_year = st.selectbox(
+                "Valuation start year",
+                options=years_val,
+                index=0,
+                key="pv_val_start_year",
+            )
+            val_start_month = st.selectbox(
+                "Valuation start month",
+                options=months_val,
+                index=0,
+                key="pv_val_start_month",
+                format_func=month_name,
+            )
+        with colv2:
+            val_end_year = st.selectbox(
+                "Valuation end year",
+                options=years_val,
+                index=len(years_val) - 1,
+                key="pv_val_end_year",
+            )
+            val_end_month = st.selectbox(
+                "Valuation end month",
+                options=months_val,
+                index=dt.date.today().month - 1,
+                key="pv_val_end_month",
+                format_func=month_name,
+            )
+
+        # Convert to month-end dates inside the form
+        val_start_date = month_year_to_last_day(val_start_year, val_start_month)
+        val_end_date = month_year_to_last_day(val_end_year, val_end_month)
+
+        val_mode = st.radio(
+            "Valuation mode",
+            options=[
+                "Valuations of historical portfolios",
+                "Historical valuations of current portfolio",
+            ],
+            horizontal=False,
+            key="pv_val_mode",
         )
 
-    val_start_date = month_year_to_last_day(val_start_year, val_start_month)
-    val_end_date = month_year_to_last_day(val_end_year, val_end_month)
+        val_segment = st.radio(
+            "Segment for valuations",
+            options=["Financials", "Non-financials", "Total"],
+            horizontal=True,
+            key="pv_val_segment",
+        )
 
+        val_metric = st.radio(
+            "Valuation metric",
+            options=["P/S", "P/B", "P/E"],
+            horizontal=True,
+            key="pv_val_metric",
+        )
+
+        run_charts = st.form_submit_button("Update valuations", type="primary")
+
+    # Do not compute anything until the user clicks Update
+    if not run_charts:
+        st.info("Adjust filters above and click **Update valuations** to see results.")
+        return
+
+    # Basic validation
     if val_start_date > val_end_date:
         st.error("Valuation start date must be earlier than end date.")
         return
 
-    val_mode = st.radio(
-        "Valuation mode",
-        options=[
-            "Valuations of historical portfolios",
-            "Historical valuations of current portfolio",
-        ],
-        horizontal=False,
-        key="pv_val_mode",
-    )
+    # 5) Compute valuations (precompute all combinations into cache)
+    st.subheader("5. Valuation time series")
 
-    val_segment = st.radio(
-        "Segment for valuations",
-        options=["Financials", "Non-financials", "Total"],
-        horizontal=True,
-        key="pv_val_segment",
-    )
+    # Define the universe of combinations we want to precompute
+    modes_to_precompute = [
+        "Valuations of historical portfolios",
+        "Historical valuations of current portfolio",
+    ]
+    segments_to_precompute = ["Financials", "Non-financials", "Total"]
+    metrics_to_precompute = ["P/S", "P/B", "P/E"]
 
-    val_metric = st.radio(
-        "Valuation metric",
-        options=["P/S", "P/B", "P/E"],
-        horizontal=True,
-        key="pv_val_metric",
-    )
+    with st.spinner("Computing portfolio valuations (warming cache for all combinations)..."):
+        # Warm the cache for all combinations for this universe + period
+        for m in modes_to_precompute:
+            for seg in segments_to_precompute:
+                for met in metrics_to_precompute:
+                    _ = cached_portfolio_valuations_timeseries(
+                        fund_ids=selected_fund_ids,
+                        focus_fund_id=focus_fund_id,
+                        start_date=val_start_date,
+                        end_date=val_end_date,
+                        segment_choice=seg,
+                        metric_choice=met,
+                        mode=m,
+                    )
 
-    # 4) Compute valuations
-    st.subheader("4. Valuation time series")
-
-    with st.spinner("Computing portfolio valuations..."):
+        # Now fetch the specific combination the user asked for
         try:
-            df_val = compute_portfolio_valuations_timeseries(
+            df_val = cached_portfolio_valuations_timeseries(
                 fund_ids=selected_fund_ids,
                 focus_fund_id=focus_fund_id,
                 start_date=val_start_date,
@@ -6191,10 +6259,10 @@ def portfolio_valuations_page():
             )
         except ValueError as ve:
             st.error(str(ve))
-            df_val = pd.DataFrame()
+            return
         except Exception as e:
             st.error(f"Error while computing valuations: {e}")
-            df_val = pd.DataFrame()
+            return
 
     if df_val.empty:
         st.info("No valuation data available for the selected filters.")
@@ -6226,7 +6294,6 @@ def portfolio_valuations_page():
     )
     st.altair_chart(val_chart, use_container_width=True)
 
- 
 
 
 def portfolio_page():
