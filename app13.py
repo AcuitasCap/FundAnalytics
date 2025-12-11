@@ -5199,13 +5199,21 @@ def performance_page():
 
         apply_filters = st.form_submit_button("Update", type="primary")
 
-    if not apply_filters:
-        st.info("Adjust period and analysis mode above, then click **Update**.")
-        return
+    # Track whether filters (period + mode) have been applied at least once
+    filters_applied = st.session_state.get("perf_filters_applied", False)
+    if apply_filters:
+        filters_applied = True
+        st.session_state["perf_filters_applied"] = True
 
     if end_domain <= start_domain:
         st.warning("End month must be after Start month.")
         return
+
+    # If user has never clicked Update at least once, don’t run any heavy logic yet
+    if not filters_applied:
+        st.info("Adjust period and analysis mode above, then click **Update**.")
+        return
+
 
     def window_ok(start_dt, end_dt, months: int) -> bool:
         return (start_dt + pd.DateOffset(months=months)) <= end_dt
