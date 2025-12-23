@@ -7008,6 +7008,596 @@ def housekeeping_page():
 
 
 
+
+# ======================== Fund Attribution Page ========================
+
+CASH_ANNUAL_RETURN = 0.07
+
+BENCH_NAME_NIFTY50  = "NIFTY 50 - TRI"
+BENCH_NAME_NIFTY500 = "NIFTY 500 - TRI"
+BENCH_NAME_NIFTY100 = "NIFTY 100 - TRI"  # assumed present in DB (you will upload)
+BENCH_NAME_MID150   = "Nifty Midcap 150 - TRI"
+BENCH_NAME_SMALL250 = "Nifty Smallcap 250 - TRI"
+
+LIKE_FOR_LIKE_BENCH = {
+    "Large": BENCH_NAME_NIFTY100,
+    "Mid":   BENCH_NAME_MID150,
+    "Small": BENCH_NAME_SMALL250,
+}
+
+def _to_month_end(d: dt.date) -> dt.date:
+    # Convert any date to month-end date
+    d = pd.to_datetime(d).date()
+    return month_year_to_last_day(d.year, d.month)
+
+def _month_ends_between(start_me: dt.date, end_me: dt.date) -> list:
+    idx = pd.date_range(start=pd.Timestamp(start_me), end=pd.Timestamp(end_me), freq="M")
+    return [x.date() for x in idx]
+
+def _monthly_cash_return() -> float:
+    # 7% annualized -> monthly compounded
+    return (1.0 + CASH_ANNUAL_RETURN) ** (1.0/12.0) - 1.0
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_attrib_raw_window(fund_id: int, end_month_end: dt.date, lookback_years: int = 10, data_version: str = "v1"):
+    """Load raw inputs for attribution for a single fund over [end-LOOKBACK, end]."""
+    engine = get_engine()
+    end_me = _to_month_end(end_month_end)
+    start_me = (pd.Timestamp(end_me) - pd.DateOffset(years=lookback_years)).to_period("M").to_timestamp("M").date()
+
+    # Holdings (all asset types)
+    q_hold = text("""
+        SELECT fund_id,
+               month_end::date AS month_end,
+               instrument_name,
+               asset_type,
+               isin,
+               holding_weight
+        FROM fundlab.fund_portfolio
+        WHERE fund_id = :fund_id
+          AND month_end BETWEEN :start_me AND :end_me
+        ORDER BY month_end, instrument_name
+    """)
+    h = pd.read_sql(q_hold, engine, params={"fund_id": fund_id, "start_me": start_me, "end_me": end_me})
+    if h.empty:
+        return {
+            "window_start": start_me,
+            "window_end": end_me,
+            "holdings": h,
+            "prices": pd.DataFrame(),
+            "size_band": pd.DataFrame(),
+            "bench_nav": pd.DataFrame(),
+            "stock_master": pd.DataFrame(),
+        }
+
+    h["month_end"] = pd.to_datetime(h["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
+
+    # Normalise holding_weight scale to 0-1 if it looks like percentages
+    hw = pd.to_numeric(h["holding_weight"], errors="coerce")
+    med = float(hw.dropna().median()) if not hw.dropna().empty else 0.0
+    if med > 1.5:
+        h["holding_weight"] = hw / 100.0
+    else:
+        h["holding_weight"] = hw
+
+    # ISIN list (exclude null/blank)
+    isins = sorted([x for x in h["isin"].dropna().astype(str).unique().tolist() if x.strip()])
+
+    # Stock master (names)
+    if isins:
+        q_sm = text("""
+            SELECT isin, company_name, industry, is_financial
+            FROM fundlab.stock_master
+            WHERE isin = ANY(:isins)
+        """)
+        sm = pd.read_sql(q_sm, engine, params={"isins": isins})
+    else:
+        sm = pd.DataFrame(columns=["isin", "company_name", "industry", "is_financial"])
+
+    # Prices (monthly)
+    if isins:
+        q_px = text("""
+            SELECT isin, price_date::date AS month_end, price
+            FROM fundlab.stock_price
+            WHERE isin = ANY(:isins)
+              AND price_date BETWEEN :start_me AND :end_me
+            ORDER BY isin, price_date
+        """)
+        px = pd.read_sql(q_px, engine, params={"isins": isins, "start_me": start_me, "end_me": end_me})
+        if not px.empty:
+            px["month_end"] = pd.to_datetime(px["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
+            px["price"] = pd.to_numeric(px["price"], errors="coerce")
+    else:
+        px = pd.DataFrame(columns=["isin", "month_end", "price"])
+
+    # Size band (monthly)
+    if isins:
+        q_sz = text("""
+            SELECT isin, band_date::date AS month_end, size_band
+            FROM fundlab.stock_size_band
+            WHERE isin = ANY(:isins)
+              AND band_date BETWEEN :start_me AND :end_me
+            ORDER BY isin, band_date
+        """)
+        sz = pd.read_sql(q_sz, engine, params={"isins": isins, "start_me": start_me, "end_me": end_me})
+        if not sz.empty:
+            sz["month_end"] = pd.to_datetime(sz["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
+            sz["size_band"] = sz["size_band"].astype(str)
+    else:
+        sz = pd.DataFrame(columns=["isin", "month_end", "size_band"])
+
+    # Benchmarks (monthly)
+    wanted = [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250]
+    q_b = text("""
+        SELECT b.bench_id,
+               b.bench_name,
+               bn.nav_date::date AS month_end,
+               bn.nav_value
+        FROM fundlab.benchmark b
+        JOIN fundlab.bench_nav bn
+          ON b.bench_id = bn.bench_id
+        WHERE b.bench_name = ANY(:names)
+          AND bn.nav_date BETWEEN :start_me AND :end_me
+        ORDER BY b.bench_name, bn.nav_date
+    """)
+    bn = pd.read_sql(q_b, engine, params={"names": wanted, "start_me": start_me, "end_me": end_me})
+    if not bn.empty:
+        bn["month_end"] = pd.to_datetime(bn["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
+        bn["nav_value"] = pd.to_numeric(bn["nav_value"], errors="coerce")
+
+    return {
+        "window_start": start_me,
+        "window_end": end_me,
+        "holdings": h,
+        "prices": px,
+        "size_band": sz,
+        "bench_nav": bn,
+        "stock_master": sm,
+    }
+
+def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, bench_mode: str):
+    """Return (stock_df, hit_df, category_df, diag). Contributions are Rs per 100 base."""
+    start_me = _to_month_end(start_date)
+    end_me = _to_month_end(end_date)
+
+    months = _month_ends_between(start_me, end_me)
+    if len(months) < 2:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"error": "Select at least two month-ends."}
+
+    h = raw["holdings"].copy()
+    px = raw["prices"].copy()
+    sz = raw["size_band"].copy()
+    bn = raw["bench_nav"].copy()
+    sm = raw["stock_master"].copy()
+
+    # Filter holdings to selected window (we will ffill)
+    h = h[(h["month_end"] >= months[0]) & (h["month_end"] <= months[-1])].copy()
+
+    # Build instrument_key
+    h["isin_str"] = h["isin"].astype(str)
+    h["instrument_key"] = np.where(
+        h["isin"].notna() & (h["isin_str"].str.strip() != "") & (h["isin_str"].str.lower() != "nan"),
+        h["isin_str"].str.strip(),
+        "NOISIN::" + h["instrument_name"].astype(str)
+    )
+
+    # Aggregate weights by month/instrument (avoid duplicates)
+    w = (
+        h.groupby(["month_end", "instrument_key", "asset_type"], as_index=False)["holding_weight"]
+         .sum()
+    )
+    w_piv = w.pivot_table(index="month_end", columns="instrument_key", values="holding_weight", aggfunc="sum")
+    w_piv = w_piv.reindex(months).ffill().fillna(0.0)
+
+    # Identify explicit cash instruments from asset_type == 'Cash'
+    cash_keys = set(
+        w.loc[w["asset_type"].astype(str).str.strip().str.lower() == "cash", "instrument_key"].unique().tolist()
+    )
+
+    # Add residual cash (if holdings do not sum to 1)
+    tot = w_piv.sum(axis=1)
+    residual = (1.0 - tot).clip(lower=0.0)
+    if residual.max() > 1e-8:
+        w_piv["CASH::RESIDUAL"] = residual
+        cash_keys.add("CASH::RESIDUAL")
+
+    instr_cols = w_piv.columns.tolist()
+
+    # Start weights (t0) and period ends (t1)
+    t0 = months[:-1]
+    t1 = months[1:]
+    w0_df = w_piv.loc[t0, :].copy()
+
+    # Price pivot for ISINs
+    isins = [c for c in instr_cols if not c.startswith("NOISIN::") and not c.startswith("CASH::")]
+    px_piv = pd.DataFrame(index=months, columns=isins, dtype=float)
+    if not px.empty and isins:
+        px2 = px[px["isin"].astype(str).isin(isins)].copy()
+        if not px2.empty:
+            pxp = px2.pivot_table(index="month_end", columns="isin", values="price", aggfunc="last").reindex(months)
+            for c in isins:
+                if c in pxp.columns:
+                    px_piv[c] = pd.to_numeric(pxp[c], errors="coerce")
+    # Benchmark nav pivot
+    bn_piv = pd.DataFrame(index=months)
+    if not bn.empty:
+        bnp = bn.pivot_table(index="month_end", columns="bench_name", values="nav_value", aggfunc="last").reindex(months)
+        bn_piv = bnp
+
+    def _bench_period_returns(bench_name: str) -> np.ndarray:
+        if bench_name not in bn_piv.columns:
+            return np.zeros(len(t1), dtype=float)
+        v0 = bn_piv.loc[t0, bench_name].to_numpy(dtype=float)
+        v1 = bn_piv.loc[t1, bench_name].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = (v1 / v0) - 1.0
+        r = np.where(np.isfinite(r), r, 0.0)
+        return r
+
+    r_n50 = _bench_period_returns(BENCH_NAME_NIFTY50)
+    r_n500 = _bench_period_returns(BENCH_NAME_NIFTY500)
+    r_n100 = _bench_period_returns(BENCH_NAME_NIFTY100)
+    r_mid150 = _bench_period_returns(BENCH_NAME_MID150)
+    r_small250 = _bench_period_returns(BENCH_NAME_SMALL250)
+
+    # Size band lookup at t0 for ISINs
+    size_lookup = {}
+    if not sz.empty and isins:
+        sz2 = sz[sz["isin"].astype(str).isin(isins)].copy()
+        sz2 = sz2[sz2["month_end"].isin(t0)]
+        if not sz2.empty:
+            size_lookup = sz2.set_index(["month_end","isin"])["size_band"].to_dict()
+
+    # Asset type lookup per instrument_key (take most recent non-null asset_type)
+    asset_map = (
+        w.sort_values(["instrument_key","month_end"])
+         .groupby("instrument_key")["asset_type"]
+         .last()
+         .to_dict()
+    )
+
+    # Instrument returns (fund) per period
+    r_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
+
+    # ISIN returns from price; missing => 0
+    if isins:
+        p0 = px_piv.loc[t0, isins].to_numpy(dtype=float)
+        p1 = px_piv.loc[t1, isins].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = (p1 / p0) - 1.0
+        r = np.where(np.isfinite(r), r, 0.0)
+        r_instr.loc[:, isins] = r
+
+    # Non-ISIN instruments default 0
+    for c in instr_cols:
+        if c.startswith("NOISIN::"):
+            r_instr[c] = 0.0
+
+    # Cash returns (7% annualized monthly)
+    cash_r = _monthly_cash_return()
+    for c in cash_keys:
+        if c in r_instr.columns:
+            r_instr[c] = cash_r
+
+    r_instr = r_instr.fillna(0.0)
+
+    # Benchmark returns per instrument
+    r_bm = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
+
+    if bench_mode == "Vs NIFTY 50":
+        broad = r_n50
+        for c in instr_cols:
+            r_bm[c] = broad
+    elif bench_mode == "Vs NIFTY 500":
+        broad = r_n500
+        for c in instr_cols:
+            r_bm[c] = broad
+    else:
+        # Like-for-like:
+        # - Cash: benchmarked to itself (same return) => zero alpha
+        # - ISINs: large/mid/small mapping (default Nifty50 if missing band or missing series)
+        # - Non-ISIN non-cash (e.g., 'Other Equities' without ISIN): benchmark to Nifty 50
+        for c in instr_cols:
+            if c in cash_keys or c.startswith("CASH::"):
+                r_bm[c] = r_instr[c].to_numpy(dtype=float)
+            elif c.startswith("NOISIN::"):
+                r_bm[c] = r_n50
+            else:
+                # ISIN
+                vals = np.zeros(len(t1), dtype=float)
+                for i in range(len(t1)):
+                    band = str(size_lookup.get((t0[i], c), "")).strip()
+                    bench_name = LIKE_FOR_LIKE_BENCH.get(band, BENCH_NAME_NIFTY50)
+                    if bench_name == BENCH_NAME_NIFTY100:
+                        vals[i] = r_n100[i]
+                    elif bench_name == BENCH_NAME_MID150:
+                        vals[i] = r_mid150[i]
+                    elif bench_name == BENCH_NAME_SMALL250:
+                        vals[i] = r_small250[i]
+                    else:
+                        vals[i] = r_n50[i]
+                r_bm[c] = vals
+
+    # Override rule: Overseas/ADR/Others equities benchmark to Nifty 50 in like-for-like
+    # (and cash handled already)
+    if bench_mode == "Like-for-like":
+        for c in instr_cols:
+            if c in cash_keys or c.startswith("CASH::") or c.startswith("NOISIN::"):
+                continue
+            at = str(asset_map.get(c, "")).strip()
+            if at in {"Overseas Equities", "ADRs & GDRs", "Others Equities", "Other Equities"}:
+                r_bm[c] = r_n50
+
+    r_bm = r_bm.fillna(0.0)
+
+    # Convert to numpy
+    w0 = w0_df.to_numpy(dtype=float)
+    r0 = r_instr.to_numpy(dtype=float)
+    rb = r_bm.to_numpy(dtype=float)
+
+    # Portfolio and benchmark-portfolio returns
+    rp = np.sum(w0 * r0, axis=1)
+    rbp = np.sum(w0 * rb, axis=1)
+
+    # Linking factors (base=100)
+    base = 100.0
+    link_fund = np.ones(len(t1), dtype=float)
+    link_bm = np.ones(len(t1), dtype=float)
+    for i in range(1, len(t1)):
+        link_fund[i] = link_fund[i-1] * (1.0 + rp[i-1])
+        link_bm[i] = link_bm[i-1] * (1.0 + rbp[i-1])
+
+    contrib_fund = (w0 * r0) * link_fund[:, None] * base
+    contrib_bm = (w0 * rb) * link_bm[:, None] * base
+
+    total_fund = contrib_fund.sum(axis=0)
+    total_bench = contrib_bm.sum(axis=0)
+    total_alpha = total_fund - total_bench
+
+    # Name map
+    name_map = {}
+    if not sm.empty:
+        name_map = dict(zip(sm["isin"].astype(str), sm["company_name"].astype(str)))
+
+    def _disp(instr: str) -> str:
+        if instr.startswith("NOISIN::"):
+            return instr.replace("NOISIN::", "")
+        if instr.startswith("CASH::"):
+            return "Cash (Residual)"
+        if instr in cash_keys:
+            return "Cash"
+        return name_map.get(instr, instr)
+
+    # Holding period months (periods where weight>0 at t0)
+    held_mask = (w0_df > 0).to_numpy()
+    held_months = held_mask.sum(axis=0).astype(int)
+    holding_years = held_months / 12.0
+
+    def _masked_cagr(ret_mat: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        out = np.full(ret_mat.shape[1], np.nan, dtype=float)
+        for j in range(ret_mat.shape[1]):
+            m = mask[:, j]
+            n = int(m.sum())
+            if n <= 0:
+                continue
+            gross = float(np.prod(1.0 + ret_mat[m, j]))
+            yrs = n / 12.0
+            if yrs > 0 and gross > 0:
+                out[j] = gross ** (1.0 / yrs) - 1.0
+        return out
+
+    stock_cagr = _masked_cagr(r0, held_mask)
+    bench_cagr = _masked_cagr(rb, held_mask)
+    outperf = stock_cagr - bench_cagr
+
+    stock_df = pd.DataFrame({
+        "Stock name": [_disp(c) for c in instr_cols],
+        "Stock contribution (Rs.)": np.round(total_fund, 2),
+        "Benchmark contribution (Rs.)": np.round(total_bench, 2),
+        "Alpha contribution (Rs.)": np.round(total_alpha, 2),
+        "Holding period (years)": np.round(holding_years, 2),
+        "Stock CAGR": np.round(stock_cagr * 100.0, 2),
+        "Benchmark CAGR": np.round(bench_cagr * 100.0, 2),
+        "Stock outperformance (pp)": np.round(outperf * 100.0, 2),
+    }).sort_values("Alpha contribution (Rs.)", ascending=False).reset_index(drop=True)
+
+    # Hit-rate summary (exclude cash)
+    is_cash_row = stock_df["Stock name"].astype(str).str.strip().str.lower().str.startswith("cash")
+    non_cash = stock_df.loc[~is_cash_row].copy()
+
+    winners = non_cash.loc[non_cash["Stock outperformance (pp)"] > 0]
+    losers = non_cash.loc[non_cash["Stock outperformance (pp)"] <= 0]
+
+    hit_df = pd.DataFrame([{
+        "Hit-rate (winners/total)": f"{len(winners)} / {len(non_cash)}" if len(non_cash) else "0 / 0",
+        "Avg holding period winners (yrs)": round(float(winners["Holding period (years)"].mean()), 2) if len(winners) else np.nan,
+        "Avg holding period losers (yrs)": round(float(losers["Holding period (years)"].mean()), 2) if len(losers) else np.nan,
+        "Avg alpha on winners (%)": round(float(winners["Stock outperformance (pp)"].mean()), 2) if len(winners) else np.nan,
+        "Avg alpha on losers (%)": round(float(losers["Stock outperformance (pp)"].mean()), 2) if len(losers) else np.nan,
+    }])
+
+    # Category table: Large/Mid/Small/Cash
+    categories = ["Large", "Mid", "Small", "Cash"]
+    cat_fund = {c: 0.0 for c in categories}
+    cat_bench = {c: 0.0 for c in categories}
+
+    contrib_f_df = pd.DataFrame(contrib_fund, index=t1, columns=instr_cols)
+    contrib_b_df = pd.DataFrame(contrib_bm, index=t1, columns=instr_cols)
+
+    for i in range(len(t0)):
+        start_m = t0[i]
+        end_m = t1[i]
+        for instr in instr_cols:
+            if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+                cat = "Cash"
+            else:
+                band = str(size_lookup.get((start_m, instr), "")).strip()
+                cat = band if band in {"Large","Mid","Small"} else "Large"
+            cat_fund[cat] += float(contrib_f_df.loc[end_m, instr])
+            cat_bench[cat] += float(contrib_b_df.loc[end_m, instr])
+
+    # Category CAGR: compute using category-level weighted returns each period
+    r_instr_df = pd.DataFrame(r0, index=t1, columns=instr_cols)
+    r_bm_df = pd.DataFrame(rb, index=t1, columns=instr_cols)
+    w_start_df = w0_df.copy()
+
+    cat_cagr = {}
+    cat_bm_cagr = {}
+
+    for cat in categories:
+        gross_cat = 1.0
+        gross_bm_cat = 1.0
+        m_count = 0
+        for i in range(len(t0)):
+            start_m = t0[i]
+            end_m = t1[i]
+
+            members = []
+            for instr in instr_cols:
+                if cat == "Cash":
+                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+                        members.append(instr)
+                else:
+                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+                        continue
+                    band = str(size_lookup.get((start_m, instr), "")).strip()
+                    band = band if band in {"Large","Mid","Small"} else "Large"
+                    if band == cat:
+                        members.append(instr)
+
+            if not members:
+                continue
+            denom = float(w_start_df.loc[start_m, members].sum())
+            if denom <= 0:
+                continue
+
+            r_cat = float((w_start_df.loc[start_m, members] * r_instr_df.loc[end_m, members]).sum() / denom)
+            r_cat_bm = float((w_start_df.loc[start_m, members] * r_bm_df.loc[end_m, members]).sum() / denom)
+
+            gross_cat *= (1.0 + r_cat)
+            gross_bm_cat *= (1.0 + r_cat_bm)
+            m_count += 1
+
+        if m_count > 0:
+            yrs = m_count / 12.0
+            cat_cagr[cat] = gross_cat ** (1.0/yrs) - 1.0
+            cat_bm_cagr[cat] = gross_bm_cat ** (1.0/yrs) - 1.0
+        else:
+            cat_cagr[cat] = np.nan
+            cat_bm_cagr[cat] = np.nan
+
+    cat_df = pd.DataFrame([{
+        "Category": c,
+        "Category contribution (Rs.)": round(cat_fund[c], 2),
+        "Benchmark contribution (Rs.)": round(cat_bench[c], 2),
+        "Category alpha contribution (Rs.)": round(cat_fund[c] - cat_bench[c], 2),
+        "Category CAGR": round(cat_cagr[c] * 100.0, 2) if pd.notna(cat_cagr[c]) else np.nan,
+        "Benchmark CAGR": round(cat_bm_cagr[c] * 100.0, 2) if pd.notna(cat_bm_cagr[c]) else np.nan,
+        "Category outperformance (pp)": round((cat_cagr[c] - cat_bm_cagr[c]) * 100.0, 2) if pd.notna(cat_cagr[c]) else np.nan,
+    } for c in categories])
+
+    diag = {
+        "months": months,
+        "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
+    }
+    return stock_df, hit_df, cat_df, diag
+
+def fund_attribution_page():
+    home_button()
+    st.title("Fund attribution")
+
+    # 1) Category
+    categories = fetch_categories()
+    if not categories:
+        st.warning("No categories found.")
+        return
+
+    cat = st.radio("1. Select category", categories, horizontal=True, key="fa_category")
+
+    # 2) Focus fund
+    funds_df = fetch_funds_for_categories([cat])
+    if funds_df.empty:
+        st.warning("No funds found for this category.")
+        return
+
+    focus_label = st.selectbox(
+        "2. Select focus fund",
+        options=funds_df["fund_name"].tolist(),
+        key="fa_focus_fund",
+    )
+    focus_id = int(funds_df.loc[funds_df["fund_name"] == focus_label, "fund_id"].iloc[0])
+
+    # 3) Benchmark mode (3 options)
+    bench_mode = st.radio(
+        "3. Attribution benchmark mode",
+        options=["Vs NIFTY 50", "Vs NIFTY 500", "Like-for-like"],
+        horizontal=True,
+        key="fa_bench_mode",
+    )
+
+    # 4) Start/end period below radio
+    with st.form("fa_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            start_in = st.date_input("4. Start period (any date in month)", value=dt.date(dt.date.today().year-3, dt.date.today().month, 1), key="fa_start")
+        with c2:
+            end_in = st.date_input("5. End period (any date in month)", value=dt.date.today(), key="fa_end")
+
+        lookback = st.selectbox("Lookback window (years)", options=[5, 10, 15], index=1, key="fa_lookback")
+        submit = st.form_submit_button("Submit", type="primary")
+
+    if not submit:
+        st.info("Select inputs above and click Submit.")
+        return
+
+    start_me = _to_month_end(start_in)
+    end_me = _to_month_end(end_in)
+    if start_me > end_me:
+        st.error("Start period must be before end period.")
+        return
+
+    # 10-year cache anchored to end period
+    with st.spinner("Loading fund history (cached) ..."):
+        raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback), data_version="v1")
+
+    if raw["holdings"].empty:
+        st.warning("No holdings data found for this fund in the selected window.")
+        return
+
+    if start_me < raw["window_start"]:
+        st.warning(f"Start period {start_me} is older than cached window start {raw['window_start']}. Increase lookback window.")
+        return
+
+    with st.spinner("Computing attribution ..."):
+        stock_df, hit_df, cat_df, diag = _compute_attribution(raw, start_me, end_me, bench_mode)
+
+    if "error" in diag:
+        st.error(diag["error"])
+        return
+
+    # Benchmark warnings
+    miss = diag.get("missing_benchmarks", [])
+    if bench_mode == "Like-for-like":
+        needed = [BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250]
+        miss_needed = [x for x in needed if x in miss]
+        if miss_needed:
+            st.warning("Missing benchmark NAV series in DB (will default missing benchmark returns to 0): " + ", ".join(miss_needed))
+    else:
+        needed = BENCH_NAME_NIFTY50 if bench_mode == "Vs NIFTY 50" else BENCH_NAME_NIFTY500
+        if needed in miss:
+            st.warning(f"Missing benchmark NAV series in DB for {needed} (benchmark returns will default to 0).")
+
+    st.subheader("1) Stock-level attribution")
+    st.dataframe(stock_df, use_container_width=True)
+
+    st.subheader("2) Hit-rate summary (excluding cash)")
+    st.dataframe(hit_df, use_container_width=True)
+
+    st.subheader("3) Category-level attribution")
+    st.dataframe(cat_df, use_container_width=True)
+
+
+
 def home_page():
     st.subheader("Welcome to the Fund Analytics Dashboard")
 
@@ -7038,6 +7628,10 @@ def home_page():
 
     if st.button("💹 Portfolio valuations"):
         st.session_state["page"] = "Portfolio valuations"
+        st.rerun()
+
+    if st.button("📉 Fund attribution"):
+        st.session_state["page"] = "Fund attribution"
         st.rerun()
 
     if st.button("📂 Portfolio"):
@@ -7075,6 +7669,8 @@ def main():
         portfolio_quality_page()
     elif page == "Portfolio valuations":
         portfolio_valuations_page()
+    elif page == "Fund attribution":
+        fund_attribution_page()
     elif page == "Portfolio":
         portfolio_page()
     elif page == "Update DB":
