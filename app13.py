@@ -7194,40 +7194,38 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     # Filter holdings to selected window (we will ffill)
     h = h[(h["month_end"] >= months[0]) & (h["month_end"] <= months[-1])].copy()
 
-    # Ensure holding_weight is numeric; DB stores as "out of 100" (i.e., 5.25 means 5.25%)
+    # Ensure holding_weight is numeric (NO scaling, NO /100 here)
     h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
-    # Convert to decimal weights (0-1)
-    h["holding_weight"] = h["holding_weight"] / 100.0
-
-    # Build instrument_key
-    h["isin_str"] = h["isin"].astype(str)
-    h["instrument_key"] = np.where(
-        h["isin"].notna() & (h["isin_str"].str.strip() != "") & (h["isin_str"].str.lower() != "nan"),
-        h["isin_str"].str.strip(),
-        "NOISIN::" + h["instrument_name"].astype(str)
-    )
 
     # Aggregate weights by month/instrument (avoid duplicates)
     w = (
         h.groupby(["month_end", "instrument_key", "asset_type"], as_index=False)["holding_weight"]
-         .sum()
+        .sum()
     )
 
-    w_piv = w.pivot_table(index="month_end", columns="instrument_key", values="holding_weight", aggfunc="sum")
+    # Pivot to month x instrument matrix
+    w_piv = w.pivot_table(
+        index="month_end",
+        columns="instrument_key",
+        values="holding_weight",
+        aggfunc="sum"
+    )
+
+    # Reindex to full month grid, forward-fill holdings between snapshots, fill missing with 0
     w_piv = w_piv.reindex(months).ffill().fillna(0.0)
 
-    # Identify explicit cash instruments from asset_type == 'Cash'
-    cash_keys = set(
-        w.loc[w["asset_type"].astype(str).str.strip().str.lower() == "cash", "instrument_key"].unique().tolist()
-    )
+    # NORMALIZE EACH MONTH so weights sum to 1.0 using only available rows (stocks + cash)
+    row_sum = w_piv.sum(axis=1)
 
-    # Add residual cash (if holdings do not sum to 1.0 after /100 conversion)
-    # (This covers cases where holdings table excludes cash and sums < 100 in DB)
-    tot = w_piv.sum(axis=1)
-    residual = (1.0 - tot).clip(lower=0.0)
-    if residual.max() > 1e-8:
-        w_piv["CASH::RESIDUAL"] = residual
-        cash_keys.add("CASH::RESIDUAL")
+    # Avoid division by zero in months with no data (keep all zeros)
+    w_piv = w_piv.div(row_sum.replace(0.0, np.nan), axis=0).fillna(0.0)
+
+    # Identify explicit cash instruments ONLY from asset_type == 'Cash' (no residual cash)
+    cash_keys = set(
+        w.loc[w["asset_type"].astype(str).str.strip().str.lower() == "cash", "instrument_key"]
+        .unique()
+        .tolist()
+    )
 
     instr_cols = w_piv.columns.tolist()
 
@@ -7235,6 +7233,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     t0 = months[:-1]
     t1 = months[1:]
     w0_df = w_piv.loc[t0, :].copy()
+
 
     # Price pivot for ISINs
     isins = [c for c in instr_cols if not c.startswith("NOISIN::") and not c.startswith("CASH::")]
