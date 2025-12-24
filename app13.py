@@ -7197,6 +7197,37 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     # Ensure holding_weight is numeric (NO scaling, NO /100 here)
     h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
 
+    # --- SAFETY: ensure required columns exist before groupby ---
+    missing = [c for c in ["month_end", "holding_weight"] if c not in h.columns]
+    if missing:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+            "error": f"_compute_attribution(): holdings dataframe missing columns: {missing}. "
+                    f"Available columns: {list(h.columns)}"
+        }
+
+    # asset_type should exist per schema; if not, create a placeholder (logic will still work)
+    if "asset_type" not in h.columns:
+        h["asset_type"] = "Unknown"
+
+    # instrument_key must exist for the rebasing logic; create it if missing
+    if "instrument_key" not in h.columns:
+        # Ensure supporting cols exist (fallbacks)
+        if "instrument_name" not in h.columns:
+            h["instrument_name"] = ""
+        if "isin" not in h.columns:
+            h["isin"] = np.nan
+
+        isin_str = h["isin"].astype(str)
+        h["instrument_key"] = np.where(
+            h["isin"].notna() & (isin_str.str.strip() != "") & (isin_str.str.lower() != "nan"),
+            isin_str.str.strip(),
+            "NOISIN::" + h["instrument_name"].astype(str)
+        )
+
+    # Ensure month_end is month-end timestamp (consistent with the rest of the code)
+    h["month_end"] = pd.to_datetime(h["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+
+
     # Aggregate weights by month/instrument (avoid duplicates)
     w = (
         h.groupby(["month_end", "instrument_key", "asset_type"], as_index=False)["holding_weight"]
