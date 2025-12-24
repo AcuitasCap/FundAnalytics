@@ -7068,17 +7068,37 @@ def _load_attrib_raw_window(fund_id: int, end_month_end: dt.date, lookback_years
             "size_band": pd.DataFrame(),
             "bench_nav": pd.DataFrame(),
             "stock_master": pd.DataFrame(),
+            "weight_scale": None,
         }
 
     h["month_end"] = pd.to_datetime(h["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
 
-    # Normalise holding_weight scale to 0-1 if it looks like percentages
+    # Normalise holding_weight scale to 0-1.
+    # Different feeds store weights as decimals (0-1), percent (0-100) or basis points (0-10000).
     hw = pd.to_numeric(h["holding_weight"], errors="coerce")
-    med = float(hw.dropna().median()) if not hw.dropna().empty else 0.0
-    if med > 1.5:
-        h["holding_weight"] = hw / 100.0
-    else:
+    hw_nonnull = hw.dropna()
+
+    # Use both per-row magnitudes and per-month totals to infer scale robustly.
+    if hw_nonnull.empty:
+        weight_scale = 1.0
         h["holding_weight"] = hw
+    else:
+        per_month_sum = hw_nonnull.groupby(h.loc[hw_nonnull.index, "month_end"]).sum()
+        med_sum = float(per_month_sum.median()) if not per_month_sum.empty else float(hw_nonnull.sum())
+        max_w = float(hw_nonnull.max())
+
+        # Heuristic scale detection:
+        # - If totals look like ~10000 (bps) => divide by 10000
+        # - Else if totals look like ~100 (percent) or max weight > 1 => divide by 100
+        # - Else already 0-1
+        if med_sum > 1500 or max_w > 1500:
+            weight_scale = 1.0 / 10000.0
+        elif med_sum > 15 or max_w > 1.5:
+            weight_scale = 1.0 / 100.0
+        else:
+            weight_scale = 1.0
+
+        h["holding_weight"] = hw * weight_scale
 
     # ISIN list (exclude null/blank)
     isins = sorted([x for x in h["isin"].dropna().astype(str).unique().tolist() if x.strip()])
@@ -7153,6 +7173,7 @@ def _load_attrib_raw_window(fund_id: int, end_month_end: dt.date, lookback_years
         "size_band": sz,
         "bench_nav": bn,
         "stock_master": sm,
+        "weight_scale": float(weight_scale),
     }
 
 def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, bench_mode: str):
@@ -7173,6 +7194,11 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     # Filter holdings to selected window (we will ffill)
     h = h[(h["month_end"] >= months[0]) & (h["month_end"] <= months[-1])].copy()
 
+    # Ensure holding_weight is numeric; DB stores as "out of 100" (i.e., 5.25 means 5.25%)
+    h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
+    # Convert to decimal weights (0-1)
+    h["holding_weight"] = h["holding_weight"] / 100.0
+
     # Build instrument_key
     h["isin_str"] = h["isin"].astype(str)
     h["instrument_key"] = np.where(
@@ -7186,6 +7212,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         h.groupby(["month_end", "instrument_key", "asset_type"], as_index=False)["holding_weight"]
          .sum()
     )
+
     w_piv = w.pivot_table(index="month_end", columns="instrument_key", values="holding_weight", aggfunc="sum")
     w_piv = w_piv.reindex(months).ffill().fillna(0.0)
 
@@ -7194,7 +7221,8 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         w.loc[w["asset_type"].astype(str).str.strip().str.lower() == "cash", "instrument_key"].unique().tolist()
     )
 
-    # Add residual cash (if holdings do not sum to 1)
+    # Add residual cash (if holdings do not sum to 1.0 after /100 conversion)
+    # (This covers cases where holdings table excludes cash and sums < 100 in DB)
     tot = w_piv.sum(axis=1)
     residual = (1.0 - tot).clip(lower=0.0)
     if residual.max() > 1e-8:
@@ -7218,6 +7246,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
             for c in isins:
                 if c in pxp.columns:
                     px_piv[c] = pd.to_numeric(pxp[c], errors="coerce")
+
     # Benchmark nav pivot
     bn_piv = pd.DataFrame(index=months)
     if not bn.empty:
@@ -7246,11 +7275,11 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         sz2 = sz[sz["isin"].astype(str).isin(isins)].copy()
         sz2 = sz2[sz2["month_end"].isin(t0)]
         if not sz2.empty:
-            size_lookup = sz2.set_index(["month_end","isin"])["size_band"].to_dict()
+            size_lookup = sz2.set_index(["month_end", "isin"])["size_band"].to_dict()
 
     # Asset type lookup per instrument_key (take most recent non-null asset_type)
     asset_map = (
-        w.sort_values(["instrument_key","month_end"])
+        w.sort_values(["instrument_key", "month_end"])
          .groupby("instrument_key")["asset_type"]
          .last()
          .to_dict()
@@ -7338,6 +7367,13 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     # Portfolio and benchmark-portfolio returns
     rp = np.sum(w0 * r0, axis=1)
     rbp = np.sum(w0 * rb, axis=1)
+
+    # Sanity check: with weights correctly scaled to decimals, extreme monthly Rp should be rare.
+    # Keep the check, but this should no longer trigger due to scaling.
+    if np.nanmax(np.abs(rp)) > 2.0:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+            "error": f"Unrealistic monthly portfolio return detected (max |Rp|={np.nanmax(np.abs(rp)):.2f}). Check holdings/price data integrity.",
+        }
 
     # Linking factors (base=100)
     base = 100.0
@@ -7432,7 +7468,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
                 cat = "Cash"
             else:
                 band = str(size_lookup.get((start_m, instr), "")).strip()
-                cat = band if band in {"Large","Mid","Small"} else "Large"
+                cat = band if band in {"Large", "Mid", "Small"} else "Large"
             cat_fund[cat] += float(contrib_f_df.loc[end_m, instr])
             cat_bench[cat] += float(contrib_b_df.loc[end_m, instr])
 
@@ -7461,7 +7497,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
                     if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
                         continue
                     band = str(size_lookup.get((start_m, instr), "")).strip()
-                    band = band if band in {"Large","Mid","Small"} else "Large"
+                    band = band if band in {"Large", "Mid", "Small"} else "Large"
                     if band == cat:
                         members.append(instr)
 
@@ -7480,8 +7516,8 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
 
         if m_count > 0:
             yrs = m_count / 12.0
-            cat_cagr[cat] = gross_cat ** (1.0/yrs) - 1.0
-            cat_bm_cagr[cat] = gross_bm_cat ** (1.0/yrs) - 1.0
+            cat_cagr[cat] = gross_cat ** (1.0 / yrs) - 1.0
+            cat_bm_cagr[cat] = gross_bm_cat ** (1.0 / yrs) - 1.0
         else:
             cat_cagr[cat] = np.nan
             cat_bm_cagr[cat] = np.nan
@@ -7501,6 +7537,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
     }
     return stock_df, hit_df, cat_df, diag
+
 
 def fund_attribution_page():
     home_button()
@@ -7537,11 +7574,22 @@ def fund_attribution_page():
 
     # 4) Start/end period below radio
     with st.form("fa_form"):
-        c1, c2 = st.columns(2)
+        today = dt.date.today()
+        years = list(range(today.year - 15, today.year + 1))
+        months = list(range(1, 13))
+
+        def _mname(m: int) -> str:
+            return dt.date(2000, m, 1).strftime("%b")
+
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
-            start_in = st.date_input("4. Start period (any date in month)", value=dt.date(dt.date.today().year-3, dt.date.today().month, 1), key="fa_start")
+            start_year = st.selectbox("4. Start year", years, index=years.index(today.year - 3) if (today.year - 3) in years else 0, key="fa_start_year")
         with c2:
-            end_in = st.date_input("5. End period (any date in month)", value=dt.date.today(), key="fa_end")
+            start_month = st.selectbox("Start month", months, index=today.month - 1, format_func=_mname, key="fa_start_month")
+        with c3:
+            end_year = st.selectbox("5. End year", years, index=len(years) - 1, key="fa_end_year")
+        with c4:
+            end_month = st.selectbox("End month", months, index=today.month - 1, format_func=_mname, key="fa_end_month")
 
         lookback = st.selectbox("Lookback window (years)", options=[5, 10, 15], index=1, key="fa_lookback")
         submit = st.form_submit_button("Submit", type="primary")
@@ -7550,8 +7598,8 @@ def fund_attribution_page():
         st.info("Select inputs above and click Submit.")
         return
 
-    start_me = _to_month_end(start_in)
-    end_me = _to_month_end(end_in)
+    start_me = _to_month_end(dt.date(int(start_year), int(start_month), 1))
+    end_me = _to_month_end(dt.date(int(end_year), int(end_month), 1))
     if start_me > end_me:
         st.error("Start period must be before end period.")
         return
@@ -7559,6 +7607,10 @@ def fund_attribution_page():
     # 10-year cache anchored to end period
     with st.spinner("Loading fund history (cached) ..."):
         raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback), data_version="v1")
+
+    if raw.get("weight_scale") not in (None, 1.0):
+        st.caption(f"Note: holding_weight scale detected as {raw['weight_scale']:.6f} and normalised accordingly.")
+
 
     if raw["holdings"].empty:
         st.warning("No holdings data found for this fund in the selected window.")
