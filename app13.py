@@ -1589,41 +1589,42 @@ FM_TENURE_COLS = {
 def _parse_month_year(series: pd.Series, colname: str, allow_blank: bool) -> pd.Series:
     """
     Accepts:
-      - Excel dates / pandas Timestamps (e.g., 2024-05-31)
-      - Strings like 'May-2024', 'May 2024', '2024-05-31', etc.
+    - Excel dates / pandas Timestamps (e.g., 2024-05-31)
+    - Strings like 'May-2024', 'May 2024', '2024-05', etc.
 
     Returns:
-      - Timestamp normalized to MONTH (canonical day=1)
+    - pandas Timestamp normalized to month (day=1)
     """
-    s = series.copy()
 
-    # Identify blanks
-    s_str = s.astype(str).str.strip()
-    blanks = s.isna() | s_str.eq("") | s_str.str.lower().isin(["nan", "nat", "none", "null"])
+    # If pandas already parsed it as datetime → accept directly
+    if pd.api.types.is_datetime64_any_dtype(series):
+        dt = series.copy()
+    else:
+        s = series.astype(str).str.strip()
+        blanks = s.eq("") | s.str.lower().isin(["nan", "nat", "none", "null"])
 
-    if not allow_blank and blanks.any():
-        raise ValueError(f"Blank values in '{colname}'. Expected a month-year value.")
+        if not allow_blank and blanks.any():
+            raise ValueError(f"Blank values in '{colname}'. Expected month-year.")
 
-    # First attempt: parse generally (this will handle real Excel dates and many strings)
-    dt = pd.to_datetime(s.where(~blanks, pd.NA), errors="coerce", dayfirst=True)
-
-    # Second attempt (only for those still NaT): try strict Mmm-YYYY
-    mask_retry = (~blanks) & dt.isna()
-    if mask_retry.any():
-        dt2 = pd.to_datetime(s_str.where(mask_retry, pd.NA), format="%b-%Y", errors="coerce")
-        dt.loc[mask_retry] = dt2.loc[mask_retry]
-
-    bad = (~blanks) & dt.isna()
-    if bad.any():
-        sample = series[bad].head(10).tolist()
-        raise ValueError(
-            f"Invalid '{colname}' values. Expect Month-Year (e.g., Jan-2024) or a valid Excel date. Sample: {sample}"
+        dt = pd.to_datetime(
+            s.where(~blanks, pd.NA),
+            errors="coerce",
+            dayfirst=True,
         )
 
-    # Normalize to month granularity (canonical day=1)
+        bad = (~blanks) & dt.isna()
+        if bad.any():
+            sample = series[bad].head(10).tolist()
+            raise ValueError(
+                f"Invalid '{colname}' values. Expected month/year (e.g. Jan-2024) or Excel date. "
+                f"Sample: {sample}"
+            )
+
+    # Normalize to MONTH only (canonical)
     dt = dt.dt.to_period("M").dt.to_timestamp()
 
     return dt
+
 
 
 def validate_fund_manager_tenure(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
