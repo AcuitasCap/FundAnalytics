@@ -6669,28 +6669,129 @@ def portfolio_valuations_page():
 
 
 def fund_manager_tenure_page():
-    st.header("Fund manager tenure")
+    import datetime as dt
+    import matplotlib.pyplot as plt
 
+    st.subheader("Fund manager tenure")
+
+    # -----------------------------
+    # Helper: render relay chart
+    # -----------------------------
+    def _render_tenure_chart(df_focus: pd.DataFrame):
+        if df_focus.empty:
+            st.info("No fund manager tenure data available for this fund.")
+            return
+
+        # Ensure datetime
+        df = df_focus.copy()
+        df["from_date"] = pd.to_datetime(df["from_date"])
+        df["to_date_filled"] = pd.to_datetime(df["to_date"]).fillna(pd.Timestamp.today())
+
+        # Oldest at top
+        df = df.sort_values(["from_date", "to_date_filled", "fund_manager"]).reset_index(drop=True)
+        df["row"] = range(len(df))
+        df["row_inv"] = (len(df) - 1) - df["row"]
+
+        # Identify current/latest
+        if df["to_date"].isna().any():
+            df["is_current"] = df["to_date"].isna()
+        else:
+            df["is_current"] = df["to_date_filled"].eq(df["to_date_filled"].max())
+
+        # Convert to matplotlib numeric dates
+        x_start = df["from_date"].map(lambda x: x.to_pydatetime()).tolist()
+        x_end = df["to_date_filled"].map(lambda x: x.to_pydatetime()).tolist()
+
+        fig_h = max(2.5, 0.45 * len(df))
+        fig, ax = plt.subplots(figsize=(12, fig_h))
+
+        for i, r in df.iterrows():
+            y = df.loc[i, "row_inv"]
+            start = df.loc[i, "from_date"].to_pydatetime()
+            end = df.loc[i, "to_date_filled"].to_pydatetime()
+
+            # Bar thickness
+            height = 0.7
+
+            # Highlight current manager(s)
+            if bool(r["is_current"]):
+                ax.broken_barh([(dt.date2num(start), dt.date2num(end) - dt.date2num(start))],
+                               (y - height / 2, height))
+            else:
+                # muted bars: use alpha via facecolor default; set hatch to differentiate without heavy styling
+                ax.broken_barh([(dt.date2num(start), dt.date2num(end) - dt.date2num(start))],
+                               (y - height / 2, height),
+                               alpha=0.25)
+
+            # Label centered
+            mid = start + (end - start) / 2
+            ax.text(dt.date2num(mid), y, str(r["fund_manager"]), va="center", ha="center", fontsize=9)
+
+        # X-axis formatting (years)
+        ax.xaxis_date()
+        ax.set_yticks([])  # no y-axis
+        ax.set_ylim(-1, len(df))
+        ax.set_xlabel("")  # no axis title
+        ax.grid(axis="x", alpha=0.2)
+
+        st.pyplot(fig, clear_figure=True)
+
+        # Current manager summary
+        cur = df[df["is_current"]].copy()
+        if not cur.empty:
+            today = pd.Timestamp.today()
+            cur["years"] = (today - cur["from_date"]).dt.days / 365.25
+            cur = cur.sort_values("from_date")
+            parts = [f"{row.fund_manager} managing since the past {row.years:.1f} years"
+                     for row in cur.itertuples(index=False)]
+            st.caption("Current fund manager: " + "; ".join(parts))
+
+    # -----------------------------
+    # Step 1: Category selection (checkboxes) inside a form
+    # -----------------------------
     categories = fetch_categories()
     if not categories:
         st.error("No categories available.")
         return
 
-    with st.form("fm_tenure_form"):
-        selected_categories = st.multiselect(
-            "Select fund categories",
-            options=categories,
-        )
+    # Use session_state to persist selection across reruns
+    if "fm_selected_categories" not in st.session_state:
+        st.session_state["fm_selected_categories"] = []
+    if "fm_categories_submitted" not in st.session_state:
+        st.session_state["fm_categories_submitted"] = False
+
+    with st.form("fm_category_form"):
+        st.subheader("1. Select categories")
+
+        selected = []
+        cols = st.columns(min(4, len(categories)))
+        for i, cat in enumerate(categories):
+            with cols[i % len(cols)]:
+                key = f"fm_cat_{cat}"
+                default_checked = cat in st.session_state["fm_selected_categories"]
+                checked = st.checkbox(cat, value=default_checked, key=key)
+                if checked:
+                    selected.append(cat)
+
         submitted = st.form_submit_button("Submit")
 
-    if not submitted:
+    if submitted:
+        st.session_state["fm_selected_categories"] = selected
+        st.session_state["fm_categories_submitted"] = True
+        # Clear downstream cached selections when categories change
+        st.session_state.pop("fm_focus_fund_name", None)
+
+    if not st.session_state["fm_categories_submitted"]:
         return
 
+    selected_categories = st.session_state["fm_selected_categories"]
     if not selected_categories:
         st.warning("Please select at least one category.")
         return
 
-    # Pull funds in selected categories
+    # -----------------------------
+    # Step 2: Universe pull (cached) + focus fund selectbox that does NOT reset the page
+    # -----------------------------
     df_funds = fetch_funds_by_categories(selected_categories)
     if df_funds.empty:
         st.info("No funds found for selected categories.")
@@ -6699,18 +6800,48 @@ def fund_manager_tenure_page():
     fund_names = df_funds["fund_name"].tolist()
     fund_name_to_id = dict(zip(df_funds["fund_name"], df_funds["fund_id"]))
 
-    focus_fund = st.selectbox("Focus fund", options=fund_names)
+    st.subheader("2. Select focus fund")
+
+    # Persist focus fund across reruns
+    if "fm_focus_fund_name" not in st.session_state:
+        st.session_state["fm_focus_fund_name"] = fund_names[0]
+
+    # If previously selected fund no longer in universe, reset to first
+    if st.session_state["fm_focus_fund_name"] not in fund_names:
+        st.session_state["fm_focus_fund_name"] = fund_names[0]
+
+    focus_fund = st.selectbox(
+        "Focus fund",
+        options=fund_names,
+        index=fund_names.index(st.session_state["fm_focus_fund_name"]),
+        key="fm_focus_fund_selectbox",
+    )
+    st.session_state["fm_focus_fund_name"] = focus_fund
     focus_fund_id = int(fund_name_to_id[focus_fund])
 
-    # Pull tenure data (cached)
+    # -----------------------------
+    # Step 3: Pull tenure + render chart
+    # -----------------------------
     df_tenure = fetch_fund_manager_tenure(df_funds["fund_id"].astype(int).tolist())
+    if df_tenure.empty:
+        st.info("No fund manager tenure data available.")
+        return
 
-    st.subheader(f"Fund manager history: {focus_fund}")
+    df_focus = df_tenure[df_tenure["fund_id"] == focus_fund_id].copy()
+    if df_focus.empty:
+        st.info("No tenure rows available for the selected focus fund.")
+        return
 
-    df_focus = prepare_focus_fund_timeline(df_tenure, focus_fund_id)
+    st.markdown(f"### Fund manager history – **{focus_fund}**")
+    _render_tenure_chart(df_focus)
 
-    render_fund_manager_tenure_chart(df_focus)
-    render_current_manager_summary(df_focus)
+    with st.expander("Show underlying tenure rows"):
+        show = df_focus.copy()
+        show["from_date"] = pd.to_datetime(show["from_date"]).dt.strftime("%b-%Y")
+        show["to_date"] = pd.to_datetime(show["to_date"]).dt.strftime("%b-%Y")
+        show.loc[show["to_date"].isna(), "to_date"] = "Current"
+        st.dataframe(show[["fund_manager", "from_date", "to_date"]], use_container_width=True)
+
 
 
 
