@@ -6692,25 +6692,47 @@ def fund_manager_tenure_page():
         df["to_date"] = pd.to_datetime(df["to_date"])
         df["to_date_filled"] = df["to_date"].fillna(pd.Timestamp.today())
 
-        # ---- Group by manager: one row per manager, multiple segments ----
+        # Determine "current" logic:
+        # - Prefer open-ended stints (to_date is NULL)
+        # - Else fall back to latest-ending stint(s)
+        has_open_ended = df["to_date"].isna().any()
+        global_latest_end = df["to_date_filled"].max()
+
+        def _stint_is_current(row) -> bool:
+            if has_open_ended:
+                return pd.isna(row["to_date"])
+            return row["to_date_filled"] == global_latest_end
+
+        df["stint_is_current"] = df.apply(_stint_is_current, axis=1)
+
+        # ---- Group by manager: one row per manager; split segments into current vs non-current ----
         grouped = []
         for mgr, g in df.groupby("fund_manager"):
             g = g.sort_values(["from_date", "to_date_filled"])
-            segs = []
+
+            segs_current = []
+            segs_other = []
+
             for r in g.itertuples(index=False):
                 start = r.from_date.to_pydatetime()
                 end = r.to_date_filled.to_pydatetime()
+
                 s = mdates.date2num(start)
                 e = mdates.date2num(end)
                 width = max(0.1, e - s)  # guard against zero-width
-                segs.append((s, width))
+
+                if bool(r.stint_is_current):
+                    segs_current.append((s, width))
+                else:
+                    segs_other.append((s, width))
 
             grouped.append(
                 {
                     "fund_manager": mgr,
                     "earliest": g["from_date"].min(),
-                    "segments": segs,
-                    "is_current": g["to_date"].isna().any(),  # any open-ended stint
+                    "segs_current": segs_current,
+                    "segs_other": segs_other,
+                    "has_current": len(segs_current) > 0,
                 }
             )
 
@@ -6722,51 +6744,74 @@ def fund_manager_tenure_page():
 
         height = 0.7
 
+        # Choose distinct highlight colour for current stint(s)
+        highlight_color = "#1f77b4"  # blue
+        muted_alpha = 0.25
+
         for idx, item in enumerate(grouped):
-            # Oldest at top
             y = (len(grouped) - 1) - idx
 
-            if item["is_current"]:
-                ax.broken_barh(item["segments"], (y - height / 2, height))
-            else:
-                ax.broken_barh(item["segments"], (y - height / 2, height), alpha=0.25)
+            # Plot non-current segments first (muted)
+            if item["segs_other"]:
+                ax.broken_barh(
+                    item["segs_other"],
+                    (y - height / 2, height),
+                    alpha=muted_alpha,
+                )
 
-            # Label: left aligned at earliest segment start for readability
-            x_left = min(s for s, w in item["segments"])
+            # Plot current segments on top (highlight)
+            if item["segs_current"]:
+                ax.broken_barh(
+                    item["segs_current"],
+                    (y - height / 2, height),
+                    facecolors=highlight_color,
+                    alpha=1.0,
+                )
+
+            # Label: left aligned at earliest segment start
+            all_segs = (item["segs_other"] or []) + (item["segs_current"] or [])
+            x_left = min(s for s, w in all_segs)
             ax.text(x_left, y, str(item["fund_manager"]), va="center", ha="left", fontsize=9)
 
         # ---- X-axis formatting: always Mmm-YYYY, stable tick spacing ----
         locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%Y"))
-        ax.xaxis.set_minor_locator(mdates.MonthLocator())  # minor monthly ticks (no labels)
+        ax.xaxis.set_minor_locator(mdates.MonthLocator())
 
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        ax.set_yticks([])              # no y-axis
-        ax.set_ylim(-1, len(grouped))  # based on #managers
+        ax.set_yticks([])
+        ax.set_ylim(-1, len(grouped))
         ax.set_xlabel("")
         ax.grid(axis="x", alpha=0.2)
 
-        st.caption("TENURE CHART BUILD: manager-grouped-v1.2")
+        st.caption("TENURE CHART BUILD: manager-grouped-highlight-v1.2")
         st.pyplot(fig, clear_figure=True)
 
-        # ---- Current manager summary (since earliest open-ended stint) ----
+        # ---- Current manager summary ----
+        # If open-ended exists: current manager(s) = those with open-ended stints
+        # Else: current manager(s) = those whose stint ends at global_latest_end
         current_mgrs = []
         today = pd.Timestamp.today()
 
-        for mgr, g in df.groupby("fund_manager"):
-            g_open = g[g["to_date"].isna()]
-            if not g_open.empty:
-                since = g_open["from_date"].min()
+        if has_open_ended:
+            for mgr, g in df[df["to_date"].isna()].groupby("fund_manager"):
+                since = g["from_date"].min()
+                years = (today - since).days / 365.25
+                current_mgrs.append((mgr, years))
+        else:
+            latest = df[df["to_date_filled"] == global_latest_end].copy()
+            for mgr, g in latest.groupby("fund_manager"):
+                since = g["from_date"].min()
                 years = (today - since).days / 365.25
                 current_mgrs.append((mgr, years))
 
         if current_mgrs:
-            # Optional: sort by longer tenure first
-            current_mgrs.sort(key=lambda x: -x[1])
+            current_mgrs.sort(key=lambda x: -x[1])  # longer since first (optional)
             parts = [f"{m} managing since the past {y:.1f} years" for m, y in current_mgrs]
             st.caption("Current fund manager: " + "; ".join(parts))
+
 
 
     # -----------------------------
