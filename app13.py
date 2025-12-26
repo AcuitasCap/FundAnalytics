@@ -6748,7 +6748,7 @@ def fund_manager_tenure_page():
         ax.set_xlabel("")
         ax.grid(axis="x", alpha=0.2)
 
-        st.caption("TENURE CHART BUILD: manager-grouped-v1")
+        st.caption("TENURE CHART BUILD: manager-grouped-v1.2")
         st.pyplot(fig, clear_figure=True)
 
         # ---- Current manager summary (since earliest open-ended stint) ----
