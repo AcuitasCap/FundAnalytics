@@ -67,7 +67,6 @@ def check_password():
 if not check_password():
     st.stop()
 
-st.write("BUILD MARKER: 2025-12-26 12:34 IST")
 
 
 def home_button():
@@ -6671,6 +6670,8 @@ def portfolio_valuations_page():
 def fund_manager_tenure_page():
     import datetime as dt
     import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
 
     home_button()
     st.subheader("Fund manager tenure")
@@ -6716,17 +6717,20 @@ def fund_manager_tenure_page():
 
             # Highlight current manager(s)
             if bool(r["is_current"]):
-                ax.broken_barh([(dt.date2num(start), dt.date2num(end) - dt.date2num(start))],
-                               (y - height / 2, height))
+                ax.broken_barh([(mdates.date2num(start), mdates.date2num(end) - mdates.date2num(start))],
+               (y - height / 2, height))
+
             else:
                 # muted bars: use alpha via facecolor default; set hatch to differentiate without heavy styling
-                ax.broken_barh([(dt.date2num(start), dt.date2num(end) - dt.date2num(start))],
-                               (y - height / 2, height),
-                               alpha=0.25)
+                ax.broken_barh([(mdates.date2num(start), mdates.date2num(end) - mdates.date2num(start))],
+               (y - height / 2, height),
+               alpha=0.25)
+
 
             # Label centered
             mid = start + (end - start) / 2
-            ax.text(dt.date2num(mid), y, str(r["fund_manager"]), va="center", ha="center", fontsize=9)
+            ax.text(mdates.date2num(mid), y, str(r["fund_manager"]), va="center", ha="center", fontsize=9)
+
 
         # X-axis formatting (years)
         ax.xaxis_date()
