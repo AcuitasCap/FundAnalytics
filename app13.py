@@ -6748,7 +6748,7 @@ def fund_manager_tenure_page():
         ax.set_ylim(-1, len(df))
         ax.set_xlabel("")  # no axis title
         ax.grid(axis="x", alpha=0.2)
-
+        st.caption("TENURE CHART BUILD: axis-fmt-v2")
         st.pyplot(fig, clear_figure=True)
 
         # Current manager summary
