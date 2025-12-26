@@ -7202,7 +7202,7 @@ def update_db_page():
             "Fund NAVs",
             "Benchmark NAVs",
             "Fund portfolios",
-            "Fund manager tenure"
+            "Fund manager tenure",
             "Stock ISIN, industry, financial/non-financial",
             "Company RoE / RoCE",
             "Stock prices and market cap",
