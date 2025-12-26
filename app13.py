@@ -245,6 +245,21 @@ def show_expected_format(upload_type: str):
                 "- **3 columns**: ISIN, year-end in `YYYYMM`, book value (absolute net worth)\n"
                 "- Example row: `INE123A01016 | 202403 | 2150000000`"
             )
+    elif upload_type == "Fund manager tenure":
+        st.markdown("**Expected format (Fund manager tenure.xlsx):**")
+        sample = pd.DataFrame(
+            {
+                "Fund name": ["ICICI Value Fund", "ICICI Value Fund"],
+                "Inception date": ["2004-08-16", "2004-08-16"],
+                "Fund manager": ["A. Manager", "B. Manager"],
+                "From date": ["Jan-2020", "Apr-2023"],  # Mmm-YYYY
+                "To date": ["Mar-2023", ""],            # blank => current
+            }
+        )
+        st.dataframe(sample)
+        st.info("From/To must be in Mmm-YYYY (e.g., Jan-2024). 'To date' can be blank for the current manager.")
+
+
 
 
 
@@ -1554,6 +1569,217 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
             conn.execute(insert_sql, params)
 
     progress_text.text(f"Annual book value insert complete: {n} rows.")
+
+
+# -----------------------------
+# Fund manager tenure (upload)
+# -----------------------------
+
+FM_TENURE_COLS = {
+    "fund_name": ["fund name", "fund", "scheme", "scheme name", "fund_name"],
+    "inception_date": ["inception date", "inception", "start date"],
+    "fund_manager": ["fund manager", "manager", "fm", "portfolio manager"],
+    "from_period": ["from date", "from", "from_period", "from period"],
+    "to_period": ["to date", "to", "to_period", "to period"],
+}
+
+def _parse_mmm_yyyy(series: pd.Series, colname: str, allow_blank: bool) -> pd.Series:
+    """
+    Parses Mmm-YYYY into Timestamp (day=1 canonical).
+    Blank -> NaT only if allow_blank=True.
+    """
+    s = series.astype(str).str.strip()
+    blanks = s.eq("") | s.str.lower().isin(["nan", "nat", "none", "null"])
+
+    if not allow_blank and blanks.any():
+        raise ValueError(f"Blank values in '{colname}'. Expected Mmm-YYYY like 'Jan-2021'.")
+
+    s2 = s.mask(blanks, other=pd.NA)
+    dtv = pd.to_datetime(s2, format="%b-%Y", errors="coerce")  # canonical day=1
+
+    bad = (~blanks) & dtv.isna()
+    if bad.any():
+        sample = series[bad].head(10).tolist()
+        raise ValueError(f"Invalid '{colname}' values. Expect Mmm-YYYY (e.g. Jan-2024). Sample: {sample}")
+
+    return dtv
+
+def validate_fund_manager_tenure(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    required = {"fund_name", "fund_manager", "from_period"}  # to_period optional, inception optional
+    df = map_headers(df_raw, FM_TENURE_COLS, required=required)
+
+    # Clean strings
+    df["fund_name"] = df["fund_name"].astype(str).str.strip()
+    df["fund_manager"] = df["fund_manager"].astype(str).str.strip()
+
+    if df["fund_name"].eq("").any():
+        raise ValueError("Blank fund name(s) found.")
+    if df["fund_manager"].eq("").any():
+        raise ValueError("Blank fund manager(s) found.")
+
+    # inception_date: permissive
+    if "inception_date" in df.columns:
+        df["inception_date"] = pd.to_datetime(df["inception_date"], errors="coerce").dt.date
+    else:
+        df["inception_date"] = pd.NaT
+
+    # Parse Mmm-YYYY
+    df["from_ts"] = _parse_mmm_yyyy(df["from_period"], "from date", allow_blank=False)
+    if "to_period" in df.columns:
+        df["to_ts"] = _parse_mmm_yyyy(df["to_period"], "to date", allow_blank=True)
+    else:
+        df["to_ts"] = pd.NaT
+
+    # Logical check
+    bad_range = df["to_ts"].notna() & (df["from_ts"] > df["to_ts"])
+    if bad_range.any():
+        bad_rows = df.loc[bad_range, ["fund_name", "fund_manager", "from_period", "to_period"]].head(10)
+        raise ValueError(f"Found rows where from date > to date. Sample:\n{bad_rows}")
+
+    # Store canonical month-date (day=1); keep original Mmm-YYYY columns for reference if needed
+    df["from_date"] = df["from_ts"].dt.date
+    df["to_date"] = df["to_ts"].dt.date  # will be NaT->NaN; upload will convert to None
+
+    # Drop helper cols
+    df = df.drop(columns=[c for c in ["from_ts", "to_ts"] if c in df.columns])
+
+    # Duplicate row check within upload
+    dedup_key = ["fund_name", "fund_manager", "from_date", "to_date"]
+    dupes = df.duplicated(subset=dedup_key, keep=False)
+    if dupes.any():
+        sample = df.loc[dupes, dedup_key].head(10)
+        raise ValueError(f"Duplicate tenure rows detected in upload. Sample:\n{sample}")
+
+    # Determine missing funds in master (for rename/new-fund flow)
+    engine = get_engine()
+    upload_funds = sorted(df["fund_name"].unique().tolist())
+    existing = set(pd.read_sql("select fund_name from fundlab.fund", engine)["fund_name"].astype(str).str.strip())
+    missing_funds = sorted([f for f in upload_funds if f not in existing])
+
+    summary = {
+        "rows": int(len(df)),
+        "funds_in_upload": int(len(upload_funds)),
+        "missing_funds": missing_funds,
+        "notes": "from/to parsed as Mmm-YYYY; stored as canonical month-date (day=1). to_date blank => current.",
+    }
+    return df.reset_index(drop=True), summary
+
+def _category_name_to_id(engine) -> dict:
+    df = pd.read_sql(
+        """
+        SELECT category_id, category_name
+        FROM fundlab.category
+        WHERE LOWER(category_name) <> 'portfolio'
+        """,
+        engine,
+    )
+    return dict(zip(df["category_name"], df["category_id"]))
+
+def upload_fund_manager_tenure(df_clean: pd.DataFrame, resolutions: dict) -> None:
+    """
+    resolutions: dict keyed by NEW fund_name:
+      {
+        "ICICI Value Fund": {"old_name": "ICICI Value Discovery", "category_name": None},
+        "Brand New Fund":   {"old_name": "", "category_name": "Flexi Cap Fund"},
+      }
+    """
+    if df_clean.empty:
+        return
+
+    engine = get_engine()
+
+    # Fresh master snapshots for validation
+    fund_master = pd.read_sql("select fund_id, fund_name from fundlab.fund", engine)
+    existing_names = set(fund_master["fund_name"].astype(str).str.strip())
+
+    cat_map = _category_name_to_id(engine)
+    category_options = set(cat_map.keys())
+
+    with engine.begin() as conn:
+        # 1) Apply rename / new-fund creation
+        for new_name, info in (resolutions or {}).items():
+            old_name = (info.get("old_name") or "").strip()
+            category_name = info.get("category_name")
+
+            if old_name:
+                if old_name not in existing_names:
+                    raise ValueError(f"Old fund name '{old_name}' not found in fund master for rename to '{new_name}'.")
+                # Rename (fund_id unchanged)
+                conn.execute(
+                    text("UPDATE fundlab.fund SET fund_name = :new_name WHERE fund_name = :old_name"),
+                    {"new_name": new_name, "old_name": old_name},
+                )
+                existing_names.discard(old_name)
+                existing_names.add(new_name)
+            else:
+                if not category_name:
+                    raise ValueError(f"Category is required to create new fund '{new_name}'.")
+                if category_name not in category_options:
+                    raise ValueError(f"Unknown category '{category_name}' for new fund '{new_name}'.")
+                conn.execute(
+                    text("""
+                        INSERT INTO fundlab.fund (fund_name, category_id)
+                        VALUES (:fund_name, :category_id)
+                    """),
+                    {"fund_name": new_name, "category_id": int(cat_map[category_name])},
+                )
+                existing_names.add(new_name)
+
+        # 2) Resolve fund_id for all funds in this upload (post rename/insert)
+        upload_funds = sorted(df_clean["fund_name"].unique().tolist())
+        fund_rows = conn.execute(
+            text("SELECT fund_id, fund_name FROM fundlab.fund WHERE fund_name = ANY(:names)"),
+            {"names": upload_funds},
+        ).fetchall()
+
+        name_to_id = {r.fund_name: r.fund_id for r in fund_rows}
+        missing_after = [n for n in upload_funds if n not in name_to_id]
+        if missing_after:
+            raise ValueError(f"Funds still missing in master after resolution: {missing_after}")
+
+        df = df_clean.copy()
+        df["fund_id"] = df["fund_name"].map(name_to_id).astype(int)
+
+        affected_ids = sorted(df["fund_id"].unique().tolist())
+
+        # 3) Delete existing tenure rows for affected funds
+        conn.execute(
+            text("DELETE FROM fundlab.fund_manager_tenure WHERE fund_id = ANY(:fund_ids)"),
+            {"fund_ids": affected_ids},
+        )
+
+        # 4) Insert tenure rows (batch)
+        # Convert NaN to None for to_date
+        to_dates = []
+        for x in df["to_date"].tolist():
+            if pd.isna(x):
+                to_dates.append(None)
+            else:
+                to_dates.append(x)
+
+        insert_sql = text("""
+            INSERT INTO fundlab.fund_manager_tenure
+                (fund_id, inception_date, fund_manager, from_date, to_date)
+            SELECT
+                unnest(:fund_ids)        AS fund_id,
+                unnest(:inceptions)      AS inception_date,
+                unnest(:managers)        AS fund_manager,
+                unnest(:from_dates)      AS from_date,
+                unnest(:to_dates)        AS to_date
+        """)
+
+        conn.execute(
+            insert_sql,
+            {
+                "fund_ids": list(df["fund_id"].astype(int)),
+                "inceptions": [None if pd.isna(x) else x for x in df["inception_date"].tolist()],
+                "managers": list(df["fund_manager"].astype(str)),
+                "from_dates": list(df["from_date"]),
+                "to_dates": to_dates,
+            },
+        )
+
+
 
 def upload_stock_monthly_valuations_from_excel(uploaded_file, batch_size: int = 2000):
     """
@@ -3333,6 +3559,46 @@ def fetch_funds_for_categories(categories):
     return df
 
 
+# -----------------------------
+# Fund manager tenure (dashboard)
+# -----------------------------
+
+@st.cache_data(ttl=3600)
+def fetch_funds_by_categories(category_names: list[str]) -> pd.DataFrame:
+    if not category_names:
+        return pd.DataFrame()
+
+    engine = get_engine()
+    query = """
+        SELECT f.fund_id, f.fund_name, c.category_name
+        FROM fundlab.fund f
+        JOIN fundlab.category c
+          ON f.category_id = c.category_id
+        WHERE c.category_name = ANY(%(cats)s)
+        ORDER BY f.fund_name
+    """
+    return pd.read_sql(query, engine, params={"cats": category_names})
+
+
+@st.cache_data(ttl=3600)
+def fetch_fund_manager_tenure(fund_ids: list[int]) -> pd.DataFrame:
+    if not fund_ids:
+        return pd.DataFrame()
+
+    engine = get_engine()
+    query = """
+        SELECT
+            fund_id,
+            fund_manager,
+            from_date,
+            to_date
+        FROM fundlab.fund_manager_tenure
+        WHERE fund_id = ANY(%(fund_ids)s)
+        ORDER BY fund_id, from_date
+    """
+    return pd.read_sql(query, engine, params={"fund_ids": fund_ids})
+
+
 
 def fetch_portfolio_raw(fund_ids, start_date, end_date):
     if not fund_ids:
@@ -4987,6 +5253,88 @@ def _read_any(uploaded_file):
         raise RuntimeError(f"Error reading {uploaded_file.name}: {e}")
 
 
+def prepare_focus_fund_timeline(df: pd.DataFrame, focus_fund_id: int) -> pd.DataFrame:
+    d = df[df["fund_id"] == focus_fund_id].copy()
+    if d.empty:
+        return d
+
+    d["from_date"] = pd.to_datetime(d["from_date"])
+    d["to_date"] = pd.to_datetime(d["to_date"])
+    d["to_date_filled"] = d["to_date"].fillna(pd.Timestamp.today())
+
+    # Oldest tenure at top, latest at bottom
+    d = d.sort_values(["from_date", "to_date_filled", "fund_manager"]).reset_index(drop=True)
+    d["ypos"] = (len(d) - 1) - d.index
+
+    # Identify current manager(s)
+    if d["to_date"].isna().any():
+        d["is_current"] = d["to_date"].isna()
+    else:
+        d["is_current"] = d["to_date_filled"] == d["to_date_filled"].max()
+
+    return d
+
+
+def render_fund_manager_tenure_chart(df: pd.DataFrame):
+    if df.empty:
+        st.info("No fund manager tenure data available for this fund.")
+        return
+
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("from_date:T", title=None, axis=alt.Axis(format="%Y")),
+            x2="to_date_filled:T",
+            y=alt.Y("ypos:O", axis=None),
+            color=alt.condition(
+                alt.datum.is_current,
+                alt.value("#1f77b4"),   # highlighted current manager
+                alt.value("#c7c7c7"),
+            ),
+            tooltip=[
+                alt.Tooltip("fund_manager:N", title="Fund manager"),
+                alt.Tooltip("from_date:T", title="From"),
+                alt.Tooltip("to_date:T", title="To"),
+            ],
+        )
+    )
+
+    labels = (
+        alt.Chart(df)
+        .mark_text(dx=0, dy=0, color="black")
+        .transform_calculate(
+            mid="datetime((datum.from_date.getTime() + datum.to_date_filled.getTime())/2)"
+        )
+        .encode(
+            x=alt.X("mid:T"),
+            y=alt.Y("ypos:O"),
+            text="fund_manager:N",
+        )
+    )
+
+    st.altair_chart(
+        (chart + labels).properties(height=max(200, 35 * len(df))),
+        use_container_width=True,
+    )
+
+
+def render_current_manager_summary(df: pd.DataFrame):
+    cur = df[df["is_current"]].copy()
+    if cur.empty:
+        return
+
+    today = pd.Timestamp.today()
+    cur["years"] = (today - cur["from_date"]).dt.days / 365.25
+
+    parts = [
+        f"{r.fund_manager} managing since the past {r.years:.1f} years"
+        for r in cur.itertuples(index=False)
+    ]
+    st.caption("Current fund manager: " + "; ".join(parts))
+
+
+
 # ------------------------ Inputs ------------------------
 # Accept CSV or Excel for both uploads - Commented out the excel upload functionality to upload directly from Supabase - 21 Nov 2025
 # funds_file = st.file_uploader("Upload Funds file (CSV or Excel)", type=["csv", "xlsx", "xls"], key="funds")
@@ -6295,6 +6643,51 @@ def portfolio_valuations_page():
     st.altair_chart(val_chart, use_container_width=True)
 
 
+def fund_manager_tenure_page():
+    st.header("Fund manager tenure")
+
+    categories = fetch_categories()
+    if not categories:
+        st.error("No categories available.")
+        return
+
+    with st.form("fm_tenure_form"):
+        selected_categories = st.multiselect(
+            "Select fund categories",
+            options=categories,
+        )
+        submitted = st.form_submit_button("Submit")
+
+    if not submitted:
+        return
+
+    if not selected_categories:
+        st.warning("Please select at least one category.")
+        return
+
+    # Pull funds in selected categories
+    df_funds = fetch_funds_by_categories(selected_categories)
+    if df_funds.empty:
+        st.info("No funds found for selected categories.")
+        return
+
+    fund_names = df_funds["fund_name"].tolist()
+    fund_name_to_id = dict(zip(df_funds["fund_name"], df_funds["fund_id"]))
+
+    focus_fund = st.selectbox("Focus fund", options=fund_names)
+    focus_fund_id = int(fund_name_to_id[focus_fund])
+
+    # Pull tenure data (cached)
+    df_tenure = fetch_fund_manager_tenure(df_funds["fund_id"].astype(int).tolist())
+
+    st.subheader(f"Fund manager history: {focus_fund}")
+
+    df_focus = prepare_focus_fund_timeline(df_tenure, focus_fund_id)
+
+    render_fund_manager_tenure_chart(df_focus)
+    render_current_manager_summary(df_focus)
+
+
 
 def portfolio_page():
     home_button()
@@ -6806,6 +7199,7 @@ def update_db_page():
             "Fund NAVs",
             "Benchmark NAVs",
             "Fund portfolios",
+            "Fund manager tenure"
             "Stock ISIN, industry, financial/non-financial",
             "Company RoE / RoCE",
             "Stock prices and market cap",
@@ -6861,12 +7255,17 @@ def update_db_page():
                 df_clean, summary = validate_quarterly_sales(df_raw)
             elif upload_type == "Company book value (annual)":
                 df_clean, summary = validate_annual_book_value(df_raw)
+            elif upload_type == "Fund manager tenure":
+                df_clean, summary = validate_fund_manager_tenure(df_raw)
             else:
                 st.error("Unsupported upload type.")
                 return
 
             st.session_state[state_key_df] = df_clean
             st.session_state[state_key_ok] = True
+
+            st.session_state[f"validated_summary_{upload_type}"] = summary
+
 
             st.success("Dry run successful. No critical format errors detected.")
             st.write("Summary:")
@@ -6882,9 +7281,67 @@ def update_db_page():
             return
 
     # Upload button (only if validation passed)
+        # Upload button (only if validation passed)
     if st.session_state.get(state_key_ok):
+        df_clean = st.session_state.get(state_key_df)
+        summary = st.session_state.get(f"validated_summary_{upload_type}", {}) or {}
+
+        resolutions = {}
+        can_proceed = True
+        block_reason = ""
+
+        if upload_type == "Fund manager tenure":
+            missing = summary.get("missing_funds", []) or []
+
+            if missing:
+                st.warning("Some funds in this upload are not present in the fund master. Resolve them below before uploading.")
+
+                # Build a fresh set of existing fund names for validating old-name inputs
+                engine2 = get_engine()
+                existing_names = set(pd.read_sql("select fund_name from fundlab.fund", engine2)["fund_name"].astype(str).str.strip())
+
+                categories = fetch_categories()
+                if not categories:
+                    can_proceed = False
+                    block_reason = "No categories available in fundlab.category (excluding 'portfolio')."
+
+                with st.expander("Resolve missing fund names (rename or create)", expanded=True):
+                    for new_name in missing:
+                        st.markdown(f"**{new_name}**")
+                        c1, c2 = st.columns([2, 2])
+
+                        old_name = c1.text_input(
+                            "Old name (optional – fill only if this is a rename)",
+                            key=f"fm_old_{new_name}",
+                            placeholder="e.g., ICICI Value Discovery",
+                        ).strip()
+
+                        if old_name == "":
+                            cat_sel = c2.selectbox(
+                                "Category (required for new fund)",
+                                options=["-- Select --"] + categories,
+                                key=f"fm_cat_{new_name}",
+                            )
+                            category_name = None if cat_sel == "-- Select --" else cat_sel
+
+                            if category_name is None:
+                                can_proceed = False
+                                block_reason = f"Select a category for new fund: {new_name}"
+                        else:
+                            c2.write("Category not required for rename.")
+                            category_name = None
+
+                            if old_name not in existing_names:
+                                can_proceed = False
+                                block_reason = f"Old name not found in fund master: '{old_name}' (for rename to '{new_name}')"
+
+                        resolutions[new_name] = {"old_name": old_name, "category_name": category_name}
+
+        if not can_proceed:
+            st.error(block_reason)
+            return
+
         if st.button("Confirm upload to database"):
-            df_clean = st.session_state.get(state_key_df)
             if df_clean is None:
                 st.error("No validated data found in session. Please run validation again.")
                 return
@@ -6908,6 +7365,8 @@ def update_db_page():
                     upload_quarterly_sales(df_clean)
                 elif upload_type == "Company book value (annual)":
                     upload_annual_book_value(df_clean)
+                elif upload_type == "Fund manager tenure":
+                    upload_fund_manager_tenure(df_clean, resolutions)
 
                 st.success("✅ Upload completed successfully.")
 
@@ -6934,6 +7393,7 @@ def update_db_page():
                     )
             except Exception as e:
                 st.error(f"Unexpected error during upload: {e}")
+
 
 
 
@@ -7720,6 +8180,10 @@ def home_page():
         st.session_state["page"] = "Portfolio"
         st.rerun()
 
+    if st.button("🧑‍💼 Fund manager tenure"):
+        st.session_state["page"] = "Fund manager tenure"
+        st.rerun()
+
     if st.button("🛠️ Update DB"):
         st.session_state["page"] = "Update DB"
         st.rerun()
@@ -7755,6 +8219,8 @@ def main():
         fund_attribution_page()
     elif page == "Portfolio":
         portfolio_page()
+    elif page == "Fund manager tenure":
+        fund_manager_tenure_page()
     elif page == "Update DB":
         update_db_page()
     elif page == "Housekeeping":
