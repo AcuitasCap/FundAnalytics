@@ -6672,6 +6672,7 @@ def fund_manager_tenure_page():
     import datetime as dt
     import matplotlib.pyplot as plt
 
+    home_button()
     st.subheader("Fund manager tenure")
 
     # -----------------------------
