@@ -6680,6 +6680,7 @@ def fund_manager_tenure_page():
     # Helper: render relay chart
     # -----------------------------
     def _render_tenure_chart(df_focus: pd.DataFrame):
+        import matplotlib.dates as mdates
         if df_focus.empty:
             st.info("No fund manager tenure data available for this fund.")
             return
@@ -6734,6 +6735,12 @@ def fund_manager_tenure_page():
 
         # X-axis formatting (years)
         ax.xaxis_date()
+        # Force Month-Year ticks consistently
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))   # every 6 months (adjust if needed)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%Y"))
+
+        # Improve readability
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
         ax.set_yticks([])  # no y-axis
         ax.set_ylim(-1, len(df))
         ax.set_xlabel("")  # no axis title
