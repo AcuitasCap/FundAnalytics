@@ -6681,6 +6681,7 @@ def fund_manager_tenure_page():
     # -----------------------------
     def _render_tenure_chart(df_focus: pd.DataFrame):
         import matplotlib.dates as mdates
+
         if df_focus.empty:
             st.info("No fund manager tenure data available for this fund.")
             return
@@ -6688,78 +6689,85 @@ def fund_manager_tenure_page():
         # Ensure datetime
         df = df_focus.copy()
         df["from_date"] = pd.to_datetime(df["from_date"])
-        df["to_date_filled"] = pd.to_datetime(df["to_date"]).fillna(pd.Timestamp.today())
+        df["to_date"] = pd.to_datetime(df["to_date"])
+        df["to_date_filled"] = df["to_date"].fillna(pd.Timestamp.today())
 
-        # Oldest at top
-        df = df.sort_values(["from_date", "to_date_filled", "fund_manager"]).reset_index(drop=True)
-        df["row"] = range(len(df))
-        df["row_inv"] = (len(df) - 1) - df["row"]
+        # ---- Group by manager: one row per manager, multiple segments ----
+        grouped = []
+        for mgr, g in df.groupby("fund_manager"):
+            g = g.sort_values(["from_date", "to_date_filled"])
+            segs = []
+            for r in g.itertuples(index=False):
+                start = r.from_date.to_pydatetime()
+                end = r.to_date_filled.to_pydatetime()
+                s = mdates.date2num(start)
+                e = mdates.date2num(end)
+                width = max(0.1, e - s)  # guard against zero-width
+                segs.append((s, width))
 
-        # Identify current/latest
-        if df["to_date"].isna().any():
-            df["is_current"] = df["to_date"].isna()
-        else:
-            df["is_current"] = df["to_date_filled"].eq(df["to_date_filled"].max())
+            grouped.append(
+                {
+                    "fund_manager": mgr,
+                    "earliest": g["from_date"].min(),
+                    "segments": segs,
+                    "is_current": g["to_date"].isna().any(),  # any open-ended stint
+                }
+            )
 
-        # Convert to matplotlib numeric dates
-        x_start = df["from_date"].map(lambda x: x.to_pydatetime()).tolist()
-        x_end = df["to_date_filled"].map(lambda x: x.to_pydatetime()).tolist()
+        # Order rows: oldest manager at top (by earliest stint)
+        grouped = sorted(grouped, key=lambda x: x["earliest"])
 
-        fig_h = max(2.5, 0.45 * len(df))
+        fig_h = max(2.5, 0.55 * len(grouped))
         fig, ax = plt.subplots(figsize=(12, fig_h))
 
-        for i, r in df.iterrows():
-            y = df.loc[i, "row_inv"]
-            start = df.loc[i, "from_date"].to_pydatetime()
-            end = df.loc[i, "to_date_filled"].to_pydatetime()
+        height = 0.7
 
-            # Bar thickness
-            height = 0.7
+        for idx, item in enumerate(grouped):
+            # Oldest at top
+            y = (len(grouped) - 1) - idx
 
-            # Highlight current manager(s)
-            if bool(r["is_current"]):
-                ax.broken_barh([(mdates.date2num(start), mdates.date2num(end) - mdates.date2num(start))],
-               (y - height / 2, height))
-
+            if item["is_current"]:
+                ax.broken_barh(item["segments"], (y - height / 2, height))
             else:
-                # muted bars: use alpha via facecolor default; set hatch to differentiate without heavy styling
-                ax.broken_barh([(mdates.date2num(start), mdates.date2num(end) - mdates.date2num(start))],
-               (y - height / 2, height),
-               alpha=0.25)
+                ax.broken_barh(item["segments"], (y - height / 2, height), alpha=0.25)
 
+            # Label: left aligned at earliest segment start for readability
+            x_left = min(s for s, w in item["segments"])
+            ax.text(x_left, y, str(item["fund_manager"]), va="center", ha="left", fontsize=9)
 
-            # Label centered
-            mid = start + (end - start) / 2
-            ax.text(mdates.date2num(mid), y, str(r["fund_manager"]), va="center", ha="center", fontsize=9)
-
-
-        # X-axis formatting: always Mmm-YYYY, stable tick spacing
+        # ---- X-axis formatting: always Mmm-YYYY, stable tick spacing ----
         locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%Y"))
+        ax.xaxis.set_minor_locator(mdates.MonthLocator())  # minor monthly ticks (no labels)
 
-        # (Optional) minor ticks monthly (no labels)
-        ax.xaxis.set_minor_locator(mdates.MonthLocator())
-
-        # Improve readability
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        ax.set_yticks([])  # no y-axis
-        ax.set_ylim(-1, len(df))
-        ax.set_xlabel("")  # no axis title
+        ax.set_yticks([])              # no y-axis
+        ax.set_ylim(-1, len(grouped))  # based on #managers
+        ax.set_xlabel("")
         ax.grid(axis="x", alpha=0.2)
-        st.caption("TENURE CHART BUILD: axis-fmt-v2")
+
+        st.caption("TENURE CHART BUILD: manager-grouped-v1")
         st.pyplot(fig, clear_figure=True)
 
-        # Current manager summary
-        cur = df[df["is_current"]].copy()
-        if not cur.empty:
-            today = pd.Timestamp.today()
-            cur["years"] = (today - cur["from_date"]).dt.days / 365.25
-            cur = cur.sort_values("from_date")
-            parts = [f"{row.fund_manager} managing since the past {row.years:.1f} years"
-                     for row in cur.itertuples(index=False)]
+        # ---- Current manager summary (since earliest open-ended stint) ----
+        current_mgrs = []
+        today = pd.Timestamp.today()
+
+        for mgr, g in df.groupby("fund_manager"):
+            g_open = g[g["to_date"].isna()]
+            if not g_open.empty:
+                since = g_open["from_date"].min()
+                years = (today - since).days / 365.25
+                current_mgrs.append((mgr, years))
+
+        if current_mgrs:
+            # Optional: sort by longer tenure first
+            current_mgrs.sort(key=lambda x: -x[1])
+            parts = [f"{m} managing since the past {y:.1f} years" for m, y in current_mgrs]
             st.caption("Current fund manager: " + "; ".join(parts))
+
 
     # -----------------------------
     # Step 1: Category selection (checkboxes) inside a form
