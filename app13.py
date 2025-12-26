@@ -67,6 +67,9 @@ def check_password():
 if not check_password():
     st.stop()
 
+st.write("BUILD MARKER: 2025-12-26 12:34 IST")
+
+
 def home_button():
     """Render a Home button that jumps back to the Home page."""
     if st.button("🏠 Home"):
