@@ -6733,14 +6733,17 @@ def fund_manager_tenure_page():
             ax.text(mdates.date2num(mid), y, str(r["fund_manager"]), va="center", ha="center", fontsize=9)
 
 
-        # X-axis formatting (years)
-        ax.xaxis_date()
-        # Force Month-Year ticks consistently
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=6))   # every 6 months (adjust if needed)
+        # X-axis formatting: always Mmm-YYYY, stable tick spacing
+        locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
+        ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%Y"))
+
+        # (Optional) minor ticks monthly (no labels)
+        ax.xaxis.set_minor_locator(mdates.MonthLocator())
 
         # Improve readability
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
         ax.set_yticks([])  # no y-axis
         ax.set_ylim(-1, len(df))
         ax.set_xlabel("")  # no axis title
