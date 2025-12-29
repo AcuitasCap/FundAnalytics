@@ -6960,7 +6960,7 @@ def fund_manager_tenure_page():
     st.markdown(f"### Fund manager history – **{focus_fund}**")
     _render_tenure_chart(df_focus)
 
-    with st.expander("Show underlying tenure rows"):
+    with st.expander("Show underlying tenure rows:"):
         show = df_focus.copy()
         show["from_date"] = pd.to_datetime(show["from_date"]).dt.strftime("%b-%Y")
         show["to_date"] = pd.to_datetime(show["to_date"]).dt.strftime("%b-%Y")
