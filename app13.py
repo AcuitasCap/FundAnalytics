@@ -6672,7 +6672,6 @@ def fund_manager_tenure_page():
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
 
-
     home_button()
     st.subheader("Fund manager tenure")
 
@@ -6690,20 +6689,20 @@ def fund_manager_tenure_page():
         df = df_focus.copy()
         df["from_date"] = pd.to_datetime(df["from_date"])
         df["to_date"] = pd.to_datetime(df["to_date"])
-        df["to_date_filled"] = df["to_date"].fillna(pd.Timestamp.today())
+
+        today = pd.Timestamp.today().normalize()
+
+        # Base fill: open-ended => today
+        df["to_date_filled"] = df["to_date"].fillna(today)
+
+        # Ongoing assumption: latest stint continues to today even if to_date is populated
+        # (latest stint = max from_date within this fund; supports co-managers)
+        latest_from = df["from_date"].max()
+        df.loc[df["from_date"].eq(latest_from), "to_date_filled"] = today
 
         # Determine "current" logic:
-        # - Prefer open-ended stints (to_date is NULL)
-        # - Else fall back to latest-ending stint(s)
-        has_open_ended = df["to_date"].isna().any()
-        global_latest_end = df["to_date_filled"].max()
-
-        def _stint_is_current(row) -> bool:
-            if has_open_ended:
-                return pd.isna(row["to_date"])
-            return row["to_date_filled"] == global_latest_end
-
-        df["stint_is_current"] = df.apply(_stint_is_current, axis=1)
+        # After applying ongoing assumption, "current" managers are those in latest stint
+        df["stint_is_current"] = df["from_date"].eq(latest_from)
 
         # ---- Group by manager: one row per manager; split segments into current vs non-current ----
         grouped = []
@@ -6732,7 +6731,6 @@ def fund_manager_tenure_page():
                     "earliest": g["from_date"].min(),
                     "segs_current": segs_current,
                     "segs_other": segs_other,
-                    "has_current": len(segs_current) > 0,
                 }
             )
 
@@ -6743,8 +6741,6 @@ def fund_manager_tenure_page():
         fig, ax = plt.subplots(figsize=(12, fig_h))
 
         height = 0.7
-
-        # Choose distinct highlight colour for current stint(s)
         highlight_color = "#1f77b4"  # blue
         muted_alpha = 0.25
 
@@ -6778,7 +6774,6 @@ def fund_manager_tenure_page():
         ax.xaxis.set_major_locator(locator)
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%Y"))
         ax.xaxis.set_minor_locator(mdates.MonthLocator())
-
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
         ax.set_yticks([])
@@ -6786,47 +6781,45 @@ def fund_manager_tenure_page():
         ax.set_xlabel("")
         ax.grid(axis="x", alpha=0.2)
 
-        st.caption("TENURE CHART BUILD: manager-grouped-highlight-v1.3**")
         st.pyplot(fig, clear_figure=True)
 
-        # ---- Current manager summary ----
-        # If open-ended exists: current manager(s) = those with open-ended stints
-        # Else: current manager(s) = those whose stint ends at global_latest_end
+        # ---- Current manager summary (based on latest stint) ----
         current_mgrs = []
-        today = pd.Timestamp.today()
-
-        if has_open_ended:
-            for mgr, g in df[df["to_date"].isna()].groupby("fund_manager"):
-                since = g["from_date"].min()
-                years = (today - since).days / 365.25
-                current_mgrs.append((mgr, years))
-        else:
-            latest = df[df["to_date_filled"] == global_latest_end].copy()
-            for mgr, g in latest.groupby("fund_manager"):
-                since = g["from_date"].min()
-                years = (today - since).days / 365.25
-                current_mgrs.append((mgr, years))
+        cur_rows = df[df["from_date"].eq(latest_from)].copy()
+        for mgr, g in cur_rows.groupby("fund_manager"):
+            since = g["from_date"].min()
+            years = (today - since).days / 365.25
+            current_mgrs.append((mgr, years))
 
         if current_mgrs:
-            current_mgrs.sort(key=lambda x: -x[1])  # longer since first (optional)
+            current_mgrs.sort(key=lambda x: -x[1])
             parts = [f"{m} managing since the past {y:.1f} years" for m, y in current_mgrs]
             st.caption("Current fund manager: " + "; ".join(parts))
 
-
+        # ---- Last tenure update on Supabase (latest recorded to_date) ----
+        # This indicates how stale the last explicit update is, independent of the ongoing assumption.
+        last_update = df["to_date"].dropna().max()
+        if pd.notna(last_update):
+            st.caption("Last tenure update on Supabase: " + pd.to_datetime(last_update).strftime("%b-%Y"))
+        else:
+            st.caption("Last tenure update on Supabase: Not available (no non-null 'to date' recorded)")
 
     # -----------------------------
-    # Step 1: Category selection (checkboxes) inside a form
+    # Step 1: Category selection + mode selection inside a form
     # -----------------------------
     categories = fetch_categories()
     if not categories:
         st.error("No categories available.")
         return
 
-    # Use session_state to persist selection across reruns
     if "fm_selected_categories" not in st.session_state:
         st.session_state["fm_selected_categories"] = []
     if "fm_categories_submitted" not in st.session_state:
         st.session_state["fm_categories_submitted"] = False
+    if "fm_mode" not in st.session_state:
+        st.session_state["fm_mode"] = "Single fund manager history"
+    if "fm_min_tenure" not in st.session_state:
+        st.session_state["fm_min_tenure"] = 5.0
 
     with st.form("fm_category_form"):
         st.subheader("1. Select categories")
@@ -6841,12 +6834,31 @@ def fund_manager_tenure_page():
                 if checked:
                     selected.append(cat)
 
+        st.subheader("2. Choose mode")
+        mode = st.radio(
+            "View",
+            options=["Single fund manager history", "Filter funds based on tenure"],
+            index=0 if st.session_state["fm_mode"] == "Single fund manager history" else 1,
+            key="fm_mode_radio",
+        )
+
+        if mode == "Filter funds based on tenure":
+            min_tenure = st.number_input(
+                "Minimum required tenure (years)",
+                min_value=0.0,
+                step=0.5,
+                value=float(st.session_state["fm_min_tenure"]),
+                key="fm_min_tenure_input",
+            )
+
         submitted = st.form_submit_button("Submit")
 
     if submitted:
         st.session_state["fm_selected_categories"] = selected
         st.session_state["fm_categories_submitted"] = True
-        # Clear downstream cached selections when categories change
+        st.session_state["fm_mode"] = st.session_state["fm_mode_radio"]
+        if st.session_state["fm_mode"] == "Filter funds based on tenure":
+            st.session_state["fm_min_tenure"] = float(st.session_state["fm_min_tenure_input"])
         st.session_state.pop("fm_focus_fund_name", None)
 
     if not st.session_state["fm_categories_submitted"]:
@@ -6858,23 +6870,74 @@ def fund_manager_tenure_page():
         return
 
     # -----------------------------
-    # Step 2: Universe pull (cached) + focus fund selectbox that does NOT reset the page
+    # Step 2: Universe pull (cached)
     # -----------------------------
     df_funds = fetch_funds_by_categories(selected_categories)
     if df_funds.empty:
         st.info("No funds found for selected categories.")
         return
 
+    # -----------------------------
+    # Step 3: Pull tenure
+    # -----------------------------
+    df_tenure = fetch_fund_manager_tenure(df_funds["fund_id"].astype(int).tolist())
+    if df_tenure.empty:
+        st.info("No fund manager tenure data available.")
+        return
+
+    # -----------------------------
+    # MODE B: Filter funds based on tenure (table)
+    # -----------------------------
+    if st.session_state["fm_mode"] == "Filter funds based on tenure":
+        min_years = float(st.session_state.get("fm_min_tenure", 5.0))
+        today = pd.Timestamp.today().normalize()
+
+        d = df_tenure.copy()
+        d["from_date"] = pd.to_datetime(d["from_date"])
+        d["to_date"] = pd.to_datetime(d["to_date"])
+        d["to_date_filled"] = d["to_date"].fillna(today)
+
+        # Ongoing assumption: latest stint continues to today per fund
+        latest_from = d.groupby("fund_id")["from_date"].transform("max")
+        d.loc[d["from_date"].eq(latest_from), "to_date_filled"] = today
+
+        # Current managers = latest stint (max from_date)
+        cur = d[d["from_date"].eq(latest_from)].copy()
+        cur["tenure_years"] = (today - cur["from_date"]).dt.days / 365.25
+
+        # Collapse to one row per fund; co-managers -> joined names
+        out = (
+            cur.groupby("fund_id", as_index=False)
+               .agg(
+                   fund_manager=("fund_manager", lambda x: "; ".join(sorted(set(map(str, x))))),
+                   tenure_years=("tenure_years", "max"),
+               )
+        )
+
+        out = out.merge(df_funds[["fund_id", "fund_name"]], on="fund_id", how="left")
+        out = out.dropna(subset=["fund_name"])
+        out = out[out["tenure_years"] >= min_years].copy()
+        out["tenure_years"] = out["tenure_years"].round(1)
+
+        out = out.sort_values(["fund_name", "tenure_years"], ascending=[True, False]).reset_index(drop=True)
+
+        st.markdown(f"### Funds where current manager tenure is ≥ {min_years:.1f} years")
+        if out.empty:
+            st.info("No funds match the minimum tenure filter.")
+        else:
+            st.dataframe(out[["fund_name", "fund_manager", "tenure_years"]], use_container_width=True)
+        return
+
+    # -----------------------------
+    # MODE A: Single fund manager history (chart)
+    # -----------------------------
     fund_names = df_funds["fund_name"].tolist()
     fund_name_to_id = dict(zip(df_funds["fund_name"], df_funds["fund_id"]))
 
-    st.subheader("2. Select focus fund")
+    st.subheader("3. Select focus fund")
 
-    # Persist focus fund across reruns
     if "fm_focus_fund_name" not in st.session_state:
         st.session_state["fm_focus_fund_name"] = fund_names[0]
-
-    # If previously selected fund no longer in universe, reset to first
     if st.session_state["fm_focus_fund_name"] not in fund_names:
         st.session_state["fm_focus_fund_name"] = fund_names[0]
 
@@ -6886,14 +6949,6 @@ def fund_manager_tenure_page():
     )
     st.session_state["fm_focus_fund_name"] = focus_fund
     focus_fund_id = int(fund_name_to_id[focus_fund])
-
-    # -----------------------------
-    # Step 3: Pull tenure + render chart
-    # -----------------------------
-    df_tenure = fetch_fund_manager_tenure(df_funds["fund_id"].astype(int).tolist())
-    if df_tenure.empty:
-        st.info("No fund manager tenure data available.")
-        return
 
     df_focus = df_tenure[df_tenure["fund_id"] == focus_fund_id].copy()
     if df_focus.empty:
@@ -6909,6 +6964,7 @@ def fund_manager_tenure_page():
         show["to_date"] = pd.to_datetime(show["to_date"]).dt.strftime("%b-%Y")
         show.loc[show["to_date"].isna(), "to_date"] = "Current"
         st.dataframe(show[["fund_manager", "from_date", "to_date"]], use_container_width=True)
+
 
 
 
