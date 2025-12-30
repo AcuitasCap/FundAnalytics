@@ -1624,6 +1624,143 @@ def _parse_month_year(series: pd.Series, colname: str, allow_blank: bool) -> pd.
 
     return dt
 
+def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
+    """
+    Render a dataframe as an HTML table with:
+    - horizontal + vertical scroll
+    - first column sticky (frozen)
+    """
+    if df is None or df.empty:
+        st.info("No data to display.")
+        return
+
+    html = df.to_html(index=False, escape=True)
+
+    css = f"""
+    <style>
+      .sticky-wrap {{
+        max-height: {height_px}px;
+        overflow: auto;
+        border: 1px solid rgba(49, 51, 63, 0.2);
+        border-radius: 6px;
+      }}
+      .sticky-wrap table {{
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 13px;
+      }}
+      .sticky-wrap th, .sticky-wrap td {{
+        padding: 6px 10px;
+        border-bottom: 1px solid rgba(49, 51, 63, 0.15);
+        white-space: nowrap;
+      }}
+      .sticky-wrap thead th {{
+        position: sticky;
+        top: 0;
+        background: #ffffff;
+        z-index: 3;
+        border-bottom: 1px solid rgba(49, 51, 63, 0.25);
+      }}
+      .sticky-wrap th:first-child,
+      .sticky-wrap td:first-child {{
+        position: sticky;
+        left: 0;
+        background: #ffffff;
+        z-index: 4;
+        border-right: 1px solid rgba(49, 51, 63, 0.15);
+      }}
+      .sticky-wrap thead th:first-child {{
+        z-index: 6;
+      }}
+    </style>
+    """
+    st.markdown(css + f"<div class='sticky-wrap'>{html}</div>", unsafe_allow_html=True)
+
+
+def build_size_asset_allocation_pivot(
+    holdings: pd.DataFrame,
+    size_band: pd.DataFrame,
+    freq: str,
+    period_col: str = "month_end",
+):
+    """
+    Build allocation table below holdings:
+    - Domestic Equities split into Large/Mid/Small via stock_size_band (isin + month_end)
+    - Other asset types shown as their asset_type (with light normalization)
+    Output: Allocation | <periods...> with values = sum(weight_pct)
+    """
+
+    if holdings is None or holdings.empty:
+        return pd.DataFrame()
+
+    h = holdings.copy()
+    h[period_col] = pd.to_datetime(h[period_col]).dt.to_period("M").dt.to_timestamp("M")
+    h["weight_pct"] = pd.to_numeric(h["weight_pct"], errors="coerce").fillna(0.0)
+    h["asset_type"] = h["asset_type"].fillna("").astype(str)
+    h["isin"] = h["isin"].fillna("").astype(str)
+
+    # Apply snapshot selection consistent with your portfolio view
+    if freq == "Quarterly":
+        grp = h[period_col].dt.to_period("Q")
+        last_me = h.groupby(grp)[period_col].transform("max")
+        h = h[h[period_col].eq(last_me)].copy()
+    elif freq == "Yearly":
+        grp = h[period_col].dt.to_period("Y")
+        last_me = h.groupby(grp)[period_col].transform("max")
+        h = h[h[period_col].eq(last_me)].copy()
+    # Monthly = no change
+
+    if h.empty:
+        return pd.DataFrame()
+
+    sb = size_band.copy() if size_band is not None else pd.DataFrame()
+    sb_map = {}
+    if not sb.empty:
+        sb["month_end"] = pd.to_datetime(sb["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+        sb["isin"] = sb["isin"].fillna("").astype(str)
+        sb["size_band"] = sb["size_band"].fillna("").astype(str)
+        sb_map = sb.set_index(["month_end", "isin"])["size_band"].to_dict()
+
+    def _bucket(row):
+        at = row["asset_type"].strip()
+        if at == "Domestic Equities":
+            band = sb_map.get((row[period_col], row["isin"]), "")
+            band = str(band).strip()
+            return band if band in {"Large", "Mid", "Small"} else "Unclassified"
+
+        if at.lower() == "cash":
+            return "Cash"
+        if at in {"Overseas Equities", "ADRs & GDRs"}:
+            return "Overseas Equities"
+
+        return at if at else "Others"
+
+    h["Allocation"] = h.apply(_bucket, axis=1)
+
+    h["period"] = h[period_col].dt.strftime("%b %Y")
+
+    # Chronological column order
+    period_order = (
+        h[["period", period_col]]
+        .drop_duplicates()
+        .sort_values(period_col)["period"]
+        .tolist()
+    )
+
+    piv = (
+        h.groupby(["Allocation", "period"], as_index=False)["weight_pct"]
+        .sum()
+        .pivot(index="Allocation", columns="period", values="weight_pct")
+        .fillna(0.0)
+    )
+
+    piv = piv.reindex(columns=period_order)
+
+    preferred = ["Large", "Mid", "Small", "Overseas Equities", "Cash", "Unclassified", "Others"]
+    others = [r for r in piv.index.tolist() if r not in preferred]
+    piv = piv.reindex(preferred + sorted(others))
+
+    return piv.reset_index()
 
 
 def validate_fund_manager_tenure(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -6981,6 +7118,7 @@ def portfolio_page():
     else:
         active_share_subpage()
 
+
 def portfolio_view_subpage():
     # === View portfolio ===
     categories = fetch_categories()
@@ -6988,6 +7126,40 @@ def portfolio_view_subpage():
         st.warning("No categories found.")
         return
 
+    # -----------------------------
+    # Frequency snapshot selector (keep local; used only here)
+    # -----------------------------
+    def _apply_frequency_snapshots(df_in: pd.DataFrame, freq: str) -> pd.DataFrame:
+        """
+        df_in must contain 'month_end' as datetime.
+        Monthly  -> keep all month_end
+        Quarterly-> keep last month_end within each quarter
+        Yearly   -> keep last month_end within each year
+        """
+        if df_in.empty:
+            return df_in
+
+        df = df_in.copy()
+        df["month_end"] = pd.to_datetime(df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+
+        if freq == "Monthly":
+            return df
+
+        if freq == "Quarterly":
+            df["grp"] = df["month_end"].dt.to_period("Q")
+        elif freq == "Yearly":
+            df["grp"] = df["month_end"].dt.to_period("Y")
+        else:
+            return df
+
+        last_me = df.groupby("grp")["month_end"].transform("max")
+        df = df[df["month_end"].eq(last_me)].copy()
+        df.drop(columns=["grp"], inplace=True, errors="ignore")
+        return df
+
+    # -----------------------------
+    # UI: Categories
+    # -----------------------------
     st.subheader("1. Select categories")
     selected_categories = []
     cols = st.columns(min(4, len(categories)))
@@ -7005,11 +7177,12 @@ def portfolio_view_subpage():
         st.warning("No funds found for the selected categories.")
         return
 
+    # -----------------------------
+    # UI: Fund
+    # -----------------------------
     st.subheader("2. Select fund")
 
-    # Handle either 'category_name' or 'category' depending on your fetch_funds_for_categories
     cat_col = "category_name" if "category_name" in funds_df.columns else "category"
-
     fund_options = {
         f"{row['fund_name']} ({row[cat_col]})": row["fund_id"]
         for _, row in funds_df.iterrows()
@@ -7018,7 +7191,9 @@ def portfolio_view_subpage():
     fund_label = st.selectbox("Fund", options=list(fund_options.keys()))
     fund_id = fund_options[fund_label]
 
-    # 3. Period selection
+    # -----------------------------
+    # UI: Period
+    # -----------------------------
     st.subheader("3. Select period")
 
     current_year = dt.date.today().year
@@ -7029,12 +7204,7 @@ def portfolio_view_subpage():
 
     col1, col2 = st.columns(2)
     with col1:
-        start_year = st.selectbox(
-            "Start year",
-            options=years,
-            index=0,
-            key="port_start_year",
-        )
+        start_year = st.selectbox("Start year", options=years, index=0, key="port_start_year")
         start_month = st.selectbox(
             "Start month",
             options=month_options,
@@ -7043,12 +7213,7 @@ def portfolio_view_subpage():
             format_func=lambda m: month_names[m - 1],
         )
     with col2:
-        end_year = st.selectbox(
-            "End year",
-            options=years,
-            index=len(years) - 1,
-            key="port_end_year",
-        )
+        end_year = st.selectbox("End year", options=years, index=len(years) - 1, key="port_end_year")
         end_month = st.selectbox(
             "End month",
             options=month_options,
@@ -7064,71 +7229,130 @@ def portfolio_view_subpage():
         st.error("Start date must be earlier than end date.")
         return
 
-    # 4. Frequency selection
+    # -----------------------------
+    # UI: Frequency
+    # -----------------------------
     st.subheader("4. Frequency")
-    freq = st.radio(
-        "Aggregation",
-        options=["Monthly", "Quarterly", "Yearly"],
-        horizontal=True,
-    )
+    freq = st.radio("Aggregation", options=["Monthly", "Quarterly", "Yearly"], horizontal=True)
 
-    # 5. Action button
+    # -----------------------------
+    # Action
+    # -----------------------------
     if st.button("Show portfolio"):
         with st.spinner("Loading portfolio..."):
-            df = fetch_fund_portfolio_timeseries(fund_id, start_date, end_date, freq)
+            engine = get_engine()
 
-        if df.empty:
-            st.warning("No portfolio data found for this fund and period.")
-            return
+            query = """
+                SELECT
+                    fund_id,
+                    month_end,
+                    company_name,
+                    isin,
+                    asset_type,
+                    weight_pct
+                FROM fundlab.fund_portfolio
+                WHERE fund_id = %(fund_id)s
+                  AND month_end >= %(start_date)s
+                  AND month_end <= %(end_date)s
+            """
+            port_df = pd.read_sql(
+                query,
+                engine,
+                params={"fund_id": int(fund_id), "start_date": start_date, "end_date": end_date},
+            )
 
-        # Build pivot table: rows = stock names, columns = periods, values = weights
-        df["period"] = pd.to_datetime(df["month_end"]).dt.strftime("%b %Y")
+            if port_df.empty:
+                st.warning("No portfolio data found for this fund and period.")
+                return
 
-        # Ensure column order is chronological
+            port_df["month_end"] = pd.to_datetime(port_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+            port_df["weight_pct"] = pd.to_numeric(port_df["weight_pct"], errors="coerce").fillna(0.0)
+
+            # Apply frequency snapshots for instrument table
+            port_snap = _apply_frequency_snapshots(port_df, freq)
+            if port_snap.empty:
+                st.warning("No portfolio snapshots found after applying the selected frequency.")
+                return
+
+            sb_query = """
+                SELECT
+                    isin,
+                    band_date AS month_end,
+                    size_band
+                FROM fundlab.stock_size_band
+                WHERE band_date >= %(start_date)s
+                  AND band_date <= %(end_date)s
+            """
+            size_band_df = pd.read_sql(sb_query, engine, params={"start_date": start_date, "end_date": end_date})
+            if not size_band_df.empty:
+                size_band_df["month_end"] = pd.to_datetime(size_band_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+                size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
+
+        # -----------------------------
+        # Instrument-level pivot
+        # -----------------------------
+        port_snap["period"] = port_snap["month_end"].dt.strftime("%b %Y")
+
         period_order_df = (
-            df[["period", "month_end"]]
+            port_snap[["period", "month_end"]]
             .drop_duplicates()
             .sort_values("month_end")
         )
         period_order = period_order_df["period"].tolist()
 
-        pivot = df.pivot_table(
+        pivot = port_snap.pivot_table(
             index="company_name",
             columns="period",
             values="weight_pct",
             aggfunc="sum",
             fill_value=0.0,
         )
-
-        # Align columns to chronological order
         pivot = pivot.reindex(columns=period_order)
 
-        # Sort rows by latest period weight (desc)
         latest_period = period_order[-1]
         if latest_period in pivot.columns:
             pivot = pivot.sort_values(by=latest_period, ascending=False)
 
-        # Add serial number column
-        df_display = pivot.reset_index()  # company_name becomes a normal column
+        df_display = pivot.reset_index()
         df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
 
+        # Format weights as strings with 1 decimal, '-' for tiny/zero
+        def _fmt(x):
+            if pd.isna(x) or abs(float(x)) < 0.0001:
+                return "-"
+            return f"{float(x):.1f}"
+
+        for c in df_display.columns:
+            if c not in ["S.No.", "company_name"]:
+                df_display[c] = df_display[c].apply(_fmt)
+
         st.subheader("5. Portfolio holdings")
-        st.caption(
-            f"Rows: stocks · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
+        st.caption(f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}")
+        render_sticky_first_col_table(df_display, height_px=520)
+
+        # -----------------------------
+        # Allocation table (use your new helper)
+        # -----------------------------
+        st.subheader("6. Size / asset-type allocation")
+
+        alloc_df = build_size_asset_allocation_pivot(
+            holdings=port_df,
+            size_band=size_band_df,
+            freq=freq,
+            period_col="month_end",
         )
 
-        def format_weight(x):
-            if pd.isna(x) or abs(x) < 0.0001:
-                return "-"
-            return f"{x:.1f}"
+        if alloc_df.empty:
+            st.info("No allocation data available.")
+            return
 
-        # Format only the weight columns; leave S.No. and company_name as-is
-        weight_cols = [c for c in df_display.columns if c not in ["S.No.", "company_name"]]
+        for c in alloc_df.columns:
+            if c != "Allocation":
+                alloc_df[c] = alloc_df[c].apply(_fmt)
 
-        styler = df_display.style
-        styler = styler.format(format_weight, subset=weight_cols)
+        render_sticky_first_col_table(alloc_df, height_px=320)
 
-        st.dataframe(styler)
+
 
 
 def active_share_subpage():
