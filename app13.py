@@ -21,7 +21,8 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text, sa
+from sqlalchemy import create_engine, text
+import sqlalchemy as sa
 import altair as alt
 from sqlalchemy.exc import SQLAlchemyError
 import plotly.express as px
