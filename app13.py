@@ -1677,7 +1677,6 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
     """
     st.markdown(css + f"<div class='sticky-wrap'>{html}</div>", unsafe_allow_html=True)
 
-
 def build_size_asset_allocation_pivot(
     holdings: pd.DataFrame,
     size_band: pd.DataFrame,
@@ -1689,16 +1688,31 @@ def build_size_asset_allocation_pivot(
     - Domestic Equities split into Large/Mid/Small via stock_size_band (isin + month_end)
     - Other asset types shown as their asset_type (with light normalization)
     Output: Allocation | <periods...> with values = sum(weight_pct)
+
+    Robustness:
+    - If 'weight_pct' not present, will use 'holding_weight' and treat it as the weight column.
     """
 
     if holdings is None or holdings.empty:
         return pd.DataFrame()
 
     h = holdings.copy()
+
+    # Normalize dates to month-end timestamps (matches your pivot periods)
     h[period_col] = pd.to_datetime(h[period_col]).dt.to_period("M").dt.to_timestamp("M")
-    h["weight_pct"] = pd.to_numeric(h["weight_pct"], errors="coerce").fillna(0.0)
-    h["asset_type"] = h["asset_type"].fillna("").astype(str)
-    h["isin"] = h["isin"].fillna("").astype(str)
+
+    # Determine weight column
+    weight_col = None
+    if "weight_pct" in h.columns:
+        weight_col = "weight_pct"
+    elif "holding_weight" in h.columns:
+        weight_col = "holding_weight"
+    else:
+        raise ValueError("Holdings dataframe must contain either 'weight_pct' or 'holding_weight'.")
+
+    h[weight_col] = pd.to_numeric(h[weight_col], errors="coerce").fillna(0.0)
+    h["asset_type"] = h.get("asset_type", "").fillna("").astype(str)
+    h["isin"] = h.get("isin", "").fillna("").astype(str)
 
     # Apply snapshot selection consistent with your portfolio view
     if freq == "Quarterly":
@@ -1714,30 +1728,53 @@ def build_size_asset_allocation_pivot(
     if h.empty:
         return pd.DataFrame()
 
+    # Prepare size_band mapping via merge (faster and clearer than per-row apply)
     sb = size_band.copy() if size_band is not None else pd.DataFrame()
-    sb_map = {}
     if not sb.empty:
+        # Accept either 'month_end' already aliased or raw 'band_date'
+        if "month_end" not in sb.columns and "band_date" in sb.columns:
+            sb = sb.rename(columns={"band_date": "month_end"})
+
         sb["month_end"] = pd.to_datetime(sb["month_end"]).dt.to_period("M").dt.to_timestamp("M")
         sb["isin"] = sb["isin"].fillna("").astype(str)
         sb["size_band"] = sb["size_band"].fillna("").astype(str)
-        sb_map = sb.set_index(["month_end", "isin"])["size_band"].to_dict()
 
-    def _bucket(row):
-        at = row["asset_type"].strip()
-        if at == "Domestic Equities":
-            band = sb_map.get((row[period_col], row["isin"]), "")
-            band = str(band).strip()
-            return band if band in {"Large", "Mid", "Small"} else "Unclassified"
+        sb_small = sb[["month_end", "isin", "size_band"]].drop_duplicates()
+        h = h.merge(
+            sb_small,
+            how="left",
+            left_on=[period_col, "isin"],
+            right_on=["month_end", "isin"],
+            suffixes=("", "_sb"),
+        )
+        # If we merged on an extra month_end column, drop it
+        if "month_end_sb" in h.columns:
+            h.drop(columns=["month_end_sb"], inplace=True, errors="ignore")
+        if "month_end_y" in h.columns:
+            h.drop(columns=["month_end_y"], inplace=True, errors="ignore")
+        if "month_end_x" in h.columns:
+            h.rename(columns={"month_end_x": period_col}, inplace=True)
+    else:
+        h["size_band"] = ""
 
-        if at.lower() == "cash":
-            return "Cash"
-        if at in {"Overseas Equities", "ADRs & GDRs"}:
-            return "Overseas Equities"
+    # Build Allocation bucket vectorized
+    at = h["asset_type"].str.strip()
 
-        return at if at else "Others"
+    # Default bucket = asset_type (or Others)
+    h["Allocation"] = at.where(at != "", other="Others")
 
-    h["Allocation"] = h.apply(_bucket, axis=1)
+    # Normalize Cash
+    h.loc[at.str.lower().eq("cash"), "Allocation"] = "Cash"
 
+    # Normalize Overseas
+    h.loc[at.isin(["Overseas Equities", "ADRs & GDRs"]), "Allocation"] = "Overseas Equities"
+
+    # Domestic Equities -> Large/Mid/Small using size_band; else Unclassified
+    is_dom = at.eq("Domestic Equities")
+    band = h.loc[is_dom, "size_band"].astype(str).str.strip()
+    h.loc[is_dom, "Allocation"] = band.where(band.isin(["Large", "Mid", "Small"]), other="Unclassified")
+
+    # Period labels
     h["period"] = h[period_col].dt.strftime("%b %Y")
 
     # Chronological column order
@@ -1749,9 +1786,9 @@ def build_size_asset_allocation_pivot(
     )
 
     piv = (
-        h.groupby(["Allocation", "period"], as_index=False)["weight_pct"]
+        h.groupby(["Allocation", "period"], as_index=False)[weight_col]
         .sum()
-        .pivot(index="Allocation", columns="period", values="weight_pct")
+        .pivot(index="Allocation", columns="period", values=weight_col)
         .fillna(0.0)
     )
 
@@ -7122,21 +7159,17 @@ def portfolio_page():
 
 def portfolio_view_subpage():
     # === View portfolio ===
+    import sqlalchemy as sa
+
     categories = fetch_categories()
     if not categories:
         st.warning("No categories found.")
         return
 
     # -----------------------------
-    # Frequency snapshot selector (keep local; used only here)
+    # Frequency snapshot selector (local)
     # -----------------------------
     def _apply_frequency_snapshots(df_in: pd.DataFrame, freq: str) -> pd.DataFrame:
-        """
-        df_in must contain 'month_end' as datetime.
-        Monthly  -> keep all month_end
-        Quarterly-> keep last month_end within each quarter
-        Yearly   -> keep last month_end within each year
-        """
         if df_in.empty:
             return df_in
 
@@ -7182,15 +7215,15 @@ def portfolio_view_subpage():
     # UI: Fund
     # -----------------------------
     st.subheader("2. Select fund")
-
     cat_col = "category_name" if "category_name" in funds_df.columns else "category"
+
     fund_options = {
         f"{row['fund_name']} ({row[cat_col]})": row["fund_id"]
         for _, row in funds_df.iterrows()
     }
 
     fund_label = st.selectbox("Fund", options=list(fund_options.keys()))
-    fund_id = fund_options[fund_label]
+    fund_id = int(fund_options[fund_label])
 
     # -----------------------------
     # UI: Period
@@ -7243,15 +7276,15 @@ def portfolio_view_subpage():
         with st.spinner("Loading portfolio..."):
             engine = get_engine()
 
-            # IMPORTANT: use :named parameters (SQLAlchemy bind style), not %(...)s
+            # Use actual schema columns + aliases to keep downstream logic stable
             query = """
                 SELECT
                     fund_id,
                     month_end,
-                    company_name,
+                    instrument_name AS company_name,
                     isin,
                     asset_type,
-                    weight_pct
+                    holding_weight AS weight_pct
                 FROM fundlab.fund_portfolio
                 WHERE fund_id = :fund_id
                   AND month_end >= :start_date
@@ -7260,13 +7293,14 @@ def portfolio_view_subpage():
             port_df = pd.read_sql(
                 sa.text(query),
                 engine,
-                params={"fund_id": int(fund_id), "start_date": start_date, "end_date": end_date},
+                params={"fund_id": fund_id, "start_date": start_date, "end_date": end_date},
             )
 
             if port_df.empty:
                 st.warning("No portfolio data found for this fund and period.")
                 return
 
+            # normalize types
             port_df["month_end"] = pd.to_datetime(port_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
             port_df["weight_pct"] = pd.to_numeric(port_df["weight_pct"], errors="coerce").fillna(0.0)
 
@@ -7276,6 +7310,7 @@ def portfolio_view_subpage():
                 st.warning("No portfolio snapshots found after applying the selected frequency.")
                 return
 
+            # Pull size band using correct schema column name: band_date
             sb_query = """
                 SELECT
                     isin,
@@ -7290,6 +7325,7 @@ def portfolio_view_subpage():
                 engine,
                 params={"start_date": start_date, "end_date": end_date},
             )
+
             if not size_band_df.empty:
                 size_band_df["month_end"] = pd.to_datetime(size_band_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
                 size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
@@ -7338,14 +7374,17 @@ def portfolio_view_subpage():
         # -----------------------------
         # Allocation table (use your global helper)
         # -----------------------------
-        st.subheader("6. Size / asset-type allocation:")
+        st.subheader("6. Size / asset-type allocation")
 
+        # IMPORTANT: your helper should expect weight_pct, month_end, asset_type, isin
+        # We already aliased holding_weight -> weight_pct and instrument_name -> company_name above.
         alloc_df = build_size_asset_allocation_pivot(
             holdings=port_df,
             size_band=size_band_df,
             freq=freq,
             period_col="month_end",
         )
+
         if alloc_df.empty:
             st.info("No allocation data available.")
             return
@@ -7355,8 +7394,6 @@ def portfolio_view_subpage():
                 alloc_df[c] = alloc_df[c].apply(_fmt)
 
         render_sticky_first_col_table(alloc_df, height_px=320)
-
-
 
 
 
