@@ -1627,15 +1627,16 @@ def _parse_month_year(series: pd.Series, colname: str, allow_blank: bool) -> pd.
 
 def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
     """
-    Render a dataframe as an HTML table with:
-    - horizontal + vertical scroll
-    - first column sticky (frozen)
+    Render a dataframe as an HTML table with sticky header + sticky first column.
+    IMPORTANT: call this function directly (do NOT wrap in st.write / st.text).
     """
     if df is None or df.empty:
         st.info("No data to display.")
         return
 
-    html = df.to_html(index=False, escape=True)
+    # Convert to HTML table. Keep escape=False so the HTML table renders correctly.
+    # (We are not injecting user-supplied HTML; values are plain strings/numbers.)
+    html = df.to_html(index=False, escape=False)
 
     css = f"""
     <style>
@@ -1675,7 +1676,9 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
       }}
     </style>
     """
+
     st.markdown(css + f"<div class='sticky-wrap'>{html}</div>", unsafe_allow_html=True)
+
 
 def build_size_asset_allocation_pivot(
     holdings: pd.DataFrame,
