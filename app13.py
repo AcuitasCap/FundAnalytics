@@ -71,7 +71,7 @@ if not check_password():
 
 
 def home_button():
-    """Render a Home button that jumps back to the Home page."""
+    """Render a Home button that jumps back to the Home page ."""
     if st.button("🏠 Home"):
         st.session_state["page"] = "Home"
         st.rerun()
