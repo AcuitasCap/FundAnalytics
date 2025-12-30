@@ -7337,7 +7337,7 @@ def portfolio_view_subpage():
         # -----------------------------
         # Allocation table (use your global helper)
         # -----------------------------
-        st.subheader("6. Size / asset-type allocation")
+        st.subheader("6. Size / asset-type allocation:")
 
         alloc_df = build_size_asset_allocation_pivot(
             holdings=port_df,
