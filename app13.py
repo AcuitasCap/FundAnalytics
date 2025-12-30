@@ -7403,6 +7403,12 @@ def portfolio_view_subpage():
 
         df_display = pivot.reset_index()  # company_name is column now
 
+        # Ensure the first column is named 'company_name' after reset_index()
+        first_col = df_display.columns[0]
+        if first_col != "company_name":
+            df_display = df_display.rename(columns={first_col: "company_name"})
+
+
         # Insert S.No. with blank for Total row
         df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
         df_display.loc[df_display["company_name"] == "Total", "S.No."] = ""
