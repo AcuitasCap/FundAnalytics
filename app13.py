@@ -7418,7 +7418,7 @@ def portfolio_view_subpage():
             if c not in ["S.No.", "company_name"]:
                 df_display[c] = df_display[c].apply(_fmt)
 
-        st.subheader("5. Portfolio holdings")
+        st.subheader("5. Portfolio holdings:")
         st.caption(
             f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
