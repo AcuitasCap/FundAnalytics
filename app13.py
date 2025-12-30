@@ -1625,7 +1625,7 @@ def _parse_month_year(series: pd.Series, colname: str, allow_blank: bool) -> pd.
 
     return dt
 
-def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
+def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520, freeze_cols: int = 1):
     import streamlit as st
     import streamlit.components.v1 as components
 
@@ -1633,8 +1633,40 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
         st.info("No data to display.")
         return
 
-    # Important: escape=False so that the table HTML renders as HTML (not text)
+    # Ensure freeze_cols sane
+    freeze_cols = max(1, int(freeze_cols))
+
     table_html = df.to_html(index=False, escape=False)
+
+    # Build CSS that makes first N columns sticky
+    sticky_cols_css = []
+    left_px = 0
+    # Column widths vary; use cumulative left offsets by assigning a fixed min-width per column.
+    # This is the only robust approach in pure CSS without JS measurement.
+    # You can tweak col_width_px if needed.
+    col_width_px = 180
+
+    for i in range(1, freeze_cols + 1):
+        sticky_cols_css.append(f"""
+        .sticky-wrap th:nth-child({i}),
+        .sticky-wrap td:nth-child({i}) {{
+          position: sticky;
+          left: {left_px}px;
+          background: #ffffff;
+          z-index: 4;
+          border-right: 1px solid rgba(49, 51, 63, 0.15);
+          min-width: {col_width_px}px;
+          max-width: {col_width_px}px;
+        }}
+        """)
+        left_px += col_width_px
+
+    # Ensure header cells are above body cells
+    sticky_cols_css.append(f"""
+    .sticky-wrap thead th {{
+      z-index: 6;
+    }}
+    """)
 
     css = f"""
     <style>
@@ -1646,7 +1678,8 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
       }}
       .sticky-wrap table {{
         border-collapse: collapse;
-        width: 100%;
+        width: max-content;
+        min-width: 100%;
         font-size: 13px;
       }}
       .sticky-wrap th, .sticky-wrap td {{
@@ -1658,27 +1691,14 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
         position: sticky;
         top: 0;
         background: #ffffff;
-        z-index: 3;
         border-bottom: 1px solid rgba(49, 51, 63, 0.25);
       }}
-      .sticky-wrap th:first-child,
-      .sticky-wrap td:first-child {{
-        position: sticky;
-        left: 0;
-        background: #ffffff;
-        z-index: 4;
-        border-right: 1px solid rgba(49, 51, 63, 0.15);
-      }}
-      .sticky-wrap thead th:first-child {{
-        z-index: 6;
-      }}
+      {''.join(sticky_cols_css)}
     </style>
     """
 
     html = css + f"<div class='sticky-wrap'>{table_html}</div>"
-
-    # Use components.html for reliable HTML rendering
-    components.html(html, height=height_px + 60, scrolling=True)
+    components.html(html, height=height_px + 70, scrolling=True)
 
 
 def build_size_asset_allocation_pivot(
@@ -1688,37 +1708,33 @@ def build_size_asset_allocation_pivot(
     period_col: str = "month_end",
 ):
     """
-    Build allocation table below holdings:
-    - Domestic Equities split into Large/Mid/Small via stock_size_band (isin + month_end)
-    - Other asset types shown as their asset_type (with light normalization)
-    Output: Allocation | <periods...> with values = sum(weight_pct)
-
-    Robustness:
-    - If 'weight_pct' not present, will use 'holding_weight' and treat it as the weight column.
+    Allocation table:
+    - Domestic Equities split into Large/Mid/Small using stock_size_band (isin + band_date)
+    - stock_size_band is only tagged in Jun/Dec; we forward-fill per ISIN using last known tag <= month_end
+      (Jun applies through Nov; Dec applies through May).
+    - Other asset types shown via asset_type (with light normalization)
+    Output: Allocation | <periods...> with values = sum(weight_pct OR holding_weight)
     """
 
     if holdings is None or holdings.empty:
         return pd.DataFrame()
 
     h = holdings.copy()
-
-    # Normalize dates to month-end timestamps (matches your pivot periods)
     h[period_col] = pd.to_datetime(h[period_col]).dt.to_period("M").dt.to_timestamp("M")
-
-    # Determine weight column
-    weight_col = None
-    if "weight_pct" in h.columns:
-        weight_col = "weight_pct"
-    elif "holding_weight" in h.columns:
-        weight_col = "holding_weight"
-    else:
-        raise ValueError("Holdings dataframe must contain either 'weight_pct' or 'holding_weight'.")
-
-    h[weight_col] = pd.to_numeric(h[weight_col], errors="coerce").fillna(0.0)
     h["asset_type"] = h.get("asset_type", "").fillna("").astype(str)
     h["isin"] = h.get("isin", "").fillna("").astype(str)
 
-    # Apply snapshot selection consistent with your portfolio view
+    # Determine weight column
+    if "weight_pct" in h.columns:
+        wcol = "weight_pct"
+    elif "holding_weight" in h.columns:
+        wcol = "holding_weight"
+    else:
+        raise ValueError("Holdings must contain 'weight_pct' or 'holding_weight'.")
+
+    h[wcol] = pd.to_numeric(h[wcol], errors="coerce").fillna(0.0)
+
+    # Snapshot selection
     if freq == "Quarterly":
         grp = h[period_col].dt.to_period("Q")
         last_me = h.groupby(grp)[period_col].transform("max")
@@ -1727,15 +1743,14 @@ def build_size_asset_allocation_pivot(
         grp = h[period_col].dt.to_period("Y")
         last_me = h.groupby(grp)[period_col].transform("max")
         h = h[h[period_col].eq(last_me)].copy()
-    # Monthly = no change
 
     if h.empty:
         return pd.DataFrame()
 
-    # Prepare size_band mapping via merge (faster and clearer than per-row apply)
+    # Prepare size bands and apply carry-forward via merge_asof per ISIN
     sb = size_band.copy() if size_band is not None else pd.DataFrame()
     if not sb.empty:
-        # Accept either 'month_end' already aliased or raw 'band_date'
+        # Accept either month_end alias or raw band_date
         if "month_end" not in sb.columns and "band_date" in sb.columns:
             sb = sb.rename(columns={"band_date": "month_end"})
 
@@ -1743,45 +1758,55 @@ def build_size_asset_allocation_pivot(
         sb["isin"] = sb["isin"].fillna("").astype(str)
         sb["size_band"] = sb["size_band"].fillna("").astype(str)
 
-        sb_small = sb[["month_end", "isin", "size_band"]].drop_duplicates()
-        h = h.merge(
-            sb_small,
-            how="left",
-            left_on=[period_col, "isin"],
-            right_on=["month_end", "isin"],
-            suffixes=("", "_sb"),
-        )
-        # If we merged on an extra month_end column, drop it
-        if "month_end_sb" in h.columns:
-            h.drop(columns=["month_end_sb"], inplace=True, errors="ignore")
-        if "month_end_y" in h.columns:
-            h.drop(columns=["month_end_y"], inplace=True, errors="ignore")
-        if "month_end_x" in h.columns:
-            h.rename(columns={"month_end_x": period_col}, inplace=True)
+        # Only keep valid bands
+        sb = sb[sb["size_band"].isin(["Large", "Mid", "Small"])].copy()
+
+        # Sort for merge_asof
+        sb = sb.sort_values(["isin", "month_end"])
+        h = h.sort_values(["isin", period_col])
+
+        # merge_asof needs a single key; do it per ISIN with groupby apply (still fast enough here)
+        def _asof_merge(g):
+            isin = g.name
+            sb_i = sb[sb["isin"] == isin][["month_end", "size_band"]]
+            if sb_i.empty:
+                g["size_band"] = ""
+                return g
+            out = pd.merge_asof(
+                g.sort_values(period_col),
+                sb_i.sort_values("month_end"),
+                left_on=period_col,
+                right_on="month_end",
+                direction="backward",
+            )
+            out.drop(columns=["month_end_y"], inplace=True, errors="ignore")
+            out.rename(columns={period_col: "month_end", "month_end_x": "month_end"}, inplace=True)
+            # Ensure column name uniform
+            if "month_end" not in out.columns:
+                out["month_end"] = g[period_col].values
+            return out
+
+        h = h.groupby("isin", group_keys=False).apply(_asof_merge)
+        # restore standard period_col name if altered
+        if "month_end" not in h.columns:
+            h["month_end"] = pd.to_datetime(h[period_col]).dt.to_period("M").dt.to_timestamp("M")
+        period_col = "month_end"
     else:
         h["size_band"] = ""
 
-    # Build Allocation bucket vectorized
     at = h["asset_type"].str.strip()
 
-    # Default bucket = asset_type (or Others)
+    # Default Allocation = asset_type / Others
     h["Allocation"] = at.where(at != "", other="Others")
-
-    # Normalize Cash
     h.loc[at.str.lower().eq("cash"), "Allocation"] = "Cash"
-
-    # Normalize Overseas
     h.loc[at.isin(["Overseas Equities", "ADRs & GDRs"]), "Allocation"] = "Overseas Equities"
 
-    # Domestic Equities -> Large/Mid/Small using size_band; else Unclassified
     is_dom = at.eq("Domestic Equities")
     band = h.loc[is_dom, "size_band"].astype(str).str.strip()
     h.loc[is_dom, "Allocation"] = band.where(band.isin(["Large", "Mid", "Small"]), other="Unclassified")
 
-    # Period labels
-    h["period"] = h[period_col].dt.strftime("%b %Y")
+    h["period"] = pd.to_datetime(h[period_col]).dt.strftime("%b %Y")
 
-    # Chronological column order
     period_order = (
         h[["period", period_col]]
         .drop_duplicates()
@@ -1790,9 +1815,9 @@ def build_size_asset_allocation_pivot(
     )
 
     piv = (
-        h.groupby(["Allocation", "period"], as_index=False)[weight_col]
+        h.groupby(["Allocation", "period"], as_index=False)[wcol]
         .sum()
-        .pivot(index="Allocation", columns="period", values=weight_col)
+        .pivot(index="Allocation", columns="period", values=wcol)
         .fillna(0.0)
     )
 
@@ -1803,6 +1828,7 @@ def build_size_asset_allocation_pivot(
     piv = piv.reindex(preferred + sorted(others))
 
     return piv.reset_index()
+
 
 
 def validate_fund_manager_tenure(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -7274,6 +7300,17 @@ def portfolio_view_subpage():
     freq = st.radio("Aggregation", options=["Monthly", "Quarterly", "Yearly"], horizontal=True)
 
     # -----------------------------
+    # Formatting helper
+    # -----------------------------
+    def _fmt(x):
+        try:
+            if pd.isna(x) or abs(float(x)) < 0.0001:
+                return "-"
+            return f"{float(x):.1f}"
+        except Exception:
+            return "-"
+
+    # -----------------------------
     # Action
     # -----------------------------
     if st.button("Show portfolio"):
@@ -7307,6 +7344,7 @@ def portfolio_view_subpage():
             # normalize types
             port_df["month_end"] = pd.to_datetime(port_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
             port_df["weight_pct"] = pd.to_numeric(port_df["weight_pct"], errors="coerce").fillna(0.0)
+            port_df["company_name"] = port_df["company_name"].fillna("").astype(str)
 
             # Apply frequency snapshots for instrument table
             port_snap = _apply_frequency_snapshots(port_df, freq)
@@ -7335,7 +7373,7 @@ def portfolio_view_subpage():
                 size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
 
         # -----------------------------
-        # Instrument-level pivot
+        # Instrument-level pivot + TOTAL row
         # -----------------------------
         port_snap["period"] = port_snap["month_end"].dt.strftime("%b %Y")
 
@@ -7352,36 +7390,41 @@ def portfolio_view_subpage():
             values="weight_pct",
             aggfunc="sum",
             fill_value=0.0,
-        )
-        pivot = pivot.reindex(columns=period_order)
+        ).reindex(columns=period_order)
 
+        # Sort rows by latest period weight (desc)
         latest_period = period_order[-1]
         if latest_period in pivot.columns:
             pivot = pivot.sort_values(by=latest_period, ascending=False)
 
-        df_display = pivot.reset_index()
+        # Add TOTAL row (numeric) BEFORE formatting
+        total_series = pivot.sum(axis=0)
+        pivot = pd.concat([pivot, pd.DataFrame([total_series], index=["Total"])])
+
+        df_display = pivot.reset_index()  # company_name is column now
+
+        # Insert S.No. with blank for Total row
         df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
+        df_display.loc[df_display["company_name"] == "Total", "S.No."] = ""
 
-        def _fmt(x):
-            if pd.isna(x) or abs(float(x)) < 0.0001:
-                return "-"
-            return f"{float(x):.1f}"
-
+        # Format weights as strings with 1 decimal, '-' for tiny/zero
         for c in df_display.columns:
             if c not in ["S.No.", "company_name"]:
                 df_display[c] = df_display[c].apply(_fmt)
 
         st.subheader("5. Portfolio holdings")
-        st.caption(f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}")
-        render_sticky_first_col_table(df_display, height_px=520)
+        st.caption(
+            f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
+        )
+
+        # Freeze through 3rd column (S.No., company_name, first period)
+        render_sticky_first_col_table(df_display, height_px=520, freeze_cols=3)
 
         # -----------------------------
-        # Allocation table (use your global helper)
+        # Allocation table (uses your global helper with Jun/Dec carry-forward) + TOTAL row
         # -----------------------------
         st.subheader("6. Size / asset-type allocation")
 
-        # IMPORTANT: your helper should expect weight_pct, month_end, asset_type, isin
-        # We already aliased holding_weight -> weight_pct and instrument_name -> company_name above.
         alloc_df = build_size_asset_allocation_pivot(
             holdings=port_df,
             size_band=size_band_df,
@@ -7393,12 +7436,22 @@ def portfolio_view_subpage():
             st.info("No allocation data available.")
             return
 
+        # Add TOTAL row (numeric) BEFORE formatting
+        num_cols = [c for c in alloc_df.columns if c != "Allocation"]
+        alloc_num = alloc_df[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        totals = alloc_num.sum(axis=0)
+        alloc_df = pd.concat(
+            [alloc_df, pd.DataFrame([{"Allocation": "Total", **totals.to_dict()}])],
+            ignore_index=True,
+        )
+
+        # Format
         for c in alloc_df.columns:
             if c != "Allocation":
                 alloc_df[c] = alloc_df[c].apply(_fmt)
 
-        render_sticky_first_col_table(alloc_df, height_px=320)
-
+        # Freeze through 2nd column (Allocation + first period)
+        render_sticky_first_col_table(alloc_df, height_px=320, freeze_cols=2)
 
 
 def active_share_subpage():
