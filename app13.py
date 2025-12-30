@@ -7242,6 +7242,7 @@ def portfolio_view_subpage():
         with st.spinner("Loading portfolio..."):
             engine = get_engine()
 
+            # IMPORTANT: use :named parameters (SQLAlchemy bind style), not %(...)s
             query = """
                 SELECT
                     fund_id,
@@ -7251,9 +7252,9 @@ def portfolio_view_subpage():
                     asset_type,
                     weight_pct
                 FROM fundlab.fund_portfolio
-                WHERE fund_id = %(fund_id)s
-                  AND month_end >= %(start_date)s
-                  AND month_end <= %(end_date)s
+                WHERE fund_id = :fund_id
+                  AND month_end >= :start_date
+                  AND month_end <= :end_date
             """
             port_df = pd.read_sql(
                 query,
@@ -7280,10 +7281,14 @@ def portfolio_view_subpage():
                     band_date AS month_end,
                     size_band
                 FROM fundlab.stock_size_band
-                WHERE band_date >= %(start_date)s
-                  AND band_date <= %(end_date)s
+                WHERE band_date >= :start_date
+                  AND band_date <= :end_date
             """
-            size_band_df = pd.read_sql(sb_query, engine, params={"start_date": start_date, "end_date": end_date})
+            size_band_df = pd.read_sql(
+                sb_query,
+                engine,
+                params={"start_date": start_date, "end_date": end_date},
+            )
             if not size_band_df.empty:
                 size_band_df["month_end"] = pd.to_datetime(size_band_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
                 size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
@@ -7316,7 +7321,6 @@ def portfolio_view_subpage():
         df_display = pivot.reset_index()
         df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
 
-        # Format weights as strings with 1 decimal, '-' for tiny/zero
         def _fmt(x):
             if pd.isna(x) or abs(float(x)) < 0.0001:
                 return "-"
@@ -7331,7 +7335,7 @@ def portfolio_view_subpage():
         render_sticky_first_col_table(df_display, height_px=520)
 
         # -----------------------------
-        # Allocation table (use your new helper)
+        # Allocation table (use your global helper)
         # -----------------------------
         st.subheader("6. Size / asset-type allocation")
 
@@ -7341,7 +7345,6 @@ def portfolio_view_subpage():
             freq=freq,
             period_col="month_end",
         )
-
         if alloc_df.empty:
             st.info("No allocation data available.")
             return
@@ -7351,6 +7354,7 @@ def portfolio_view_subpage():
                 alloc_df[c] = alloc_df[c].apply(_fmt)
 
         render_sticky_first_col_table(alloc_df, height_px=320)
+
 
 
 
