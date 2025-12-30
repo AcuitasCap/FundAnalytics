@@ -1680,6 +1680,7 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
     st.markdown(css + f"<div class='sticky-wrap'>{html}</div>", unsafe_allow_html=True)
 
 
+
 def build_size_asset_allocation_pivot(
     holdings: pd.DataFrame,
     size_band: pd.DataFrame,
