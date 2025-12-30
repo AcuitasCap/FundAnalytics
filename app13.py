@@ -21,7 +21,7 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, sa
 import altair as alt
 from sqlalchemy.exc import SQLAlchemyError
 import plotly.express as px
@@ -7257,7 +7257,7 @@ def portfolio_view_subpage():
                   AND month_end <= :end_date
             """
             port_df = pd.read_sql(
-                query,
+                sa.text(query),
                 engine,
                 params={"fund_id": int(fund_id), "start_date": start_date, "end_date": end_date},
             )
@@ -7285,7 +7285,7 @@ def portfolio_view_subpage():
                   AND band_date <= :end_date
             """
             size_band_df = pd.read_sql(
-                sb_query,
+                sa.text(sb_query),
                 engine,
                 params={"start_date": start_date, "end_date": end_date},
             )
