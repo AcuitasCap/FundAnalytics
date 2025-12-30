@@ -6969,7 +6969,6 @@ def fund_manager_tenure_page():
 
 
 
-
 def portfolio_page():
     home_button()
     st.header("Portfolio explorer")
