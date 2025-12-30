@@ -1626,17 +1626,15 @@ def _parse_month_year(series: pd.Series, colname: str, allow_blank: bool) -> pd.
     return dt
 
 def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
-    """
-    Render a dataframe as an HTML table with sticky header + sticky first column.
-    IMPORTANT: call this function directly (do NOT wrap in st.write / st.text).
-    """
+    import streamlit as st
+    import streamlit.components.v1 as components
+
     if df is None or df.empty:
-        st.info("No data to display!")
+        st.info("No data to display.")
         return
 
-    # Convert to HTML table. Keep escape=False so the HTML table renders correctly.
-    # (We are not injecting user-supplied HTML; values are plain strings/numbers.)
-    html = df.to_html(index=False, escape=False)
+    # Important: escape=False so that the table HTML renders as HTML (not text)
+    table_html = df.to_html(index=False, escape=False)
 
     css = f"""
     <style>
@@ -1677,8 +1675,10 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
     </style>
     """
 
-    st.markdown(css + f"<div class='sticky-wrap'>{html}</div>", unsafe_allow_html=True)
+    html = css + f"<div class='sticky-wrap'>{table_html}</div>"
 
+    # Use components.html for reliable HTML rendering
+    components.html(html, height=height_px + 60, scrolling=True)
 
 
 def build_size_asset_allocation_pivot(
