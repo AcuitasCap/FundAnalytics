@@ -1631,7 +1631,7 @@ def render_sticky_first_col_table(df: pd.DataFrame, height_px: int = 520):
     IMPORTANT: call this function directly (do NOT wrap in st.write / st.text).
     """
     if df is None or df.empty:
-        st.info("No data to display.")
+        st.info("No data to display!")
         return
 
     # Convert to HTML table. Keep escape=False so the HTML table renders correctly.
