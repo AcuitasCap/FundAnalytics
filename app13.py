@@ -4579,7 +4579,7 @@ def load_funds_from_db():
     return df
 
 
-@st.cache_data(show_spinner="Loading benchmark NAVs from database...")
+@st.cache_data(ttl=0, show_spinner="Loading benchmark NAVs from database...")
 def load_bench_from_db():
     query = """
         SELECT
