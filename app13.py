@@ -4556,7 +4556,7 @@ def load_bench_rolling(window_months: int, bench_name: str, start=None, end=None
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading fund NAVs from database...")
+@st.cache_data(ttl=900, show_spinner="Loading fund NAVs from database...")
 def load_funds_from_db():
     query = """
         SELECT
