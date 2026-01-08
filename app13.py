@@ -705,20 +705,20 @@ def validate_bench_navs(df_raw: pd.DataFrame):
 def upload_bench_navs(df: pd.DataFrame):
     engine = get_engine()
     with engine.begin() as conn:
-        benches = sorted(set(df["bench_name"]))
+        benches = sorted(set(df["benchmark_name"]))
         if benches:
             conn.execute(
                 text("""
-                    INSERT INTO fundlab.benchmark (bench_name)
+                    INSERT INTO fundlab.benchmark (benchmark_name)
                     SELECT unnest(:names)
-                    ON CONFLICT (bench_name) DO NOTHING
+                    ON CONFLICT (benchmark_name) DO NOTHING
                 """),
                 {"names": benches},
             )
 
         ins = text("""
             INSERT INTO fundlab.bench_nav (bench_id, nav_date, nav_value)
-            SELECT b.bench_id, :d, :v FROM fundlab.benchmark b WHERE b.bench_name = :n
+            SELECT b.bench_id, :d, :v FROM fundlab.benchmark b WHERE b.benchmark_name = :n
             ON CONFLICT (bench_id, nav_date) DO UPDATE
             SET nav_value = EXCLUDED.nav_value
         """)
@@ -7803,7 +7803,7 @@ def update_db_page():
     st.header("Update underlying data")
 
     upload_type = st.selectbox(
-        "What would you like to update???",
+        "What would you like to update??",
         [
             "Fund NAVs",
             "Benchmark NAVs",
