@@ -7803,7 +7803,7 @@ def update_db_page():
     st.header("Update underlying data")
 
     upload_type = st.selectbox(
-        "What would you like to update?",
+        "What would you like to update???",
         [
             "Fund NAVs",
             "Benchmark NAVs",
