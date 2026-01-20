@@ -2909,6 +2909,7 @@ def rebuild_stock_monthly_valuations(
 
     st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
+
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
@@ -2917,27 +2918,19 @@ def rebuild_fund_monthly_valuations(
     """
     Housekeeping job (CSV version):
 
-    1) Figures out the date range to process:
-         - If start_date / end_date are given, use them.
-         - Else infer from fundlab.fund_portfolio.
-    2) Pulls Domestic Equity holdings in that period (optionally for selected funds),
-       joined with stock_master to get is_financial.
-    3) Rebases holding_weight within (fund_id, month_end) so Domestic Equities = 100%.
-    4) Joins to fundlab.stock_monthly_valuations on (isin, month_end).
-    5) For each (fund_id, month_end, segment = Total/Financials/Non-financials)
-       computes weighted P/S, P/E, P/B as:
-          - Filter to ps/pe/pb > 0 and not null.
-          - Weights = rebased domestic weights within the segment, normalized
-            over stocks with valid metric values.
-    6) Before computing, it looks at fundlab.fund_monthly_valuations and
-       **skips any (fund_id, month_end, segment) that already exist**.
-    7) Instead of writing to Supabase, it exposes a CSV download with only
-       the *new* rows to be uploaded manually via the Supabase UI.
+    - Pulls Domestic Equity holdings (fundlab.fund_portfolio) joined to stock_master for is_financial
+    - Rebase holding_weight within (fund_id, month_end) so Domestic Equities = 100%
+    - Join to stock_monthly_valuations by (isin, month_key) (year-month)
+    - Compute portfolio valuations for Total / Financials / Non-financials using
+      yield aggregation + inversion:
+         multiple = 1 / SUM( w_domestic * (1/multiple_i) )
+      Validity rules:
+         - P/S, P/B: require multiple > 0
+         - P/E: allow negatives (loss-makers), require multiple != 0
+      If aggregate yield <= 0 => return NaN (do not force a number)
 
-    Notes:
-      - This avoids all UNNEST / executemany issues with large arrays.
-      - You can periodically run this, download the CSV, and import it into
-        fundlab.fund_monthly_valuations (using Supabase UI's CSV import).
+    - Reads existing fund_monthly_valuations rows in range and skips those keys.
+    - Outputs a CSV for manual Supabase import.
     """
 
     engine = get_engine()
@@ -2981,7 +2974,6 @@ def rebuild_fund_monthly_valuations(
             if end_date is None:
                 end_date = rng.max_d
 
-    # Just for safety: enforce date order
     if start_date > end_date:
         st.error(f"Invalid date range: start_date {start_date} > end_date {end_date}.")
         return
@@ -2998,7 +2990,6 @@ def rebuild_fund_monthly_valuations(
                     fp.month_end,
                     fp.isin,
                     fp.holding_weight AS weight_pct,
-                    fp.asset_type,
                     sm.is_financial
                 FROM fundlab.fund_portfolio fp
                 JOIN fundlab.stock_master sm
@@ -3012,11 +3003,7 @@ def rebuild_fund_monthly_valuations(
             holdings = pd.read_sql(
                 holdings_sql,
                 conn,
-                params={
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "fund_ids": fund_ids,
-                },
+                params={"start_date": start_date, "end_date": end_date, "fund_ids": fund_ids},
             )
         else:
             holdings_sql = text(
@@ -3026,7 +3013,6 @@ def rebuild_fund_monthly_valuations(
                     fp.month_end,
                     fp.isin,
                     fp.holding_weight AS weight_pct,
-                    fp.asset_type,
                     sm.is_financial
                 FROM fundlab.fund_portfolio fp
                 JOIN fundlab.stock_master sm
@@ -3039,21 +3025,15 @@ def rebuild_fund_monthly_valuations(
             holdings = pd.read_sql(
                 holdings_sql,
                 conn,
-                params={
-                    "start_date": start_date,
-                    "end_date": end_date,
-                },
+                params={"start_date": start_date, "end_date": end_date},
             )
 
     if holdings.empty:
         st.info("No fund_portfolio holdings found in the given period.")
         return
 
-    # Clean holdings
     holdings["isin"] = holdings["isin"].astype(str).str.strip()
-    holdings["month_end"] = pd.to_datetime(
-        holdings["month_end"], errors="coerce"
-    ).dt.normalize()
+    holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
     holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
     holdings = holdings.dropna(subset=["fund_id", "isin", "month_end", "weight_pct"])
 
@@ -3064,21 +3044,24 @@ def rebuild_fund_monthly_valuations(
     # --------------------------------------------------------------
     # 2) Rebase weights within (fund_id, month_end) to Domestic = 100
     # --------------------------------------------------------------
-    sum_w = holdings.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
+    holdings["month_key"] = holdings["month_end"].dt.to_period("M")
+    sum_w = holdings.groupby(["fund_id", "month_key"])["weight_pct"].transform("sum")
     holdings = holdings[sum_w > 0].copy()
     if holdings.empty:
         st.info("No holdings with positive weight sums.")
         return
 
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
-    
+    # canonical month_end (date) for output keys
+    holdings["month_end"] = holdings["month_key"].dt.to_timestamp("M").dt.date
+
     # --------------------------------------------------------------
-    # 3) Pull stock valuations only for relevant ISINs and dates
-    #    (match by year-month, ignore day)
+    # 3) Pull stock valuations for relevant ISINs and date window
+    #    and merge by (isin, month_key)
     # --------------------------------------------------------------
     all_isins = sorted(holdings["isin"].unique().tolist())
-    min_month = holdings["month_end"].min()
-    max_month = holdings["month_end"].max()
+    min_month = pd.Timestamp(min(holdings["month_end"]))
+    max_month = pd.Timestamp(max(holdings["month_end"]))
 
     with engine.begin() as conn:
         val_sql = text(
@@ -3086,9 +3069,6 @@ def rebuild_fund_monthly_valuations(
             SELECT
                 isin,
                 month_end,
-                ttm_sales,
-                ttm_pat,
-                book_value,
                 ps,
                 pe,
                 pb
@@ -3100,52 +3080,30 @@ def rebuild_fund_monthly_valuations(
         vals = pd.read_sql(
             val_sql,
             conn,
-            params={
-                "isins": all_isins,
-                "start_date": min_month,
-                "end_date": max_month,
-            },
+            params={"isins": all_isins, "start_date": min_month.date(), "end_date": max_month.date()},
         )
 
     if vals.empty:
         st.info("No stock_monthly_valuations rows found for the given holdings.")
         return
 
-    # Clean & build month_key (year-month) on both sides
-    holdings["isin"] = holdings["isin"].astype(str).str.strip()
-    holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
-    holdings = holdings.dropna(subset=["month_end"])
-    holdings["month_key"] = holdings["month_end"].dt.to_period("M")
-
     vals["isin"] = vals["isin"].astype(str).str.strip()
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
     vals = vals.dropna(subset=["month_end"])
     vals["month_key"] = vals["month_end"].dt.to_period("M")
 
-    # Merge on (isin, month_key) instead of exact date
     df = holdings.merge(
-        vals.drop(columns=["month_end"]),   # drop its date; keep month_key
+        vals[["isin", "month_key", "ps", "pe", "pb"]],
         on=["isin", "month_key"],
         how="left",
-        suffixes=("", "_val"),
     )
 
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
-        st.info("All merged valuations are NaN after month_key merge; nothing to write.")
-        return
-
-    # Use canonical month_end = last day of month for output
-    df["month_end"] = df["month_key"].dt.to_timestamp("M").dt.date
-
-
-
-    # If no valuations at all, nothing to do
-    if df[["ps", "pe", "pb"]].isna().all(axis=None):
-        st.info("All merged valuations are NaN; nothing to write.")
+        st.info("All merged valuations are NaN after month_key merge; nothing to compute.")
         return
 
     # --------------------------------------------------------------
-    # 4) Load existing fund_monthly_valuations to support incremental runs
+    # 4) Load existing fund_monthly_valuations keys (incremental mode)
     # --------------------------------------------------------------
     with engine.begin() as conn:
         if fund_ids:
@@ -3176,13 +3134,46 @@ def rebuild_fund_monthly_valuations(
 
     existing_keys: set[tuple[int, dt.date, str]] = set()
     for r in existing_rows:
-        # r.month_end should already be a date; keep as-is
         existing_keys.add((int(r.fund_id), r.month_end, str(r.segment)))
 
     # --------------------------------------------------------------
-    # 5) Compute fund-level valuations: P/S, P/E, P/B by segment
+    # 5) Compute fund-level valuations using yield aggregation + inversion
     # --------------------------------------------------------------
     df["is_financial"] = df["is_financial"].astype(bool)
+
+    def _yield_inversion_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
+        """
+        Returns (portfolio_multiple, valid_stock_count, coverage_weight)
+
+        multiple = 1 / SUM( w_domestic * (1/multiple_i) )
+
+        Validity:
+          - ps, pb: multiple > 0
+          - pe: multiple != 0 (negatives allowed for loss-makers)
+        If aggregate yield <= 0 => NaN.
+        """
+        g = seg_grp.copy()
+        g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
+        g["w_domestic"] = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
+
+        if col_name in ("ps", "pb"):
+            valid = g[col_name].notna() & (g[col_name] > 0)
+        else:
+            valid = g[col_name].notna() & (g[col_name] != 0)
+
+        if not bool(valid.any()):
+            return (np.nan, 0, 0.0)
+
+        gv = g.loc[valid].copy()
+        coverage_weight = float(gv["w_domestic"].sum())
+        if coverage_weight <= 0:
+            return (np.nan, 0, 0.0)
+
+        agg_yield = float((gv["w_domestic"] * (1.0 / gv[col_name])).sum())
+        if np.isnan(agg_yield) or agg_yield <= 0:
+            return (np.nan, int(len(gv)), coverage_weight)
+
+        return (float(1.0 / agg_yield), int(len(gv)), coverage_weight)
 
     segments = ["Total", "Financials", "Non-financials"]
     records: list[dict] = []
@@ -3197,64 +3188,11 @@ def rebuild_fund_monthly_valuations(
         st.info("No (fund, month_end) groups after merge; nothing to compute.")
         return
 
-    for i, ((fund_id, month_end), grp) in enumerate(grouped, start=1):
+    for i, ((fund_id, month_end_date), grp) in enumerate(grouped, start=1):
         grp = grp.copy()
-
-        # convert month_end to python date for key comparisons
-        if isinstance(month_end, pd.Timestamp):
-            month_end_date = month_end.date()
-        else:
-            # should be datetime.date already
-            month_end_date = month_end
-
-        # Helper to compute weighted avg of any given metric column name
-        def _yield_inversion_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
-            """
-            Returns (portfolio_multiple, valid_stock_count, coverage_weight)
-
-            Logic:
-              - portfolio_multiple = 1 / SUM(w_domestic * (1/multiple_i))
-              - P/S, P/B: valid if multiple > 0
-              - P/E: valid if multiple != 0 (negatives allowed, penalizes portfolio)
-              - If aggregate yield <= 0 or NaN => portfolio_multiple = NaN (no forced number)
-              - coverage_weight = sum of w_domestic over valid rows
-            """
-            g = seg_grp.copy()
-            g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
-            g["w_domestic"] = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
-
-            if col_name in ("ps", "pb"):
-                valid = g[col_name].notna() & (g[col_name] > 0)
-            else:
-                # P/E: keep loss-makers (negative PE), exclude 0 / NaN
-                valid = g[col_name].notna() & (g[col_name] != 0)
-
-            if not bool(valid.any()):
-                return (np.nan, 0, 0.0)
-
-            g_valid = g[valid].copy()
-            coverage_weight = float(g_valid["w_domestic"].sum())
-            if coverage_weight <= 0:
-                return (np.nan, 0, 0.0)
-
-            # aggregate yield (do NOT renormalize weights)
-            agg_yield = float((g_valid["w_domestic"] * (1.0 / g_valid[col_name])).sum())
-
-            if np.isnan(agg_yield) or agg_yield <= 0:
-                return (np.nan, int(len(g_valid)), coverage_weight)
-
-            return (float(1.0 / agg_yield), int(len(g_valid)), coverage_weight)
-
-        ps_val, ps_count, ps_cov = _yield_inversion_metric(seg_grp, "ps")
-        pe_val, pe_count, pe_cov = _yield_inversion_metric(seg_grp, "pe")
-        pb_val, pb_count, pb_cov = _yield_inversion_metric(seg_grp, "pb")
-
-
 
         for seg in segments:
             key = (int(fund_id), month_end_date, seg)
-
-            # Skip if this combination already exists in Supabase
             if key in existing_keys:
                 continue
 
@@ -3262,23 +3200,22 @@ def rebuild_fund_monthly_valuations(
                 seg_grp = grp[grp["is_financial"]].copy()
             elif seg == "Non-financials":
                 seg_grp = grp[~grp["is_financial"]].copy()
-            else:  # 'Total'
+            else:
                 seg_grp = grp.copy()
 
             if seg_grp.empty:
                 continue
 
-            total_weight_seg = float(seg_grp["w_domestic"].sum())
+            total_weight_seg = float(pd.to_numeric(seg_grp["w_domestic"], errors="coerce").fillna(0.0).sum())
 
-            ps_val, ps_count, _ = _weighted_metric(seg_grp, "ps")
-            pe_val, pe_count, _ = _weighted_metric(seg_grp, "pe")
-            pb_val, pb_count, _ = _weighted_metric(seg_grp, "pb")
+            ps_val, ps_count, _ = _yield_inversion_metric(seg_grp, "ps")
+            pe_val, pe_count, _ = _yield_inversion_metric(seg_grp, "pe")
+            pb_val, pb_count, _ = _yield_inversion_metric(seg_grp, "pb")
 
             if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
-                # No usable metrics for this segment
                 continue
 
-            stock_count = max(ps_count, pe_count, pb_count)
+            stock_count = int(max(ps_count, pe_count, pb_count))
 
             records.append(
                 {
@@ -3288,13 +3225,13 @@ def rebuild_fund_monthly_valuations(
                     "ps": None if np.isnan(ps_val) else float(ps_val),
                     "pe": None if np.isnan(pe_val) else float(pe_val),
                     "pb": None if np.isnan(pb_val) else float(pb_val),
-                    "stock_count": int(stock_count),
+                    "stock_count": stock_count,
                     "total_weight": total_weight_seg,
                     "notes": None,
                 }
             )
 
-        # Update progress bar
+        # progress UI
         if n_groups > 0:
             pct = int(i * 100 / n_groups)
             progress.progress(min(pct, 100))
@@ -3306,8 +3243,8 @@ def rebuild_fund_monthly_valuations(
 
     if not records:
         st.success(
-            f"No *new* fund_monthly_valuations rows needed between "
-            f"{start_date} and {end_date}. Table already up to date for this range."
+            f"No *new* fund_monthly_valuations rows needed between {start_date} and {end_date}. "
+            f"Table already up to date for this range."
         )
         return
 
@@ -3320,10 +3257,8 @@ def rebuild_fund_monthly_valuations(
         f"`fundlab.fund_monthly_valuations`."
     )
 
-    # Show a small preview
     st.dataframe(df_out.head(50))
 
-    # Offer CSV download for manual Supabase import
     csv_bytes = df_out.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇️ Download fund_monthly_valuations CSV (new rows only)",
@@ -3337,6 +3272,7 @@ def rebuild_fund_monthly_valuations(
         "Because we only included rows that don't already exist for this date range, "
         "it will act as an incremental update."
     )
+
 
 
 def compute_portfolio_valuations_timeseries(
