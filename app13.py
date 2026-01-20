@@ -3071,49 +3071,6 @@ def rebuild_fund_monthly_valuations(
         return
 
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
-
-    # --------------------------------------------------------------
-    # 3) Pull stock valuations only for relevant ISINs and dates
-    # --------------------------------------------------------------
-    all_isins = sorted(holdings["isin"].unique().tolist())
-    min_month = holdings["month_end"].min()
-    max_month = holdings["month_end"].max()
-
-    with engine.begin() as conn:
-        val_sql = text(
-            """
-            SELECT
-                isin,
-                month_end,
-                ttm_sales,
-                ttm_pat,
-                book_value,
-                ps,
-                pe,
-                pb
-            FROM fundlab.stock_monthly_valuations
-            WHERE isin = ANY(:isins)
-              AND month_end BETWEEN :start_date AND :end_date
-            """
-        )
-        vals = pd.read_sql(
-            val_sql,
-            conn,
-            params={
-                "isins": all_isins,
-                "start_date": min_month,
-                "end_date": max_month,
-            },
-        )
-
-    if vals.empty:
-        st.info("No stock_monthly_valuations rows found for the given holdings.")
-        return
-
-    vals["isin"] = vals["isin"].astype(str).str.strip()
-    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.normalize()
-
-    # Merge valuations into holdings
     
     # --------------------------------------------------------------
     # 3) Pull stock valuations only for relevant ISINs and dates
@@ -3251,22 +3208,48 @@ def rebuild_fund_monthly_valuations(
             month_end_date = month_end
 
         # Helper to compute weighted avg of any given metric column name
-        def _weighted_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
+        def _yield_inversion_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
+            """
+            Returns (portfolio_multiple, valid_stock_count, coverage_weight)
+
+            Logic:
+              - portfolio_multiple = 1 / SUM(w_domestic * (1/multiple_i))
+              - P/S, P/B: valid if multiple > 0
+              - P/E: valid if multiple != 0 (negatives allowed, penalizes portfolio)
+              - If aggregate yield <= 0 or NaN => portfolio_multiple = NaN (no forced number)
+              - coverage_weight = sum of w_domestic over valid rows
+            """
             g = seg_grp.copy()
             g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
-            g = g[g[col_name] > 0].copy()
-            if g.empty:
+            g["w_domestic"] = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
+
+            if col_name in ("ps", "pb"):
+                valid = g[col_name].notna() & (g[col_name] > 0)
+            else:
+                # P/E: keep loss-makers (negative PE), exclude 0 / NaN
+                valid = g[col_name].notna() & (g[col_name] != 0)
+
+            if not bool(valid.any()):
                 return (np.nan, 0, 0.0)
 
-            w = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
-            sum_w = float(w.sum())
-            if sum_w <= 0:
+            g_valid = g[valid].copy()
+            coverage_weight = float(g_valid["w_domestic"].sum())
+            if coverage_weight <= 0:
                 return (np.nan, 0, 0.0)
 
-            w_rebased = w / sum_w
-            metric = g[col_name].to_numpy()
-            value = float((w_rebased * metric).sum())
-            return (value, len(g), sum_w)
+            # aggregate yield (do NOT renormalize weights)
+            agg_yield = float((g_valid["w_domestic"] * (1.0 / g_valid[col_name])).sum())
+
+            if np.isnan(agg_yield) or agg_yield <= 0:
+                return (np.nan, int(len(g_valid)), coverage_weight)
+
+            return (float(1.0 / agg_yield), int(len(g_valid)), coverage_weight)
+
+        ps_val, ps_count, ps_cov = _yield_inversion_metric(seg_grp, "ps")
+        pe_val, pe_count, pe_cov = _yield_inversion_metric(seg_grp, "pe")
+        pb_val, pb_count, pb_cov = _yield_inversion_metric(seg_grp, "pb")
+
+
 
         for seg in segments:
             key = (int(fund_id), month_end_date, seg)
