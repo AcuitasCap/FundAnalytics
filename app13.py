@@ -3386,6 +3386,7 @@ def compute_portfolio_valuations_timeseries(
     import pandas as pd
     from sqlalchemy.sql import text
 
+    st.caption("VAL ENGINE: yield-inversion-v1")
     if not fund_ids or focus_fund_id not in fund_ids:
         raise ValueError("Focus fund must be among selected funds.")
 
@@ -7028,6 +7029,7 @@ def portfolio_valuations_page():
     segments_to_precompute = ["Financials", "Non-financials", "Total"]
     metrics_to_precompute = ["P/S", "P/B", "P/E"]
 
+    st.cache_data.clear()
     with st.spinner("Computing portfolio valuations (warming cache for all combinations)..."):
         # Warm the cache for all combinations for this universe + period
         for m in modes_to_precompute:
