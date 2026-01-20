@@ -3268,7 +3268,7 @@ def rebuild_fund_monthly_valuations(
     )
 
     st.info(
-        "Upload this CSV into Supabase (fundlab.fund_monthly_valuations). "
+        "Upload  this CSV into Supabase (fundlab.fund_monthly_valuations). "
         "Because we only included rows that don't already exist for this date range, "
         "it will act as an incremental update."
     )
