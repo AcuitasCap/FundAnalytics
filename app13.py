@@ -3260,6 +3260,13 @@ def rebuild_fund_monthly_valuations(
     st.dataframe(df_out.head(50))
 
     csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+    
+    # Persist for housekeeping_page() so the download button survives reruns
+    st.session_state["fund_valuations_csv_bytes"] = csv_bytes
+    st.session_state["fund_valuations_csv_name"] = "fund_monthly_valuations_delta.csv"
+    st.session_state["fund_valuations_rows"] = int(len(df_out))
+
+    
     st.download_button(
         label="⬇️ Download fund_monthly_valuations CSV (new rows only)",
         data=csv_bytes,
@@ -8226,9 +8233,33 @@ def housekeeping_page():
         rebuild_stock_monthly_valuations()
         st.success("Stock valuations updated")   
 
+    # 5) Refresh fund valuations (store CSV in session_state so download survives reruns)
     if st.button("5. Refresh fund valuations"):
+        # Clear any prior output
+        st.session_state.pop("fund_valuations_csv_bytes", None)
+        st.session_state.pop("fund_valuations_csv_name", None)
+        st.session_state.pop("fund_valuations_rows", None)
+
         rebuild_fund_monthly_valuations()
-        st.success("Fund valuations updated")
+
+        # If the rebuild function stored CSV bytes, show success accordingly
+        if "fund_valuations_csv_bytes" in st.session_state:
+            st.success(f"Fund valuations prepared: {st.session_state.get('fund_valuations_rows', 0):,} rows.")
+        else:
+            # fallback: function may have concluded nothing to write
+            st.success("Fund valuations updated (no CSV produced).")
+
+    # Persistent download button (shows even after reruns)
+    if "fund_valuations_csv_bytes" in st.session_state:
+        st.download_button(
+            label="⬇️ Download fund_monthly_valuations CSV",
+            data=st.session_state["fund_valuations_csv_bytes"],
+            file_name=st.session_state.get("fund_valuations_csv_name", "fund_monthly_valuations_delta.csv"),
+            mime="text/csv",
+            key="download_fund_monthly_valuations_csv",
+        )
+        st.caption(f"Rows: {st.session_state.get('fund_valuations_rows', 0):,}")
+
 
     st.markdown("---")
     st.subheader("Upload precomputed stock valuations to DB")
