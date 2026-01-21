@@ -2610,23 +2610,26 @@ def compute_quality_bucket_exposure(fund_id: int, month_ends: list[date]) -> pd.
     return pivot
 
 
+
 def rebuild_stock_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    year_block: int = 5,
+    write_to_db: bool = True,
+    chunk_size: int = 50_000,
 ):
     """
-    Housekeeping job (full-history export to a single Excel file):
+    Housekeeping job (rebuild stock_monthly_valuations as YIELDS):
 
     1) Reads monthly market cap from fundlab.stock_price
-    2) Attaches TTM sales / PAT (from stock_quarterly_financials, consolidated)
-    3) Attaches latest annual book value (from stock_annual_book_value, consolidated)
-    4) Computes stock-level P/S, P/E, P/B with:
-          - only positive denominators
-          - ratios capped to abs(value) <= 1000 (else NULL)
-    5) Does NOT write to Supabase.
-       Instead, produces a single Excel file with 5-year sheets
-       for manual upload.
+    2) Attaches TTM sales / PAT (from fundlab.stock_quarterly_financials, consolidated)
+    3) Attaches latest annual book value (from fundlab.stock_annual_book_value, consolidated)
+    4) Computes stock-level YIELDS with ONLY guardrail:
+          - market_cap > 0 (else yield = NULL)
+       No other adjustments, no caps, no dropping, negative/zero numerators allowed.
+    5) Writes directly to fundlab.stock_monthly_valuations:
+          - ps stores Sales Yield  = ttm_sales / market_cap
+          - pe stores Earnings Yield = ttm_pat / market_cap
+          - pb stores Book Yield   = book_value / market_cap
 
     Output columns (aligned to fundlab.stock_monthly_valuations):
       isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
@@ -2661,7 +2664,7 @@ def rebuild_stock_monthly_valuations(
     st.write(f"Using price date range: {start_date} → {end_date}")
 
     # --------------------------------------------------------------
-    # 1) Fetch monthly price / market cap
+    # 1) Fetch monthly market cap
     # --------------------------------------------------------------
     with engine.begin() as conn:
         price_sql = text(
@@ -2685,11 +2688,8 @@ def rebuild_stock_monthly_valuations(
         st.info("No stock_price data found in the given period for stock valuations.")
         return
 
-    # Clean up price data
     prices["isin"] = prices["isin"].astype(str).str.strip()
-    prices["month_end"] = pd.to_datetime(
-        prices["month_end"], errors="coerce"
-    ).dt.normalize()
+    prices["month_end"] = pd.to_datetime(prices["month_end"], errors="coerce").dt.normalize()
     prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
 
     prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
@@ -2704,15 +2704,12 @@ def rebuild_stock_monthly_valuations(
     max_month = base["month_end"].max()
 
     st.write(f"Distinct ISINs in price data: {len(all_isins)}")
-    st.write(
-        f"Month_end range in price data: {min_month.date()} → {max_month.date()}"
-    )
+    st.write(f"Month_end range in price data: {min_month.date()} → {max_month.date()}")
 
     # --------------------------------------------------------------
     # 2) Fetch quarterly & annual fundamentals once
     # --------------------------------------------------------------
     with engine.begin() as conn:
-        # Quarterly sales & PAT
         q_sql = text(
             """
             SELECT isin, period_end, sales, pat
@@ -2729,7 +2726,6 @@ def rebuild_stock_monthly_valuations(
             params={"isins": all_isins, "end_date": max_month},
         )
 
-        # Annual book value
         bv_sql = text(
             """
             SELECT isin, year_end, book_value
@@ -2749,14 +2745,11 @@ def rebuild_stock_monthly_valuations(
     # ---- Quarterly data / TTM ----
     if not qdf.empty:
         qdf["isin"] = qdf["isin"].astype(str).str.strip()
-        qdf["period_end"] = pd.to_datetime(
-            qdf["period_end"], errors="coerce"
-        ).dt.normalize()
+        qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
         qdf["sales"] = pd.to_numeric(qdf["sales"], errors="coerce")
         qdf["pat"] = pd.to_numeric(qdf["pat"], errors="coerce")
 
-        qdf = qdf.dropna(subset=["isin", "period_end"])
-        qdf = qdf.sort_values(["isin", "period_end"])
+        qdf = qdf.dropna(subset=["isin", "period_end"]).sort_values(["isin", "period_end"])
 
         qdf["ttm_sales"] = (
             qdf.groupby("isin")["sales"]
@@ -2774,18 +2767,16 @@ def rebuild_stock_monthly_valuations(
         qdf_ttm = qdf[["isin", "period_end", "ttm_sales", "ttm_pat"]].dropna(
             how="all", subset=["ttm_sales", "ttm_pat"]
         )
+        qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
     else:
         qdf_ttm = pd.DataFrame(columns=["isin", "period_end", "ttm_sales", "ttm_pat"])
 
     # ---- Annual BV ----
     if not bvdf.empty:
         bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
-        bvdf["year_end"] = pd.to_datetime(
-            bvdf["year_end"], errors="coerce"
-        ).dt.normalize()
+        bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
         bvdf["book_value"] = pd.to_numeric(bvdf["book_value"], errors="coerce")
-        bvdf = bvdf.dropna(subset=["isin", "year_end"])
-        bvdf = bvdf.sort_values(["isin", "year_end"]).reset_index(drop=True)
+        bvdf = bvdf.dropna(subset=["isin", "year_end"]).sort_values(["isin", "year_end"]).reset_index(drop=True)
     else:
         bvdf = pd.DataFrame(columns=["isin", "year_end", "book_value"])
 
@@ -2797,11 +2788,9 @@ def rebuild_stock_monthly_valuations(
     base["ttm_pat"] = np.nan
     base["book_value"] = np.nan
 
-    # ---- TTM sales/PAT via manual "as-of" alignment ----
+    # ---- TTM sales/PAT via "as-of" alignment (vectorized per ISIN) ----
     if not qdf_ttm.empty:
-        qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
-
-        for isin, sub_ttm in qdf_ttm.groupby("isin"):
+        for isin, sub_ttm in qdf_ttm.groupby("isin", sort=False):
             mask = base["isin"] == isin
             if not mask.any():
                 continue
@@ -2817,15 +2806,16 @@ def rebuild_stock_monthly_valuations(
 
             aligned_sales = np.full(h_dates.shape, np.nan)
             aligned_pat = np.full(h_dates.shape, np.nan)
+
             aligned_sales[valid] = sub_ttm["ttm_sales"].values[pos[valid]]
             aligned_pat[valid] = sub_ttm["ttm_pat"].values[pos[valid]]
 
             base.loc[idx, "ttm_sales"] = aligned_sales
             base.loc[idx, "ttm_pat"] = aligned_pat
 
-    # ---- Book value via manual "as-of" alignment ----
+    # ---- Book value via "as-of" alignment ----
     if not bvdf.empty:
-        for isin, sub_bv in bvdf.groupby("isin"):
+        for isin, sub_bv in bvdf.groupby("isin", sort=False):
             mask = base["isin"] == isin
             if not mask.any():
                 continue
@@ -2841,11 +2831,10 @@ def rebuild_stock_monthly_valuations(
 
             aligned_bv = np.full(h_dates.shape, np.nan)
             aligned_bv[valid] = sub_bv["book_value"].values[pos[valid]]
-
             base.loc[idx, "book_value"] = aligned_bv
 
     # --------------------------------------------------------------
-    # 4) Compute P/S, P/E, P/B at stock level with cap of 1000
+    # 4) Compute yields (ONLY guardrail: market_cap > 0)
     # --------------------------------------------------------------
     df = base.copy()
 
@@ -2854,82 +2843,62 @@ def rebuild_stock_monthly_valuations(
     ttm_pat = pd.to_numeric(df["ttm_pat"], errors="coerce")
     bv = pd.to_numeric(df["book_value"], errors="coerce")
 
-    ps_raw = np.where((mc > 0) & (ttm_sales > 0), mc / ttm_sales, np.nan)
-    pe_raw = np.where((mc > 0) & (ttm_pat > 0), mc / ttm_pat, np.nan)
-    pb_raw = np.where((mc > 0) & (bv > 0), mc / bv, np.nan)
+    # Yields stored in ps/pe/pb (schema unchanged)
+    df["ps"] = np.where(mc > 0, ttm_sales / mc, np.nan)   # sales yield
+    df["pe"] = np.where(mc > 0, ttm_pat / mc, np.nan)     # earnings yield
+    df["pb"] = np.where(mc > 0, bv / mc, np.nan)          # book yield
 
-    cap = 1000.0
-    df["ps"] = np.where(np.abs(ps_raw) <= cap, ps_raw, np.nan)
-    df["pe"] = np.where(np.abs(pe_raw) <= cap, pe_raw, np.nan)
-    df["pb"] = np.where(np.abs(pb_raw) <= cap, pb_raw, np.nan)
-
-    valuations_df = df[
-        ["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]
-    ].copy()
+    valuations_df = df[["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]].copy()
 
     valuations_df["isin"] = valuations_df["isin"].astype(str).str.strip()
-    valuations_df["month_end"] = pd.to_datetime(
-        valuations_df["month_end"], errors="coerce"
-    ).dt.date
+    valuations_df["month_end"] = pd.to_datetime(valuations_df["month_end"], errors="coerce").dt.date
 
     valuations_df = valuations_df.dropna(subset=["isin", "month_end"])
-    valuations_df = valuations_df.sort_values(["month_end", "isin"]).reset_index(
-        drop=True
-    )
+    valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
+    valuations_df = valuations_df.sort_values(["month_end", "isin"]).reset_index(drop=True)
 
     n_total = len(valuations_df)
+    st.write(f"Total valuation rows prepared: {n_total:,}")
     if n_total == 0:
-        st.info("No rows to export after processing.")
+        st.info("No rows to write after processing.")
         return
 
-    st.write(f"Total valuation rows to export: {n_total:,}")
-
-    valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
-
     # --------------------------------------------------------------
-    # 5) Create ONE Excel file with 5-year sheets + single download
+    # 5) Write to Supabase (delete-range + insert chunks)
+    #     Because stock_monthly_valuations has NO UNIQUE/PK constraint.
     # --------------------------------------------------------------
-    years = valuations_df["month_end"].apply(lambda d: d.year)
-    min_year = int(years.min())
-    max_year = int(years.max())
+    if not write_to_db:
+        st.info("write_to_db=False; skipping DB write.")
+        return valuations_df
 
-    st.write(
-        f"Preparing Excel workbook with sheets in {year_block}-year blocks "
-        f"from {min_year} to {max_year}..."
+    with engine.begin() as conn:
+        st.write("Deleting existing rows in target range from fundlab.stock_monthly_valuations...")
+        conn.execute(
+            text(
+                """
+                DELETE FROM fundlab.stock_monthly_valuations
+                WHERE month_end BETWEEN :start_date AND :end_date;
+                """
+            ),
+            {"start_date": start_date, "end_date": end_date},
+        )
+
+    st.write("Inserting new rows into fundlab.stock_monthly_valuations...")
+    # Use pandas to_sql for bulk insert
+    # Note: method="multi" batches INSERT VALUES lists; adjust chunk_size as needed.
+    valuations_df.to_sql(
+        "stock_monthly_valuations",
+        con=engine,
+        schema="fundlab",
+        if_exists="append",
+        index=False,
+        chunksize=chunk_size,
+        method="multi",
     )
 
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        for block_start_year in range(min_year, max_year + 1, year_block):
-            block_end_year = min(block_start_year + year_block - 1, max_year)
+    st.success("stock_monthly_valuations rebuilt (yields) and written to Supabase successfully.")
+    return None
 
-            block_mask = valuations_df["month_end"].between(
-                dt.date(block_start_year, 1, 1),
-                dt.date(block_end_year, 12, 31),
-            )
-            block_df = valuations_df.loc[block_mask].copy()
-            if block_df.empty:
-                continue
-
-            sheet_name = f"{block_start_year}_{block_end_year}"
-            st.write(
-                f"Sheet {sheet_name}: {len(block_df):,} rows"
-            )
-
-            block_df[
-                ["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]
-            ].to_excel(writer, sheet_name=sheet_name, index=False)
-
-    buffer.seek(0)
-
-    st.download_button(
-        label="Download ALL stock valuations (multi-sheet Excel)",
-        data=buffer,
-        file_name="stock_monthly_valuations_all_years.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    st.success("Valuation Excel workbook ready. Download and upload to Supabase as needed.")
 
 
 def rebuild_fund_monthly_valuations(
