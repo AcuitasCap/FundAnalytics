@@ -3623,7 +3623,6 @@ def compute_portfolio_valuations_timeseries(
     return out
 
 
-
 def compute_portfolio_exposures_timeseries(
     fund_ids: list[int],
     focus_fund_id: int,
@@ -3634,26 +3633,14 @@ def compute_portfolio_exposures_timeseries(
     mode: str,
 ) -> pd.DataFrame:
     """
-    Computes exposure time series needed for additional charts:
-
-    - For P/E:
-        a) loss-making weight (%)
-        b) weight PE > 40x (%)
-        c) weight PE < 15x (%), profitable only
-    - For P/S:
-        weight PS > 4x (%)
-        weight PS < 1.5x (%)
-    - For P/B:
-        weight PB > 6x (%)
-        weight PB < 2x (%)
+    Exposure diagnostics time series (canonical month handling + proper missing-data semantics)
 
     Output columns:
-      month_end (datetime64[ns]),
-      series (Focus fund / Universe median (others)),
-      metric (string label),
-      value (float, in % units: 0..100)
+      month_end (datetime64[ns]) : canonical calendar month-end timestamp
+      series  (str)             : 'Focus fund' / 'Universe median (others)'
+      metric  (str)             : label
+      value   (float)           : % exposure (0..100), NaN when coverage missing
     """
-
     import numpy as np
     import pandas as pd
     from sqlalchemy.sql import text
@@ -3671,10 +3658,11 @@ def compute_portfolio_exposures_timeseries(
 
     engine = get_engine()
 
+    # Canonical month grid as Periods
     month_periods = pd.period_range(start=start_date, end=end_date, freq="M")
     if len(month_periods) == 0:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
-    month_ends = [p.to_timestamp("M").date() for p in month_periods]
+    months_df = pd.DataFrame({"month_key": month_periods})
 
     # ---------- load holdings snapshot per mode ----------
     def _get_rows_for_mode() -> pd.DataFrame:
@@ -3704,23 +3692,33 @@ def compute_portfolio_exposures_timeseries(
             if h.empty:
                 return h
 
-            h["month_end"] = pd.to_datetime(h["month_end"], errors="coerce").dt.date
+            h["month_end"] = pd.to_datetime(h["month_end"], errors="coerce")
             h = h.dropna(subset=["month_end"])
+            h["month_key"] = h["month_end"].dt.to_period("M")
+            h = h[h["month_key"].isin(month_periods)].copy()
+            if h.empty:
+                return h
+
+            # segment filter
+            h["is_financial"] = h["is_financial"].astype(bool)
             if segment_choice == "Financials":
-                h = h[h["is_financial"].astype(bool)].copy()
+                h = h[h["is_financial"]].copy()
             elif segment_choice == "Non-financials":
-                h = h[~h["is_financial"].astype(bool)].copy()
+                h = h[~h["is_financial"]].copy()
             if h.empty:
                 return h
 
             h["isin"] = h["isin"].astype(str).str.strip()
             h["weight_pct"] = pd.to_numeric(h["weight_pct"], errors="coerce").fillna(0.0)
-            sum_w = h.groupby(["fund_id", "month_end"])["weight_pct"].transform("sum")
+
+            # Rebase within (fund_id, month_key)
+            sum_w = h.groupby(["fund_id", "month_key"])["weight_pct"].transform("sum")
             h = h[sum_w > 0].copy()
             if h.empty:
                 return h
             h["w_domestic"] = h["weight_pct"] / sum_w
-            return h[["fund_id", "month_end", "isin", "w_domestic"]]
+
+            return h[["fund_id", "month_key", "isin", "w_domestic"]]
 
         if mode == "Historical valuations of current portfolio":
             with engine.begin() as conn:
@@ -3747,32 +3745,41 @@ def compute_portfolio_exposures_timeseries(
                     WHERE fp.asset_type = 'Domestic Equities';
                     """
                 )
-                h = pd.read_sql(holdings_sql, conn, params={"fund_ids": fund_ids, "end_date": end_date})
+                h = pd.read_sql(
+                    holdings_sql,
+                    conn,
+                    params={"fund_ids": fund_ids, "end_date": end_date},
+                )
             if h.empty:
                 return h
 
+            # segment filter
+            h["is_financial"] = h["is_financial"].astype(bool)
             if segment_choice == "Financials":
-                h = h[h["is_financial"].astype(bool)].copy()
+                h = h[h["is_financial"]].copy()
             elif segment_choice == "Non-financials":
-                h = h[~h["is_financial"].astype(bool)].copy()
+                h = h[~h["is_financial"]].copy()
             if h.empty:
                 return h
 
             h["isin"] = h["isin"].astype(str).str.strip()
             h["weight_pct"] = pd.to_numeric(h["weight_pct"], errors="coerce").fillna(0.0)
+
+            # Rebase within each fund (single anchor snapshot)
             sum_w = h.groupby(["fund_id"])["weight_pct"].transform("sum")
             h = h[sum_w > 0].copy()
             if h.empty:
                 return h
             h["w_domestic"] = h["weight_pct"] / sum_w
+
             base = h[["fund_id", "isin", "w_domestic"]].copy()
 
-            # expand to months
-            months_df = pd.DataFrame({"month_end": month_ends})
+            # Expand to months via month_key (canonical)
             base["_key"] = 1
-            months_df["_key"] = 1
-            combo = base.merge(months_df, on="_key").drop(columns=["_key"])
-            return combo
+            months_df2 = months_df.copy()
+            months_df2["_key"] = 1
+            combo = base.merge(months_df2, on="_key").drop(columns=["_key"])
+            return combo  # fund_id, isin, w_domestic, month_key
 
         raise ValueError(f"Unsupported mode: {mode}")
 
@@ -3780,7 +3787,7 @@ def compute_portfolio_exposures_timeseries(
     if rows is None or rows.empty:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
 
-    # ---------- fetch multiples ----------
+    # ---------- fetch multiples over the window; canonicalize by month_key ----------
     all_isins = sorted(rows["isin"].dropna().unique().tolist())
     if not all_isins:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
@@ -3788,7 +3795,10 @@ def compute_portfolio_exposures_timeseries(
     with engine.begin() as conn:
         v_sql = text(
             f"""
-            SELECT isin, month_end, {metric_key} AS multiple
+            SELECT
+                isin,
+                month_end,
+                {metric_key} AS multiple
             FROM fundlab.stock_monthly_valuations
             WHERE isin = ANY(:isins)
               AND month_end BETWEEN :start_date AND :end_date;
@@ -3803,55 +3813,82 @@ def compute_portfolio_exposures_timeseries(
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
 
     vals["isin"] = vals["isin"].astype(str).str.strip()
-    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce").dt.date
+    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
     vals = vals.dropna(subset=["month_end"])
-    vals = vals[vals["month_end"].isin(month_ends)].copy()
+    vals["month_key"] = vals["month_end"].dt.to_period("M")
+    vals = vals[vals["month_key"].isin(month_periods)].copy()
     if vals.empty:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
 
-    df = rows.merge(vals, on=["isin", "month_end"], how="left")
+    # Join on (isin, month_key) ONLY
+    df = rows.merge(
+        vals[["isin", "month_key", "multiple"]],
+        on=["isin", "month_key"],
+        how="left",
+    )
+
     df["multiple"] = pd.to_numeric(df["multiple"], errors="coerce")
     df["w_domestic"] = pd.to_numeric(df["w_domestic"], errors="coerce").fillna(0.0)
 
     # ---------- define buckets ----------
-    bucket_defs = []
-
     if metric_choice == "P/E":
         bucket_defs = [
             ("Loss-making (%)", lambda x: x.notna() & (x < 0)),
             ("P/E > 40x (%)", lambda x: x.notna() & (x > 40)),
             ("P/E < 15x (%)", lambda x: x.notna() & (x > 0) & (x < 15)),
         ]
+        # coverage for P/E should exclude 0 and NaN (negatives allowed)
+        coverage_mask = lambda x: x.notna() & (x != 0)
     elif metric_choice == "P/S":
         bucket_defs = [
             ("P/S > 4x (%)", lambda x: x.notna() & (x > 4)),
             ("P/S < 1.5x (%)", lambda x: x.notna() & (x > 0) & (x < 1.5)),
         ]
+        coverage_mask = lambda x: x.notna() & (x > 0)
     elif metric_choice == "P/B":
         bucket_defs = [
             ("P/B > 6x (%)", lambda x: x.notna() & (x > 6)),
             ("P/B < 2x (%)", lambda x: x.notna() & (x > 0) & (x < 2)),
         ]
-
-    if not bucket_defs:
+        coverage_mask = lambda x: x.notna() & (x > 0)
+    else:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
 
-    # compute per fund-month bucket weights (as %)
+    # ---------- compute per fund-month exposures with coverage ----------
     out_rows = []
+
+    # coverage weight per fund-month: sum of w_domestic where metric is usable
+    df["is_covered"] = coverage_mask(df["multiple"])
+    cov = (
+        df.assign(w_cov=np.where(df["is_covered"], df["w_domestic"], 0.0))
+          .groupby(["fund_id", "month_key"], as_index=False)["w_cov"].sum()
+          .rename(columns={"w_cov": "coverage_weight"})
+    )
+
     for metric_label, mask_fn in bucket_defs:
+        m = mask_fn(df["multiple"])
         tmp = df.copy()
-        m = mask_fn(tmp["multiple"])
         tmp["w_hit"] = np.where(m, tmp["w_domestic"], 0.0)
 
-        g = tmp.groupby(["fund_id", "month_end"], as_index=False)["w_hit"].sum()
+        g = tmp.groupby(["fund_id", "month_key"], as_index=False)["w_hit"].sum()
+        g = g.merge(cov, on=["fund_id", "month_key"], how="left")
+
+        # Exposure % = hit / coverage; NaN if no coverage (prevents fake zeros)
+        g["value"] = np.where(
+            (g["coverage_weight"].notna()) & (g["coverage_weight"] > 0),
+            100.0 * (g["w_hit"] / g["coverage_weight"]),
+            np.nan,
+        )
+
         g["metric"] = metric_label
-        g["value"] = 100.0 * g["w_hit"]
-        out_rows.append(g[["fund_id", "month_end", "metric", "value"]])
+        out_rows.append(g[["fund_id", "month_key", "metric", "value"]])
 
     fund_bucket = pd.concat(out_rows, ignore_index=True)
-    fund_bucket["month_end"] = pd.to_datetime(fund_bucket["month_end"]).dt.normalize()
 
-    # Focus vs others median
+    # Ensure canonical month_end timestamp for charting
+    fund_bucket["month_end"] = fund_bucket["month_key"].dt.to_timestamp("M").dt.normalize()
+
+    # Focus vs universe median (others)
     focus = fund_bucket[fund_bucket["fund_id"] == focus_fund_id].copy()
     focus["series"] = "Focus fund"
     focus = focus[["month_end", "metric", "series", "value"]]
@@ -7066,6 +7103,8 @@ def portfolio_valuations_page():
         .properties(height=400)
     )
     st.altair_chart(val_chart, use_container_width=True)
+
+
         # ------------------------------------------------------------
     # 6) Additional exposure charts (focus vs universe median)
     # ------------------------------------------------------------
