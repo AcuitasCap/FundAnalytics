@@ -310,22 +310,21 @@ def debug_portfolio_valuation_point(
     """
     Debug helper: for a single fund + month, print all guts of the valuation calc.
 
-    NEW LOGIC: Yield aggregation + inversion (using 1/multiple from stock_monthly_valuations)
+    UPDATED LOGIC (stock_monthly_valuations stores YIELDS):
+      - stock_yield = stock_monthly_valuations.{ps|pe|pb}
+      - agg_yield = SUM_i ( w_domestic_i * stock_yield_i ) over valid stocks
+      - portfolio_multiple = 1 / agg_yield  if agg_yield > 0 else NA
 
-      agg_yield = SUM_i ( w_domestic_i * (1 / multiple_i) ) over valid stocks
-      portfolio_multiple = 1 / agg_yield  if agg_yield > 0 else NA
-
-    Validity rules:
-      - P/S, P/B: multiple must be > 0
-      - P/E: multiple must be != 0 (negatives allowed; includes loss-makers)
-      - No renormalization after dropping invalid multiples
+    Validity rules (on yields):
+      - P/S, P/B: yield must be > 0
+      - P/E: yield must be != 0 (negatives allowed; includes loss-makers)
+      - No renormalization after dropping invalid yields
       - If agg_yield <= 0 or NaN => portfolio_multiple = NA
 
     mode:
       - 'Valuations of historical portfolios'
       - 'Historical valuations of current portfolio'
     """
-
     import numpy as np
     import pandas as pd
     from sqlalchemy.sql import text
@@ -337,7 +336,7 @@ def debug_portfolio_valuation_point(
     canonical_month_end = target_period.to_timestamp("M").normalize()
     canonical_month_end_date = canonical_month_end.date()
 
-    st.write("### Debug valuation point (yield inversion)")
+    st.write("### Debug valuation point (yield aggregation + inversion)")
     st.write(
         f"Fund ID: **{fund_id}** | Month: **{target_period}** | "
         f"Canonical month-end: **{canonical_month_end_date}**"
@@ -372,7 +371,6 @@ def debug_portfolio_valuation_point(
                   AND fp.month_end BETWEEN :m_start AND :m_end;
                 """
             )
-            # pull only within the month window, then filter via month_key
             m_start = target_period.start_time.date()
             m_end = target_period.to_timestamp("M").date()
             holdings = pd.read_sql(
@@ -439,7 +437,7 @@ def debug_portfolio_valuation_point(
 
         holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
         holdings = holdings.dropna(subset=["month_end"])
-        holdings["month_key"] = target_period  # we will revalue at this month
+        holdings["month_key"] = target_period  # revalue at this month
 
         st.write(f"Anchor holdings month_end used: **{pd.to_datetime(anchor.anchor_month_end).date()}**")
 
@@ -478,7 +476,8 @@ def debug_portfolio_valuation_point(
     )
 
     # ------------------------------------------------------------
-    # 2) Load stock-level multiples for the month_key (canonical month handling)
+    # 2) Load stock-level YIELDS for the month_key (canonical month handling)
+    #    Also attach company_name for audit table #2 (your requirement)
     # ------------------------------------------------------------
     all_isins = sorted(holdings["isin"].unique().tolist())
     with engine.begin() as conn:
@@ -487,7 +486,7 @@ def debug_portfolio_valuation_point(
             SELECT
                 smv.isin,
                 smv.month_end,
-                smv.{metric_key} AS multiple
+                smv.{metric_key} AS yield_value
             FROM fundlab.stock_monthly_valuations smv
             WHERE smv.isin = ANY(:isins)
               AND smv.month_end BETWEEN :m_start AND :m_end;
@@ -511,30 +510,55 @@ def debug_portfolio_valuation_point(
         st.error("No stock valuations matching this year-month (after month_key filter).")
         return
 
-    st.write("#### Step 2: Stock multiples (selected month)")
-    st.dataframe(vals[["isin", "month_end", "multiple"]].sort_values("isin").reset_index(drop=True))
+    # Attach company_name into Step 2 (so it doesn't show ISINs only)
+    name_map = holdings.drop_duplicates("isin")[["isin", "company_name"]]
+    vals = vals.merge(name_map, on="isin", how="left")
+    vals["company_name"] = vals["company_name"].fillna("")
+
+    vals["yield_value"] = pd.to_numeric(vals["yield_value"], errors="coerce")
+
+    # Implied multiple just for readability in audit
+    vals["implied_multiple"] = np.where(
+        vals["yield_value"].notna() & (vals["yield_value"] != 0),
+        1.0 / vals["yield_value"],
+        np.nan,
+    )
+
+    st.write("#### Step 2: Stock yields (selected month) — with implied multiple (for readability)")
+    st.dataframe(
+        vals[["company_name", "isin", "month_end", "yield_value", "implied_multiple"]]
+        .sort_values(["company_name", "isin"])
+        .reset_index(drop=True)
+    )
 
     # ------------------------------------------------------------
-    # 3) Merge, compute yield + contributions, then aggregate
+    # 3) Merge, compute validity + contributions, then aggregate
     # ------------------------------------------------------------
-    df = holdings.merge(vals[["isin", "month_key", "multiple"]], on=["isin", "month_key"], how="left")
+    df = holdings.merge(vals[["isin", "month_key", "yield_value"]], on=["isin", "month_key"], how="left")
 
-    df["multiple"] = pd.to_numeric(df["multiple"], errors="coerce")
+    df["yield_value"] = pd.to_numeric(df["yield_value"], errors="coerce")
 
-    # validity rules
+    # validity rules (on yields)
     if metric_choice in ("P/S", "P/B"):
-        df["valid"] = df["multiple"].notna() & (df["multiple"] > 0)
+        df["valid"] = df["yield_value"].notna() & (df["yield_value"] > 0)
     else:
         # P/E: keep negatives; exclude 0/NaN
-        df["valid"] = df["multiple"].notna() & (df["multiple"] != 0)
+        df["valid"] = df["yield_value"].notna() & (df["yield_value"] != 0)
 
-    df["yield"] = np.where(df["valid"], 1.0 / df["multiple"], np.nan)
-    df["w_yield"] = df["w_domestic"] * df["yield"]
+    # weighted yield contribution (no renormalization after dropping invalid)
+    df["w_yield"] = np.where(df["valid"], df["w_domestic"] * df["yield_value"], np.nan)
+
+    # implied multiple per stock (optional, for audit clarity)
+    df["implied_multiple"] = np.where(
+        df["yield_value"].notna() & (df["yield_value"] != 0),
+        1.0 / df["yield_value"],
+        np.nan,
+    )
 
     st.write("#### Step 3: Per-stock yield math (audit trail)")
     st.dataframe(
         df[
-            ["company_name", "isin", "w_domestic", "multiple", "valid", "yield", "w_yield"]
+            ["company_name", "isin", "w_domestic", "yield_value", "implied_multiple", "valid", "w_yield"]
         ]
         .sort_values("w_domestic", ascending=False)
         .reset_index(drop=True)
@@ -546,7 +570,7 @@ def debug_portfolio_valuation_point(
 
     st.write("#### Step 4: Portfolio aggregation")
     st.write(f"Valid stocks: **{valid_count}** | Coverage weight (sum w_domestic over valid): **{coverage_weight:.4f}**")
-    st.write(f"Aggregate yield = SUM(w_domestic * yield) = **{agg_yield:.8f}**")
+    st.write(f"Aggregate yield = SUM(w_domestic * yield_value) = **{agg_yield:.8f}**")
 
     if np.isnan(agg_yield) or agg_yield <= 0:
         st.write(f"Result: Portfolio {metric_choice} = **NA** (agg_yield <= 0 or missing)")
@@ -580,8 +604,15 @@ def debug_portfolio_valuation_point(
                 f"Stored value in fund_monthly_valuations ({metric_choice}) for "
                 f"{canonical_month_end_date} / {segment_choice}: **{stored_val}**"
             )
+            if (stored_val is not None) and (not (pd.isna(stored_val))) and (not pd.isna(portfolio_multiple)):
+                try:
+                    diff = float(portfolio_multiple) - float(stored_val)
+                    st.write(f"Difference (computed - stored): **{diff:.6f}**")
+                except Exception:
+                    pass
         else:
             st.write("No row found in fund_monthly_valuations for this fund/month/segment.")
+
 
 
 def upload_fund_navs(df: pd.DataFrame):
@@ -2900,12 +2931,6 @@ def rebuild_stock_monthly_valuations(
     return None
 
 
-import datetime as dt
-import numpy as np
-import pandas as pd
-import streamlit as st
-from sqlalchemy import text
-
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
@@ -3292,8 +3317,6 @@ def rebuild_fund_monthly_valuations(
         "it will act as an incremental update."
     )
 
-
-
 def compute_portfolio_valuations_timeseries(
     fund_ids: list[int],
     focus_fund_id: int,
@@ -3304,14 +3327,17 @@ def compute_portfolio_valuations_timeseries(
     mode: str,
 ) -> pd.DataFrame:
     """
+    UPDATED FOR YIELDS STORED IN stock_monthly_valuations.{ps,pe,pb}
+
     Yield aggregation + inversion (canonical month handling):
 
-      multiple_port(m) = 1 / SUM_i ( w_domestic_i * (1 / multiple_i(m)) )
+      yield_port(m) = SUM_i ( w_domestic_i * yield_i(m) )
+      multiple_port(m) = 1 / yield_port(m)
 
-    Rules:
-      - P/B, P/S: multiple must be > 0
-      - P/E: multiple must be != 0 (negatives allowed; loss-makers included)
-      - No renormalization after dropping invalid multiples (weights stay w_domestic)
+    Rules (stock-level validity when aggregating yield):
+      - P/B, P/S: yield must be > 0
+      - P/E: yield must be != 0 (negatives allowed; loss-makers included)
+      - No renormalization after dropping invalid yields (weights stay w_domestic)
       - If aggregate_yield <= 0 or missing => value = NaN (chart gap; tables can show NA)
 
     Output columns:
@@ -3319,7 +3345,6 @@ def compute_portfolio_valuations_timeseries(
       series  (str)             : 'Focus fund' / 'Universe median (others)'
       value   (float)           : portfolio multiple
     """
-
     import numpy as np
     import pandas as pd
     from sqlalchemy.sql import text
@@ -3348,23 +3373,23 @@ def compute_portfolio_valuations_timeseries(
     def _compute_multiple_from_rows(df_rows: pd.DataFrame) -> pd.DataFrame:
         """
         df_rows required cols:
-          fund_id, month_key, w_domestic, multiple
+          fund_id, month_key, w_domestic, yield_value
 
         returns cols:
-          fund_id, month_key, value
+          fund_id, month_key, value   (portfolio multiple)
         """
         d = df_rows.copy()
         d["w_domestic"] = pd.to_numeric(d["w_domestic"], errors="coerce").fillna(0.0)
-        d["multiple"] = pd.to_numeric(d["multiple"], errors="coerce")
+        d["yield_value"] = pd.to_numeric(d["yield_value"], errors="coerce")
 
         if metric_choice in ("P/B", "P/S"):
-            valid = d["multiple"].notna() & (d["multiple"] > 0)
+            valid = d["yield_value"].notna() & (d["yield_value"] > 0)
         else:
             # P/E: include loss-makers; exclude 0 / NaN
-            valid = d["multiple"].notna() & (d["multiple"] != 0)
+            valid = d["yield_value"].notna() & (d["yield_value"] != 0)
 
-        # weighted yields only where valid
-        d["w_yield"] = np.where(valid, d["w_domestic"] * (1.0 / d["multiple"]), np.nan)
+        # weighted yields only where valid (no renormalization after dropping)
+        d["w_yield"] = np.where(valid, d["w_domestic"] * d["yield_value"], np.nan)
 
         g = (
             d.groupby(["fund_id", "month_key"], as_index=False)
@@ -3412,7 +3437,6 @@ def compute_portfolio_valuations_timeseries(
         holdings = holdings.dropna(subset=["month_end"])
         holdings["month_key"] = holdings["month_end"].dt.to_period("M")
 
-        # Restrict to requested months (safety)
         holdings = holdings[holdings["month_key"].isin(month_periods)].copy()
         if holdings.empty:
             return pd.DataFrame(columns=["month_end", "series", "value"])
@@ -3443,7 +3467,7 @@ def compute_portfolio_valuations_timeseries(
                 SELECT
                     isin,
                     month_end,
-                    {metric_key} AS multiple
+                    {metric_key} AS yield_value
                 FROM fundlab.stock_monthly_valuations
                 WHERE isin = ANY(:isins)
                   AND month_end BETWEEN :start_date AND :end_date;
@@ -3462,24 +3486,21 @@ def compute_portfolio_valuations_timeseries(
         vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
         vals = vals.dropna(subset=["month_end"])
         vals["month_key"] = vals["month_end"].dt.to_period("M")
-
         vals = vals[vals["month_key"].isin(month_periods)].copy()
         if vals.empty:
             return pd.DataFrame(columns=["month_end", "series", "value"])
 
-        # Merge on (isin, month_key) ONLY
         merged = holdings.merge(
-            vals[["isin", "month_key", "multiple"]],
+            vals[["isin", "month_key", "yield_value"]],
             on=["isin", "month_key"],
             how="left",
         )
 
-        df_rows = merged[["fund_id", "month_key", "w_domestic", "multiple"]].copy()
+        df_rows = merged[["fund_id", "month_key", "w_domestic", "yield_value"]].copy()
         agg = _compute_multiple_from_rows(df_rows)
         if agg.empty:
             return pd.DataFrame(columns=["month_end", "series", "value"])
 
-        # Convert to canonical month_end timestamp
         agg["month_end"] = agg["month_key"].dt.to_timestamp("M").dt.normalize()
 
         focus = agg[agg["fund_id"] == focus_fund_id][["month_end", "value"]].copy()
@@ -3491,10 +3512,7 @@ def compute_portfolio_valuations_timeseries(
         if others.empty:
             return pd.DataFrame(columns=["month_end", "series", "value"])
 
-        median_others = (
-            others.groupby("month_end", as_index=False)["value"]
-            .median()
-        )
+        median_others = others.groupby("month_end", as_index=False)["value"].median()
         median_others["series"] = "Universe median (others)"
 
         out = pd.concat([focus, median_others], ignore_index=True)
@@ -3567,14 +3585,13 @@ def compute_portfolio_valuations_timeseries(
     if not all_isins:
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    # Pull stock multiples for these ISINs across window; join via month_key
     with engine.begin() as conn:
         vals_sql = text(
             f"""
             SELECT
                 isin,
                 month_end,
-                {metric_key} AS multiple
+                {metric_key} AS yield_value
             FROM fundlab.stock_monthly_valuations
             WHERE isin = ANY(:isins)
               AND month_end BETWEEN :start_date AND :end_date;
@@ -3603,12 +3620,12 @@ def compute_portfolio_valuations_timeseries(
     combo = base_holdings.merge(months_df, on="_key").drop(columns=["_key"])
 
     df = combo.merge(
-        vals[["isin", "month_key", "multiple"]],
+        vals[["isin", "month_key", "yield_value"]],
         on=["isin", "month_key"],
         how="left",
     )
 
-    df_rows = df[["fund_id", "month_key", "w_domestic", "multiple"]].copy()
+    df_rows = df[["fund_id", "month_key", "w_domestic", "yield_value"]].copy()
     agg = _compute_multiple_from_rows(df_rows)
     if agg.empty:
         return pd.DataFrame(columns=["month_end", "series", "value"])
@@ -3624,10 +3641,7 @@ def compute_portfolio_valuations_timeseries(
     if others.empty:
         return pd.DataFrame(columns=["month_end", "series", "value"])
 
-    median_others = (
-        others.groupby("month_end", as_index=False)["value"]
-        .median()
-    )
+    median_others = others.groupby("month_end", as_index=False)["value"].median()
     median_others["series"] = "Universe median (others)"
 
     out = pd.concat([focus, median_others], ignore_index=True)
@@ -3646,6 +3660,11 @@ def compute_portfolio_exposures_timeseries(
 ) -> pd.DataFrame:
     """
     Exposure diagnostics time series (canonical month handling + proper missing-data semantics)
+
+    UPDATED FOR YIELDS STORED IN stock_monthly_valuations.{ps,pe,pb}:
+      - Pull yields
+      - Convert to implied multiple: multiple = 1 / yield (with safe handling)
+      - Compute bucket exposures on implied multiple, with coverage semantics as before
 
     Output columns:
       month_end (datetime64[ns]) : canonical calendar month-end timestamp
@@ -3799,7 +3818,7 @@ def compute_portfolio_exposures_timeseries(
     if rows is None or rows.empty:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
 
-    # ---------- fetch multiples over the window; canonicalize by month_key ----------
+    # ---------- fetch yields over the window; canonicalize by month_key ----------
     all_isins = sorted(rows["isin"].dropna().unique().tolist())
     if not all_isins:
         return pd.DataFrame(columns=["month_end", "series", "metric", "value"])
@@ -3810,7 +3829,7 @@ def compute_portfolio_exposures_timeseries(
             SELECT
                 isin,
                 month_end,
-                {metric_key} AS multiple
+                {metric_key} AS yield_value
             FROM fundlab.stock_monthly_valuations
             WHERE isin = ANY(:isins)
               AND month_end BETWEEN :start_date AND :end_date;
@@ -3834,23 +3853,31 @@ def compute_portfolio_exposures_timeseries(
 
     # Join on (isin, month_key) ONLY
     df = rows.merge(
-        vals[["isin", "month_key", "multiple"]],
+        vals[["isin", "month_key", "yield_value"]],
         on=["isin", "month_key"],
         how="left",
     )
 
-    df["multiple"] = pd.to_numeric(df["multiple"], errors="coerce")
+    df["yield_value"] = pd.to_numeric(df["yield_value"], errors="coerce")
     df["w_domestic"] = pd.to_numeric(df["w_domestic"], errors="coerce").fillna(0.0)
 
-    # ---------- define buckets ----------
+    # Convert to implied multiple safely: multiple = 1 / yield
+    # - yield==0 => NaN (avoid inf)
+    # - negative yields produce negative multiples (kept for P/E loss-making bucket)
+    df["multiple"] = np.where(
+        df["yield_value"].notna() & (df["yield_value"] != 0),
+        1.0 / df["yield_value"],
+        np.nan,
+    )
+
+    # ---------- define buckets on IMPLIED MULTIPLE ----------
     if metric_choice == "P/E":
         bucket_defs = [
             ("Loss-making (%)", lambda x: x.notna() & (x < 0)),
             ("P/E > 40x (%)", lambda x: x.notna() & (x > 40)),
             ("P/E < 15x (%)", lambda x: x.notna() & (x > 0) & (x < 15)),
         ]
-        # coverage for P/E should exclude 0 and NaN (negatives allowed)
-        coverage_mask = lambda x: x.notna() & (x != 0)
+        coverage_mask = lambda x: x.notna() & (x != 0)  # negatives allowed
     elif metric_choice == "P/S":
         bucket_defs = [
             ("P/S > 4x (%)", lambda x: x.notna() & (x > 4)),
@@ -3869,7 +3896,6 @@ def compute_portfolio_exposures_timeseries(
     # ---------- compute per fund-month exposures with coverage ----------
     out_rows = []
 
-    # coverage weight per fund-month: sum of w_domestic where metric is usable
     df["is_covered"] = coverage_mask(df["multiple"])
     cov = (
         df.assign(w_cov=np.where(df["is_covered"], df["w_domestic"], 0.0))
@@ -3885,7 +3911,6 @@ def compute_portfolio_exposures_timeseries(
         g = tmp.groupby(["fund_id", "month_key"], as_index=False)["w_hit"].sum()
         g = g.merge(cov, on=["fund_id", "month_key"], how="left")
 
-        # Exposure % = hit / coverage; NaN if no coverage (prevents fake zeros)
         g["value"] = np.where(
             (g["coverage_weight"].notna()) & (g["coverage_weight"] > 0),
             100.0 * (g["w_hit"] / g["coverage_weight"]),
@@ -3897,10 +3922,8 @@ def compute_portfolio_exposures_timeseries(
 
     fund_bucket = pd.concat(out_rows, ignore_index=True)
 
-    # Ensure canonical month_end timestamp for charting
     fund_bucket["month_end"] = fund_bucket["month_key"].dt.to_timestamp("M").dt.normalize()
 
-    # Focus vs universe median (others)
     focus = fund_bucket[fund_bucket["fund_id"] == focus_fund_id].copy()
     focus["series"] = "Focus fund"
     focus = focus[["month_end", "metric", "series", "value"]]
