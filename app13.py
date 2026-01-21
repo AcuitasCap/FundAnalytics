@@ -2900,6 +2900,11 @@ def rebuild_stock_monthly_valuations(
     return None
 
 
+import datetime as dt
+import numpy as np
+import pandas as pd
+import streamlit as st
+from sqlalchemy import text
 
 def rebuild_fund_monthly_valuations(
     start_date: dt.date | None = None,
@@ -2907,18 +2912,21 @@ def rebuild_fund_monthly_valuations(
     fund_ids: list[int] | None = None,
 ):
     """
-    Housekeeping job (CSV version):
+    Housekeeping job (CSV version) — UPDATED FOR YIELDS IN stock_monthly_valuations:
 
     - Pulls Domestic Equity holdings (fundlab.fund_portfolio) joined to stock_master for is_financial
-    - Rebase holding_weight within (fund_id, month_end) so Domestic Equities = 100%
+    - Rebase holding_weight within (fund_id, month_key) so Domestic Equities = 100%
     - Join to stock_monthly_valuations by (isin, month_key) (year-month)
-    - Compute portfolio valuations for Total / Financials / Non-financials using
-      yield aggregation + inversion:
-         multiple = 1 / SUM( w_domestic * (1/multiple_i) )
-      Validity rules:
-         - P/S, P/B: require multiple > 0
-         - P/E: allow negatives (loss-makers), require multiple != 0
-      If aggregate yield <= 0 => return NaN (do not force a number)
+      NOTE: stock_monthly_valuations.ps/pe/pb now store YIELDS:
+        ps = sales_yield    (ttm_sales / market_cap)
+        pe = earnings_yield (ttm_pat / market_cap)
+        pb = book_yield     (book_value / market_cap)
+
+    - Compute fund-level multiples for Total / Financials / Non-financials by:
+        1) Rebase weights within the segment to sum to 1.0
+        2) Aggregate yield = SUM( w_seg * yield_i )   (ignoring NaN yields)
+        3) Multiple = 1 / aggregate_yield, only if aggregate_yield > 0 else NaN
+      No other adjustments / caps / truncations.
 
     - Reads existing fund_monthly_valuations rows in range and skips those keys.
     - Outputs a CSV for manual Supabase import.
@@ -3033,7 +3041,7 @@ def rebuild_fund_monthly_valuations(
         return
 
     # --------------------------------------------------------------
-    # 2) Rebase weights within (fund_id, month_end) to Domestic = 100
+    # 2) Rebase weights within (fund_id, month_key) so Domestic = 100
     # --------------------------------------------------------------
     holdings["month_key"] = holdings["month_end"].dt.to_period("M")
     sum_w = holdings.groupby(["fund_id", "month_key"])["weight_pct"].transform("sum")
@@ -3043,11 +3051,12 @@ def rebuild_fund_monthly_valuations(
         return
 
     holdings["w_domestic"] = holdings["weight_pct"] / sum_w
+
     # canonical month_end (date) for output keys
     holdings["month_end"] = holdings["month_key"].dt.to_timestamp("M").dt.date
 
     # --------------------------------------------------------------
-    # 3) Pull stock valuations for relevant ISINs and date window
+    # 3) Pull stock yields for relevant ISINs and date window
     #    and merge by (isin, month_key)
     # --------------------------------------------------------------
     all_isins = sorted(holdings["isin"].unique().tolist())
@@ -3071,7 +3080,11 @@ def rebuild_fund_monthly_valuations(
         vals = pd.read_sql(
             val_sql,
             conn,
-            params={"isins": all_isins, "start_date": min_month.date(), "end_date": max_month.date()},
+            params={
+                "isins": all_isins,
+                "start_date": min_month.date(),
+                "end_date": max_month.date(),
+            },
         )
 
     if vals.empty:
@@ -3089,8 +3102,12 @@ def rebuild_fund_monthly_valuations(
         how="left",
     )
 
+    # Ensure numeric
+    for c in ("ps", "pe", "pb", "w_domestic"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
     if df[["ps", "pe", "pb"]].isna().all(axis=None):
-        st.info("All merged valuations are NaN after month_key merge; nothing to compute.")
+        st.info("All merged yields are NaN after month_key merge; nothing to compute.")
         return
 
     # --------------------------------------------------------------
@@ -3128,43 +3145,44 @@ def rebuild_fund_monthly_valuations(
         existing_keys.add((int(r.fund_id), r.month_end, str(r.segment)))
 
     # --------------------------------------------------------------
-    # 5) Compute fund-level valuations using yield aggregation + inversion
+    # 5) Compute fund-level multiples from yields, rebasing weights within segment
     # --------------------------------------------------------------
     df["is_financial"] = df["is_financial"].astype(bool)
 
-    def _yield_inversion_metric(seg_grp: pd.DataFrame, col_name: str) -> tuple[float, int, float]:
+    def _seg_multiple_from_yield(seg_grp: pd.DataFrame, yield_col: str) -> tuple[float, int, float]:
         """
-        Returns (portfolio_multiple, valid_stock_count, coverage_weight)
+        Returns (portfolio_multiple, valid_stock_count, coverage_weight_domestic)
 
-        multiple = 1 / SUM( w_domestic * (1/multiple_i) )
+        Steps:
+          - Valid rows: yield not null
+          - coverage_weight_domestic = SUM(w_domestic over valid rows)
+          - Rebase segment weights to sum to 1: w_seg = w_domestic / coverage_weight_domestic
+          - Aggregate yield = SUM( w_seg * yield_i )
+          - Multiple = 1 / aggregate_yield if aggregate_yield > 0 else NaN
 
-        Validity:
-          - ps, pb: multiple > 0
-          - pe: multiple != 0 (negatives allowed for loss-makers)
-        If aggregate yield <= 0 => NaN.
+        No truncation / caps / sign filters on stock yields.
+        Only rule to publish a multiple: aggregate_yield > 0.
         """
         g = seg_grp.copy()
-        g[col_name] = pd.to_numeric(g[col_name], errors="coerce")
+        g[yield_col] = pd.to_numeric(g[yield_col], errors="coerce")
         g["w_domestic"] = pd.to_numeric(g["w_domestic"], errors="coerce").fillna(0.0)
 
-        if col_name in ("ps", "pb"):
-            valid = g[col_name].notna() & (g[col_name] > 0)
-        else:
-            valid = g[col_name].notna() & (g[col_name] != 0)
-
+        valid = g[yield_col].notna()
         if not bool(valid.any()):
             return (np.nan, 0, 0.0)
 
         gv = g.loc[valid].copy()
-        coverage_weight = float(gv["w_domestic"].sum())
-        if coverage_weight <= 0:
-            return (np.nan, 0, 0.0)
+        coverage_w = float(gv["w_domestic"].sum())
+        if coverage_w <= 0:
+            return (np.nan, int(len(gv)), 0.0)
 
-        agg_yield = float((gv["w_domestic"] * (1.0 / gv[col_name])).sum())
+        gv["w_seg"] = gv["w_domestic"] / coverage_w
+        agg_yield = float((gv["w_seg"] * gv[yield_col]).sum())
+
         if np.isnan(agg_yield) or agg_yield <= 0:
-            return (np.nan, int(len(gv)), coverage_weight)
+            return (np.nan, int(len(gv)), coverage_w)
 
-        return (float(1.0 / agg_yield), int(len(gv)), coverage_weight)
+        return (float(1.0 / agg_yield), int(len(gv)), coverage_w)
 
     segments = ["Total", "Financials", "Non-financials"]
     records: list[dict] = []
@@ -3197,16 +3215,19 @@ def rebuild_fund_monthly_valuations(
             if seg_grp.empty:
                 continue
 
-            total_weight_seg = float(pd.to_numeric(seg_grp["w_domestic"], errors="coerce").fillna(0.0).sum())
+            # Rebased within-segment to 100 happens inside _seg_multiple_from_yield via w_seg
 
-            ps_val, ps_count, _ = _yield_inversion_metric(seg_grp, "ps")
-            pe_val, pe_count, _ = _yield_inversion_metric(seg_grp, "pe")
-            pb_val, pb_count, _ = _yield_inversion_metric(seg_grp, "pb")
+            ps_val, ps_cnt, ps_cov = _seg_multiple_from_yield(seg_grp, "ps")  # sales yield
+            pe_val, pe_cnt, pe_cov = _seg_multiple_from_yield(seg_grp, "pe")  # earnings yield
+            pb_val, pb_cnt, pb_cov = _seg_multiple_from_yield(seg_grp, "pb")  # book yield
 
+            # If nothing computable, skip
             if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
                 continue
 
-            stock_count = int(max(ps_count, pe_count, pb_count))
+            stock_count = int(max(ps_cnt, pe_cnt, pb_cnt))
+            # Keep total_weight as the segment weight in the Domestic-rebased space (for diagnostics)
+            total_weight_seg = float(pd.to_numeric(seg_grp["w_domestic"], errors="coerce").fillna(0.0).sum())
 
             records.append(
                 {
@@ -3218,7 +3239,9 @@ def rebuild_fund_monthly_valuations(
                     "pb": None if np.isnan(pb_val) else float(pb_val),
                     "stock_count": stock_count,
                     "total_weight": total_weight_seg,
-                    "notes": None,
+                    "notes": (
+                        f"coverage_w(ps/pe/pb)={ps_cov:.3f}/{pe_cov:.3f}/{pb_cov:.3f}"
+                    ),
                 }
             )
 
@@ -3247,17 +3270,15 @@ def rebuild_fund_monthly_valuations(
         f"between {start_date} and {end_date} that do *not* yet exist in "
         f"`fundlab.fund_monthly_valuations`."
     )
-
     st.dataframe(df_out.head(50))
 
     csv_bytes = df_out.to_csv(index=False).encode("utf-8")
-    
+
     # Persist for housekeeping_page() so the download button survives reruns
     st.session_state["fund_valuations_csv_bytes"] = csv_bytes
     st.session_state["fund_valuations_csv_name"] = "fund_monthly_valuations_delta.csv"
     st.session_state["fund_valuations_rows"] = int(len(df_out))
 
-    
     st.download_button(
         label="⬇️ Download fund_monthly_valuations CSV (new rows only)",
         data=csv_bytes,
@@ -3266,7 +3287,7 @@ def rebuild_fund_monthly_valuations(
     )
 
     st.info(
-        "Upload  this CSV into Supabase (fundlab.fund_monthly_valuations). "
+        "Upload this CSV into Supabase (fundlab.fund_monthly_valuations). "
         "Because we only included rows that don't already exist for this date range, "
         "it will act as an incremental update."
     )
