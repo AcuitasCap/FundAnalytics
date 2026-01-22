@@ -6176,7 +6176,7 @@ def render_current_manager_summary(df: pd.DataFrame):
         f"{r.fund_manager} managing since the past {r.years:.1f} years"
         for r in cur.itertuples(index=False)
     ]
-    st.caption("Current fund manager: " + "; ".join(parts))
+    st.caption("Current fund manager- " + "; ".join(parts))
 
 
 
