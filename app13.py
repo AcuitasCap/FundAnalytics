@@ -6772,24 +6772,31 @@ def performance_page():
         def months_between(a: pd.Timestamp, b: pd.Timestamp) -> int:
             return (b.year - a.year) * 12 + (b.month - a.month)
 
-        def series_cagr_between(
+        def series_return_between(
             s: pd.Series, start_eom: pd.Timestamp, end_eom: pd.Timestamp
         ):
-            """Exact month-end CAGR (decimal) between two month-ends."""
+            """
+            Month-end return (decimal) between two month-ends.
+            - If period < 12 months: absolute return
+            - If period >= 12 months: CAGR
+            """
             s = s.dropna().sort_index()
-            if (
-                start_eom not in s.index
-                or end_eom not in s.index
-                or end_eom <= start_eom
-            ):
+            if start_eom not in s.index or end_eom not in s.index or end_eom <= start_eom:
                 return np.nan
+
             m = months_between(start_eom, end_eom)
             if m <= 0:
                 return np.nan
+
             try:
-                return (s.loc[end_eom] / s.loc[start_eom]) ** (12.0 / m) - 1.0
+                ratio = s.loc[end_eom] / s.loc[start_eom]
+                if m < 12:
+                    return ratio - 1.0                      # absolute return
+                else:
+                    return ratio ** (12.0 / m) - 1.0        # CAGR
             except Exception:
                 return np.nan
+
 
         if p2p_end <= p2p_start:
             st.warning("P2P End must be after Start.")
@@ -6801,45 +6808,56 @@ def performance_page():
                     .drop_duplicates("date")
                     .set_index("date")["nav"]
                 )
-                val = series_cagr_between(s, p2p_start, p2p_end)
+                
+                m = months_between(p2p_start, p2p_end)
+                metric_label = "Abs % (P2P)" if m < 12 else "CAGR % (P2P)"
+
+                val = series_return_between(s, p2p_start, p2p_end)
                 rows.append(
                     {
                         "Fund": f,
                         "Start": f"{p2p_start:%b %Y}",
                         "End": f"{p2p_end:%b %Y}",
-                        "Months": months_between(p2p_start, p2p_end),
-                        "CAGR %": None if np.isnan(val) else round(val * 100.0, 2),
+                        "Months": m,
+                        metric_label: None if np.isnan(val) else round(val * 100.0, 2),
                     }
                 )
+
+
             if bench_ser is not None and not bench_ser.empty:
-                bval = series_cagr_between(bench_ser, p2p_start, p2p_end)
+                m = months_between(p2p_start, p2p_end)
+                metric_label = "Abs % (P2P)" if m < 12 else "CAGR % (P2P)"
+
+                bval = series_return_between(bench_ser, p2p_start, p2p_end)
                 rows.append(
                     {
                         "Fund": bench_label,
                         "Start": f"{p2p_start:%b %Y}",
                         "End": f"{p2p_end:%b %Y}",
-                        "Months": months_between(p2p_start, p2p_end),
-                        "CAGR %": None if np.isnan(bval) else round(bval * 100.0, 2),
+                        "Months": m,
+                        metric_label: None if np.isnan(bval) else round(bval * 100.0, 2),
                     }
                 )
 
+
             p2p_df = pd.DataFrame(rows)
-            for col in list(p2p_df.columns):
-                if isinstance(col, str) and col.endswith("CAGR %"):
-                    p2p_df[col] = pd.to_numeric(p2p_df[col], errors="coerce").round(1)
-            if "CAGR %" in p2p_df.columns:
-                p2p_df["CAGR %"] = pd.to_numeric(
-                    p2p_df["CAGR %"], errors="coerce"
-                ).round(1)
-                p2p_df = p2p_df.sort_values(by="CAGR %", ascending=False)
+            ret_cols = [c for c in p2p_df.columns if isinstance(c, str) and ("CAGR" in c or "Abs" in c)]
+            for c in ret_cols:
+                p2p_df[c] = pd.to_numeric(p2p_df[c], errors="coerce").round(1)
+
+            # Sort by the (single) return column if present
+            if ret_cols:
+                p2p_df = p2p_df.sort_values(by=ret_cols[0], ascending=False)
+
 
             st.dataframe(
                 p2p_df.style.format(
-                    {c: "{:.1f}%" for c in p2p_df.columns if c.endswith("CAGR %")},
+                    {c: "{:.1f}%" for c in ret_cols},
                     na_rep="—",
                 ),
                 use_container_width=True,
             )
+
             p_p2p = st.checkbox("To print", key="print_p2p_tbl")
 
             # ------------------------ Relative Multi-Horizon vs Benchmark ------------------------
