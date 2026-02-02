@@ -830,11 +830,11 @@ def validate_fund_portfolios(df_raw: pd.DataFrame):
         )
 
     # In-file duplicate check
-    dup_keys = df.groupby(["scheme_name", "month_end", "isin"]).size()
+    dup_keys = df.groupby(["scheme_name", "month_end", "holding_pct", "isin"]).size()
     dups = dup_keys[dup_keys > 1]
     if not dups.empty:
         raise ValueError(
-            f"Duplicate (scheme_name, month_end, isin) rows found in file: {len(dups)} duplicates."
+            f"Duplicate (scheme_name, month_end, holding %, isin) rows found in file: {len(dups)} duplicates."
         )
 
     summary = {
