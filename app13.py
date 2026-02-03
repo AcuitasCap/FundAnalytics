@@ -3944,7 +3944,7 @@ def compute_portfolio_exposures_timeseries(
     DB hit is only via cached_portfolio_exposures_base_panel() and only on:
       (fund_ids, start/end, mode)
 
-    Segment handling:
+    Segment  handling:
       - filter to segment (Financials / Non-financials / Total)
       - REBASE weights to 100% within segment:
           Mode 1 (historical portfolios): within (fund_id, month_key)
