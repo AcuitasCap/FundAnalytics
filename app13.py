@@ -8077,6 +8077,11 @@ def portfolio_view_subpage():
             .sort_values("month_end")
         )
         period_order = period_order_df["period"].tolist()
+
+        if not period_order:
+            st.warning("No periods found for the selected range/frequency.")
+            return
+
         latest_period = period_order[-1]
 
         # Numeric pivot (for sorting + download)
@@ -8088,7 +8093,7 @@ def portfolio_view_subpage():
             fill_value=0.0,
         ).reindex(columns=period_order)
 
-        # Sort by latest period high -> low (exclude Total at this stage)
+        # Sort rows by latest period weight (desc) before adding Total
         if latest_period in pivot_num.columns:
             pivot_num = pivot_num.sort_values(by=latest_period, ascending=False)
 
@@ -8096,10 +8101,15 @@ def portfolio_view_subpage():
         total_series = pivot_num.sum(axis=0)
         pivot_num = pd.concat([pivot_num, pd.DataFrame([total_series], index=["Total"])])
 
-        # Build display df with required columns
-        holdings_num = pivot_num.reset_index().rename(columns={"company_name": "Instrument"})
+        # Reset index -> normalize first column name -> Instrument
+        holdings_num = pivot_num.reset_index()
+        first_col = holdings_num.columns[0]  # could be 'company_name' or 'index'
+        if first_col != "Instrument":
+            holdings_num = holdings_num.rename(columns={first_col: "Instrument"})
+
+        # Insert Sr. No (blank for Total)
         holdings_num.insert(0, "Sr. No", range(1, len(holdings_num) + 1))
-        holdings_num.loc[holdings_num["Instrument"] == "Total", "Sr. No"] = ""
+        holdings_num.loc[holdings_num["Instrument"].astype(str) == "Total", "Sr. No"] = ""
 
         # Display-formatted copy
         holdings_display = holdings_num.copy()
@@ -8112,19 +8122,23 @@ def portfolio_view_subpage():
             f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
 
-        # Optional CSS: keep Sr. No narrow (best-effort; harmless if your renderer wraps differently)
+        # Best-effort CSS: keep Sr. No narrow (safe if your renderer ignores it)
         st.markdown(
             """
             <style>
-              /* Best-effort: narrow first column inside our sticky table container */
-              .stStickyTable th:nth-child(1), .stStickyTable td:nth-child(1) { width: 54px; min-width: 54px; max-width: 54px; }
+              /* If your sticky-table helper wraps output in a container with this class, this works.
+                 If not, it's harmless. */
+              .stStickyTable th:nth-child(1), .stStickyTable td:nth-child(1) {
+                width: 54px !important;
+                min-width: 54px !important;
+                max-width: 54px !important;
+              }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
-        # Freeze fully on Instrument (i.e., keep Sr. No + Instrument in view)
-        # NOTE: freeze_cols counts from the left: [Sr. No, Instrument] => 2
+        # Freeze fully on Instrument column => keep Sr. No + Instrument in view
         render_sticky_first_col_table(holdings_display, height_px=520, freeze_cols=2)
 
         # Download (numeric, 1-decimal)
@@ -8159,18 +8173,15 @@ def portfolio_view_subpage():
 
         # Ensure first col is exactly "Allocation"
         if alloc_df.columns[0] != "Allocation":
-            # if helper returned different first col name, normalize (best-effort)
             alloc_df = alloc_df.rename(columns={alloc_df.columns[0]: "Allocation"})
 
         # Add TOTAL row (numeric) BEFORE formatting
         num_cols = [c for c in alloc_df.columns if c != "Allocation"]
-        alloc_num = alloc_df[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        totals = alloc_num.sum(axis=0)
-
         alloc_num_df = alloc_df.copy()
         for c in num_cols:
             alloc_num_df[c] = pd.to_numeric(alloc_num_df[c], errors="coerce").fillna(0.0)
 
+        totals = alloc_num_df[num_cols].sum(axis=0)
         alloc_num_df = pd.concat(
             [alloc_num_df, pd.DataFrame([{"Allocation": "Total", **totals.to_dict()}])],
             ignore_index=True,
@@ -8178,18 +8189,16 @@ def portfolio_view_subpage():
 
         # Display formatting
         alloc_display = alloc_num_df.copy()
-        for c in alloc_display.columns:
-            if c != "Allocation":
-                alloc_display[c] = alloc_display[c].apply(_fmt)
+        for c in num_cols:
+            alloc_display[c] = alloc_display[c].apply(_fmt)
 
         # Freeze fully at Allocation only
         render_sticky_first_col_table(alloc_display, height_px=320, freeze_cols=1)
 
         # Download (numeric, 1-decimal)
         alloc_csv = alloc_num_df.copy()
-        for c in alloc_csv.columns:
-            if c != "Allocation":
-                alloc_csv[c] = pd.to_numeric(alloc_csv[c], errors="coerce").fillna(0.0).round(1)
+        for c in num_cols:
+            alloc_csv[c] = pd.to_numeric(alloc_csv[c], errors="coerce").fillna(0.0).round(1)
 
         st.download_button(
             label="Download allocation CSV",
