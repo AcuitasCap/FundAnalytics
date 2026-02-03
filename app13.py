@@ -7882,7 +7882,7 @@ def portfolio_page():
 
 
 def portfolio_view_subpage():
-    # === View portfolio ===
+    # === View portfolio (formatted tables + CSV download) ===
     import sqlalchemy as sa
 
     categories = fetch_categories()
@@ -7914,6 +7914,17 @@ def portfolio_view_subpage():
         df = df[df["month_end"].eq(last_me)].copy()
         df.drop(columns=["grp"], inplace=True, errors="ignore")
         return df
+
+    # -----------------------------
+    # Formatting helper (display only)
+    # -----------------------------
+    def _fmt(x):
+        try:
+            if pd.isna(x) or abs(float(x)) < 0.0001:
+                return "-"
+            return f"{float(x):.1f}"
+        except Exception:
+            return "-"
 
     # -----------------------------
     # UI: Categories
@@ -7994,24 +8005,12 @@ def portfolio_view_subpage():
     freq = st.radio("Aggregation", options=["Monthly", "Quarterly", "Yearly"], horizontal=True)
 
     # -----------------------------
-    # Formatting helper
-    # -----------------------------
-    def _fmt(x):
-        try:
-            if pd.isna(x) or abs(float(x)) < 0.0001:
-                return "-"
-            return f"{float(x):.1f}"
-        except Exception:
-            return "-"
-
-    # -----------------------------
     # Action
     # -----------------------------
     if st.button("Show portfolio"):
         with st.spinner("Loading portfolio..."):
             engine = get_engine()
 
-            # Use actual schema columns + aliases to keep downstream logic stable
             query = """
                 SELECT
                     fund_id,
@@ -8040,13 +8039,13 @@ def portfolio_view_subpage():
             port_df["weight_pct"] = pd.to_numeric(port_df["weight_pct"], errors="coerce").fillna(0.0)
             port_df["company_name"] = port_df["company_name"].fillna("").astype(str)
 
-            # Apply frequency snapshots for instrument table
+            # Apply frequency snapshots for holdings table
             port_snap = _apply_frequency_snapshots(port_df, freq)
             if port_snap.empty:
                 st.warning("No portfolio snapshots found after applying the selected frequency.")
                 return
 
-            # Pull size band using correct schema column name: band_date
+            # Pull size band (schema: band_date)
             sb_query = """
                 SELECT
                     isin,
@@ -8066,9 +8065,10 @@ def portfolio_view_subpage():
                 size_band_df["month_end"] = pd.to_datetime(size_band_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
                 size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
 
-        # -----------------------------
-        # Instrument-level pivot + TOTAL row
-        # -----------------------------
+        # =============================
+        # 5) Portfolio holdings (Sr. No + Instrument frozen)
+        # =============================
+        port_snap = port_snap.copy()
         port_snap["period"] = port_snap["month_end"].dt.strftime("%b %Y")
 
         period_order_df = (
@@ -8077,8 +8077,10 @@ def portfolio_view_subpage():
             .sort_values("month_end")
         )
         period_order = period_order_df["period"].tolist()
+        latest_period = period_order[-1]
 
-        pivot = port_snap.pivot_table(
+        # Numeric pivot (for sorting + download)
+        pivot_num = port_snap.pivot_table(
             index="company_name",
             columns="period",
             values="weight_pct",
@@ -8086,43 +8088,62 @@ def portfolio_view_subpage():
             fill_value=0.0,
         ).reindex(columns=period_order)
 
-        # Sort rows by latest period weight (desc)
-        latest_period = period_order[-1]
-        if latest_period in pivot.columns:
-            pivot = pivot.sort_values(by=latest_period, ascending=False)
+        # Sort by latest period high -> low (exclude Total at this stage)
+        if latest_period in pivot_num.columns:
+            pivot_num = pivot_num.sort_values(by=latest_period, ascending=False)
 
-        # Add TOTAL row (numeric) BEFORE formatting
-        total_series = pivot.sum(axis=0)
-        pivot = pd.concat([pivot, pd.DataFrame([total_series], index=["Total"])])
+        # Add Total row (numeric) after sorting so it stays at bottom
+        total_series = pivot_num.sum(axis=0)
+        pivot_num = pd.concat([pivot_num, pd.DataFrame([total_series], index=["Total"])])
 
-        df_display = pivot.reset_index()  # company_name is column now
+        # Build display df with required columns
+        holdings_num = pivot_num.reset_index().rename(columns={"company_name": "Instrument"})
+        holdings_num.insert(0, "Sr. No", range(1, len(holdings_num) + 1))
+        holdings_num.loc[holdings_num["Instrument"] == "Total", "Sr. No"] = ""
 
-        # Ensure the first column is named 'company_name' after reset_index()
-        first_col = df_display.columns[0]
-        if first_col != "company_name":
-            df_display = df_display.rename(columns={first_col: "company_name"})
+        # Display-formatted copy
+        holdings_display = holdings_num.copy()
+        for c in holdings_display.columns:
+            if c not in ["Sr. No", "Instrument"]:
+                holdings_display[c] = holdings_display[c].apply(_fmt)
 
-
-        # Insert S.No. with blank for Total row
-        df_display.insert(0, "S.No.", range(1, len(df_display) + 1))
-        df_display.loc[df_display["company_name"] == "Total", "S.No."] = ""
-
-        # Format weights as strings with 1 decimal, '-' for tiny/zero
-        for c in df_display.columns:
-            if c not in ["S.No.", "company_name"]:
-                df_display[c] = df_display[c].apply(_fmt)
-
-        st.subheader("5. Portfolio holdings:")
+        st.subheader("5. Portfolio holdings")
         st.caption(
             f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
 
-        # Freeze through 3rd column (S.No., company_name, first period)
-        render_sticky_first_col_table(df_display, height_px=520, freeze_cols=3)
+        # Optional CSS: keep Sr. No narrow (best-effort; harmless if your renderer wraps differently)
+        st.markdown(
+            """
+            <style>
+              /* Best-effort: narrow first column inside our sticky table container */
+              .stStickyTable th:nth-child(1), .stStickyTable td:nth-child(1) { width: 54px; min-width: 54px; max-width: 54px; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # -----------------------------
-        # Allocation table (uses your global helper with Jun/Dec carry-forward) + TOTAL row
-        # -----------------------------
+        # Freeze fully on Instrument (i.e., keep Sr. No + Instrument in view)
+        # NOTE: freeze_cols counts from the left: [Sr. No, Instrument] => 2
+        render_sticky_first_col_table(holdings_display, height_px=520, freeze_cols=2)
+
+        # Download (numeric, 1-decimal)
+        holdings_csv = holdings_num.copy()
+        for c in holdings_csv.columns:
+            if c not in ["Sr. No", "Instrument"]:
+                holdings_csv[c] = pd.to_numeric(holdings_csv[c], errors="coerce").fillna(0.0).round(1)
+
+        st.download_button(
+            label="Download holdings CSV",
+            data=holdings_csv.to_csv(index=False).encode("utf-8"),
+            file_name=f"holdings_{fund_id}_{period_order[0].replace(' ','_')}_to_{period_order[-1].replace(' ','_')}_{freq.lower()}.csv",
+            mime="text/csv",
+            key="dl_holdings_csv",
+        )
+
+        # =============================
+        # 6) Size / asset-type allocation (Allocation frozen)
+        # =============================
         st.subheader("6. Size / asset-type allocation")
 
         alloc_df = build_size_asset_allocation_pivot(
@@ -8136,22 +8157,48 @@ def portfolio_view_subpage():
             st.info("No allocation data available.")
             return
 
+        # Ensure first col is exactly "Allocation"
+        if alloc_df.columns[0] != "Allocation":
+            # if helper returned different first col name, normalize (best-effort)
+            alloc_df = alloc_df.rename(columns={alloc_df.columns[0]: "Allocation"})
+
         # Add TOTAL row (numeric) BEFORE formatting
         num_cols = [c for c in alloc_df.columns if c != "Allocation"]
         alloc_num = alloc_df[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
         totals = alloc_num.sum(axis=0)
-        alloc_df = pd.concat(
-            [alloc_df, pd.DataFrame([{"Allocation": "Total", **totals.to_dict()}])],
+
+        alloc_num_df = alloc_df.copy()
+        for c in num_cols:
+            alloc_num_df[c] = pd.to_numeric(alloc_num_df[c], errors="coerce").fillna(0.0)
+
+        alloc_num_df = pd.concat(
+            [alloc_num_df, pd.DataFrame([{"Allocation": "Total", **totals.to_dict()}])],
             ignore_index=True,
         )
 
-        # Format
-        for c in alloc_df.columns:
+        # Display formatting
+        alloc_display = alloc_num_df.copy()
+        for c in alloc_display.columns:
             if c != "Allocation":
-                alloc_df[c] = alloc_df[c].apply(_fmt)
+                alloc_display[c] = alloc_display[c].apply(_fmt)
 
-        # Freeze through 2nd column (Allocation + first period)
-        render_sticky_first_col_table(alloc_df, height_px=320, freeze_cols=2)
+        # Freeze fully at Allocation only
+        render_sticky_first_col_table(alloc_display, height_px=320, freeze_cols=1)
+
+        # Download (numeric, 1-decimal)
+        alloc_csv = alloc_num_df.copy()
+        for c in alloc_csv.columns:
+            if c != "Allocation":
+                alloc_csv[c] = pd.to_numeric(alloc_csv[c], errors="coerce").fillna(0.0).round(1)
+
+        st.download_button(
+            label="Download allocation CSV",
+            data=alloc_csv.to_csv(index=False).encode("utf-8"),
+            file_name=f"allocation_{fund_id}_{start_date}_to_{end_date}_{freq.lower()}.csv",
+            mime="text/csv",
+            key="dl_alloc_csv",
+        )
+
 
 
 def active_share_subpage():
