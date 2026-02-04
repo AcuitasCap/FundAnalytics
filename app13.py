@@ -7882,7 +7882,7 @@ def portfolio_page():
 
 
 def portfolio_view_subpage():
-    # === View portfolio (formatted tables + CSV download) ===
+    # === View portfolio (Streamlit dataframe styling + CSV download) ===
     import sqlalchemy as sa
 
     categories = fetch_categories()
@@ -8034,18 +8034,17 @@ def portfolio_view_subpage():
                 st.warning("No portfolio data found for this fund and period.")
                 return
 
-            # normalize types
             port_df["month_end"] = pd.to_datetime(port_df["month_end"]).dt.to_period("M").dt.to_timestamp("M")
             port_df["weight_pct"] = pd.to_numeric(port_df["weight_pct"], errors="coerce").fillna(0.0)
             port_df["company_name"] = port_df["company_name"].fillna("").astype(str)
 
-            # Apply frequency snapshots for holdings table
+            # holdings snapshots
             port_snap = _apply_frequency_snapshots(port_df, freq)
             if port_snap.empty:
                 st.warning("No portfolio snapshots found after applying the selected frequency.")
                 return
 
-            # Pull size band (schema: band_date)
+            # size bands
             sb_query = """
                 SELECT
                     isin,
@@ -8066,7 +8065,7 @@ def portfolio_view_subpage():
                 size_band_df["isin"] = size_band_df["isin"].fillna("").astype(str)
 
         # =============================
-        # 5) Portfolio holdings (Sr. No + Instrument frozen)
+        # 5) Portfolio holdings table (Streamlit-native)
         # =============================
         port_snap = port_snap.copy()
         port_snap["period"] = port_snap["month_end"].dt.strftime("%b %Y")
@@ -8077,14 +8076,12 @@ def portfolio_view_subpage():
             .sort_values("month_end")
         )
         period_order = period_order_df["period"].tolist()
-
         if not period_order:
             st.warning("No periods found for the selected range/frequency.")
             return
 
         latest_period = period_order[-1]
 
-        # Numeric pivot (for sorting + download)
         pivot_num = port_snap.pivot_table(
             index="company_name",
             columns="period",
@@ -8093,25 +8090,20 @@ def portfolio_view_subpage():
             fill_value=0.0,
         ).reindex(columns=period_order)
 
-        # Sort rows by latest period weight (desc) before adding Total
         if latest_period in pivot_num.columns:
             pivot_num = pivot_num.sort_values(by=latest_period, ascending=False)
 
-        # Add Total row (numeric) after sorting so it stays at bottom
         total_series = pivot_num.sum(axis=0)
         pivot_num = pd.concat([pivot_num, pd.DataFrame([total_series], index=["Total"])])
 
-        # Reset index -> normalize first column name -> Instrument
         holdings_num = pivot_num.reset_index()
-        first_col = holdings_num.columns[0]  # could be 'company_name' or 'index'
+        first_col = holdings_num.columns[0]
         if first_col != "Instrument":
             holdings_num = holdings_num.rename(columns={first_col: "Instrument"})
 
-        # Insert Sr. No (blank for Total)
         holdings_num.insert(0, "Sr. No", range(1, len(holdings_num) + 1))
         holdings_num.loc[holdings_num["Instrument"].astype(str) == "Total", "Sr. No"] = ""
 
-        # Display-formatted copy
         holdings_display = holdings_num.copy()
         for c in holdings_display.columns:
             if c not in ["Sr. No", "Instrument"]:
@@ -8122,24 +8114,19 @@ def portfolio_view_subpage():
             f"Rows: instruments · Columns: {freq.lower()} snapshots from {period_order[0]} to {period_order[-1]}"
         )
 
-        # Best-effort CSS: keep Sr. No narrow (safe if your renderer ignores it)
-        st.markdown(
-            """
-            <style>
-              /* If your sticky-table helper wraps output in a container with this class, this works.
-                 If not, it's harmless. */
-              .stStickyTable th:nth-child(1), .stStickyTable td:nth-child(1) {
-                width: 54px !important;
-                min-width: 54px !important;
-                max-width: 54px !important;
-              }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Column widths (best-effort) + hide index for a cleaner look
+        holdings_col_config = {
+            "Sr. No": st.column_config.TextColumn("Sr. No", width="small"),
+            "Instrument": st.column_config.TextColumn("Instrument", width="large"),
+        }
 
-        # Freeze fully on Instrument column => keep Sr. No + Instrument in view
-        render_sticky_first_col_table(holdings_display, height_px=520, freeze_cols=2)
+        st.dataframe(
+            holdings_display,
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+            column_config=holdings_col_config,
+        )
 
         # Download (numeric, 1-decimal)
         holdings_csv = holdings_num.copy()
@@ -8156,7 +8143,7 @@ def portfolio_view_subpage():
         )
 
         # =============================
-        # 6) Size / asset-type allocation (Allocation frozen)
+        # 6) Allocation table (Streamlit-native)
         # =============================
         st.subheader("6. Size / asset-type allocation")
 
@@ -8171,12 +8158,11 @@ def portfolio_view_subpage():
             st.info("No allocation data available.")
             return
 
-        # Ensure first col is exactly "Allocation"
         if alloc_df.columns[0] != "Allocation":
             alloc_df = alloc_df.rename(columns={alloc_df.columns[0]: "Allocation"})
 
-        # Add TOTAL row (numeric) BEFORE formatting
         num_cols = [c for c in alloc_df.columns if c != "Allocation"]
+
         alloc_num_df = alloc_df.copy()
         for c in num_cols:
             alloc_num_df[c] = pd.to_numeric(alloc_num_df[c], errors="coerce").fillna(0.0)
@@ -8187,13 +8173,21 @@ def portfolio_view_subpage():
             ignore_index=True,
         )
 
-        # Display formatting
         alloc_display = alloc_num_df.copy()
         for c in num_cols:
             alloc_display[c] = alloc_display[c].apply(_fmt)
 
-        # Freeze fully at Allocation only
-        render_sticky_first_col_table(alloc_display, height_px=320, freeze_cols=1)
+        alloc_col_config = {
+            "Allocation": st.column_config.TextColumn("Allocation", width="large"),
+        }
+
+        st.dataframe(
+            alloc_display,
+            use_container_width=True,
+            hide_index=True,
+            height=320,
+            column_config=alloc_col_config,
+        )
 
         # Download (numeric, 1-decimal)
         alloc_csv = alloc_num_df.copy()
