@@ -1946,6 +1946,88 @@ def validate_fund_manager_tenure(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, di
     }
     return df.reset_index(drop=True), summary
 
+
+def validate_stock_dividends(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Validates and cleans dividend upload.
+
+    Accepts flexible column naming:
+      - ISIN / isin
+      - Ex Date / ex_date
+      - DPS / dps / Dividend Per Share
+
+    Returns:
+      df_clean with columns: isin, ex_date, dps
+      summary dict
+    """
+    if df_raw is None or df_raw.empty:
+        raise ValueError("The uploaded file is empty.")
+
+    df = df_raw.copy()
+
+    # Normalize column names
+    col_map = {}
+    for c in df.columns:
+        k = str(c).strip().lower()
+        col_map[c] = k
+    df = df.rename(columns=col_map)
+
+    # Allow common variants
+    rename = {}
+    if "isin" not in df.columns:
+        # nothing else reasonable to map to
+        pass
+    if "ex_date" not in df.columns:
+        for cand in ["ex date", "ex-date", "exdate", "ex_dividend_date", "exdividenddate"]:
+            if cand in df.columns:
+                rename[cand] = "ex_date"
+                break
+    if "dps" not in df.columns:
+        for cand in ["dividend per share", "div_per_share", "dividend", "dividend_per_share"]:
+            if cand in df.columns:
+                rename[cand] = "dps"
+                break
+    df = df.rename(columns=rename)
+
+    required = ["isin", "ex_date", "dps"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}. Expected: {required}")
+
+    out = df[required].copy()
+    out["isin"] = out["isin"].astype(str).str.strip()
+    out["ex_date"] = pd.to_datetime(out["ex_date"], errors="coerce").dt.date
+    out["dps"] = pd.to_numeric(out["dps"], errors="coerce")
+
+    # Basic validations
+    bad_isin = out["isin"].isna() | (out["isin"] == "") | (out["isin"].str.lower() == "nan")
+    bad_date = out["ex_date"].isna()
+    bad_dps = out["dps"].isna() | (out["dps"] < 0)
+
+    invalid = bad_isin | bad_date | bad_dps
+    if invalid.any():
+        examples = out.loc[invalid].head(15)
+        raise ValueError(
+            f"{int(invalid.sum())} invalid rows found (blank ISIN / invalid ex_date / invalid dps).\n"
+            f"Examples:\n{examples.to_string(index=False)}"
+        )
+
+    # De-dupe within file
+    before = len(out)
+    out = out.drop_duplicates(subset=["isin", "ex_date"], keep="last").reset_index(drop=True)
+    after = len(out)
+
+    summary = {
+        "rows_in_file": int(before),
+        "rows_after_dedup": int(after),
+        "unique_isins": int(out["isin"].nunique()),
+        "min_ex_date": str(min(out["ex_date"])),
+        "max_ex_date": str(max(out["ex_date"])),
+    }
+    return out, summary
+
+
+
 def _category_name_to_id(engine) -> dict:
     df = pd.read_sql(
         """
@@ -2061,6 +2143,75 @@ def upload_fund_manager_tenure(df_clean: pd.DataFrame, resolutions: dict) -> Non
             },
         )
 
+def upload_stock_dividends(df: pd.DataFrame) -> None:
+    """
+    Upload dividend events into fundlab.stock_dividend.
+
+    Expected columns in df:
+      - isin (text)
+      - ex_date (date or datetime)
+      - dps (numeric)
+
+    Table:
+      fundlab.stock_dividend(isin text, ex_date date, dps numeric, PK(isin, ex_date))
+
+    Behavior:
+      - Upsert on (isin, ex_date): updates dps if already exists
+      - Chunked inserts
+    """
+    import sqlalchemy as sa
+    from sqlalchemy.exc import SQLAlchemyError
+
+    if df is None or df.empty:
+        raise ValueError("No dividend rows to upload.")
+
+    required = {"isin", "ex_date", "dps"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Dividend upload missing required columns: {sorted(missing)}")
+
+    # Clean / normalize
+    d = df.copy()
+    d["isin"] = d["isin"].astype(str).str.strip()
+    d["ex_date"] = pd.to_datetime(d["ex_date"], errors="coerce").dt.date
+    d["dps"] = pd.to_numeric(d["dps"], errors="coerce")
+
+    bad_isin = d["isin"].isna() | (d["isin"] == "") | (d["isin"].str.lower() == "nan")
+    bad_date = d["ex_date"].isna()
+    bad_dps = d["dps"].isna() | (d["dps"] < 0)
+
+    if bad_isin.any() or bad_date.any() or bad_dps.any():
+        n_bad = int((bad_isin | bad_date | bad_dps).sum())
+        examples = d.loc[bad_isin | bad_date | bad_dps, ["isin", "ex_date", "dps"]].head(10)
+        raise ValueError(
+            f"Invalid dividend rows: {n_bad} rows have blank ISIN / invalid ex_date / invalid dps.\n"
+            f"Examples:\n{examples.to_string(index=False)}"
+        )
+
+    # Drop exact duplicates within file (keep last)
+    d = d.drop_duplicates(subset=["isin", "ex_date"], keep="last").reset_index(drop=True)
+
+    engine = get_engine()
+
+    upsert_sql = sa.text(
+        """
+        insert into fundlab.stock_dividend (isin, ex_date, dps)
+        values (:isin, :ex_date, :dps)
+        on conflict (isin, ex_date) do update
+        set dps = excluded.dps
+        """
+    )
+
+    # Chunked execute
+    chunk_size = 5000
+    rows = d[["isin", "ex_date", "dps"]].to_dict(orient="records")
+
+    try:
+        with engine.begin() as conn:
+            for i in range(0, len(rows), chunk_size):
+                conn.execute(upsert_sql, rows[i : i + chunk_size])
+    except SQLAlchemyError as e:
+        raise
 
 
 def upload_stock_monthly_valuations_from_excel(uploaded_file, batch_size: int = 2000):
