@@ -8556,38 +8556,34 @@ def update_db_page():
             "Stock ISIN, industry, financial/non-financial",
             "Company RoE / RoCE",
             "Stock prices and market cap",
+            "Stock dividends (DPS + Ex-date)",
             "Company PAT (quarterly)",
             "Company sales (quarterly)",
             "Company book value (annual)",
         ],
     )
 
-    # Single file upload for the chosen type
     uploaded = st.file_uploader(
         "Upload Excel file",
         type=["xlsx"],
         key=f"upload_{upload_type}",
     )
 
-    # Show expected format preview (extend this function for new types)
     show_expected_format(upload_type)
 
     if not uploaded:
         st.info("Please upload the appropriate Excel file to continue.")
         return
 
-    # Read the file into a DataFrame
     try:
         df_raw = pd.read_excel(uploaded)
     except Exception as e:
         st.error(f"Could not read Excel file: {e}")
         return
 
-    # State keys to remember validated data
     state_key_df = f"validated_df_{upload_type}"
     state_key_ok = f"validated_ok_{upload_type}"
 
-    # Dry run button
     if st.button("Validate (dry run)"):
         try:
             if upload_type == "Fund NAVs":
@@ -8602,6 +8598,9 @@ def update_db_page():
                 df_clean, summary = validate_roe_roce(df_raw)
             elif upload_type == "Stock prices and market cap":
                 df_clean, summary = validate_stock_prices_mc(df_raw)
+            elif upload_type == "Stock dividends (DPS + Ex-date)":
+                # EXPECTED output columns: ['isin','ex_date','dps']
+                df_clean, summary = validate_stock_dividends(df_raw)
             elif upload_type == "Company PAT (quarterly)":
                 df_clean, summary = validate_quarterly_pat(df_raw)
             elif upload_type == "Company sales (quarterly)":
@@ -8616,9 +8615,7 @@ def update_db_page():
 
             st.session_state[state_key_df] = df_clean
             st.session_state[state_key_ok] = True
-
             st.session_state[f"validated_summary_{upload_type}"] = summary
-
 
             st.success("Dry run successful. No critical format errors detected.")
             st.write("Summary:")
@@ -8633,8 +8630,6 @@ def update_db_page():
             st.session_state[state_key_ok] = False
             return
 
-    # Upload button (only if validation passed)
-        # Upload button (only if validation passed)
     if st.session_state.get(state_key_ok):
         df_clean = st.session_state.get(state_key_df)
         summary = st.session_state.get(f"validated_summary_{upload_type}", {}) or {}
@@ -8647,11 +8642,17 @@ def update_db_page():
             missing = summary.get("missing_funds", []) or []
 
             if missing:
-                st.warning("Some funds in this upload are not present in the fund master. Resolve them below before uploading.")
+                st.warning(
+                    "Some funds in this upload are not present in the fund master. "
+                    "Resolve them below before uploading."
+                )
 
-                # Build a fresh set of existing fund names for validating old-name inputs
                 engine2 = get_engine()
-                existing_names = set(pd.read_sql("select fund_name from fundlab.fund", engine2)["fund_name"].astype(str).str.strip())
+                existing_names = set(
+                    pd.read_sql("select fund_name from fundlab.fund", engine2)["fund_name"]
+                    .astype(str)
+                    .str.strip()
+                )
 
                 categories = fetch_categories()
                 if not categories:
@@ -8686,7 +8687,10 @@ def update_db_page():
 
                             if old_name not in existing_names:
                                 can_proceed = False
-                                block_reason = f"Old name not found in fund master: '{old_name}' (for rename to '{new_name}')"
+                                block_reason = (
+                                    f"Old name not found in fund master: '{old_name}' "
+                                    f"(for rename to '{new_name}')"
+                                )
 
                         resolutions[new_name] = {"old_name": old_name, "category_name": category_name}
 
@@ -8712,6 +8716,8 @@ def update_db_page():
                     upload_roe_roce(df_clean)
                 elif upload_type == "Stock prices and market cap":
                     upload_stock_prices_mc(df_clean)
+                elif upload_type == "Stock dividends (DPS + Ex-date)":
+                    upload_stock_dividends(df_clean)
                 elif upload_type == "Company PAT (quarterly)":
                     upload_quarterly_pat(df_clean)
                 elif upload_type == "Company sales (quarterly)":
