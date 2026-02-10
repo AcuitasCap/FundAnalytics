@@ -8741,7 +8741,7 @@ def update_db_page():
                     )
                 elif "duplicate key value" in lower_msg or "unique constraint" in lower_msg:
                     st.error(
-                        "❌ Duplicate rows detected against existing database records.\n"
+                        "❌ Duplicate rows detected against existing database records..\n"
                         "These ISIN + period combinations already exist.\n\n"
                         f"Database message: {msg}"
                     )
