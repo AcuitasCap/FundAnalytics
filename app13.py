@@ -9972,7 +9972,7 @@ def fund_attribution_page():
 
 
 def home_page():
-    st.subheader("Welcome to the Fund Analytics Dashboard")
+    st.subheader("Welcome to the Fund Analytics Dashboard!")
 
     st.markdown(
         """
