@@ -469,10 +469,17 @@ def debug_portfolio_valuation_point(
         st.error("No holdings in this segment for the selected month.")
         return
 
-    st.write("#### Step 1: Holdings (after segment filter; no weight re-normalization)")
+    # Rebase within selected segment so segment acts as a standalone 100% portfolio
+    seg_w_sum = float(pd.to_numeric(holdings["w_base"], errors="coerce").fillna(0.0).sum())
+    if seg_w_sum <= 0:
+        st.error("Segment weight sum is not positive.")
+        return
+    holdings["w_seg"] = pd.to_numeric(holdings["w_base"], errors="coerce").fillna(0.0) / seg_w_sum
+
+    st.write("#### Step 1: Holdings (after segment filter; rebased to 100% within segment)")
     st.dataframe(
-        holdings[["company_name", "isin", "weight_pct", "w_base", "is_financial"]]
-        .sort_values("w_base", ascending=False)
+        holdings[["company_name", "isin", "weight_pct", "w_base", "w_seg", "is_financial"]]
+        .sort_values("w_seg", ascending=False)
         .reset_index(drop=True)
     )
 
@@ -607,8 +614,8 @@ def debug_portfolio_valuation_point(
     df["yield_value_filled"] = df["yield_value"].fillna(0.0)
     df["was_missing_yield"] = df["yield_value"].isna()
 
-    # weighted yield contribution (no renormalization)
-    df["w_yield"] = df["w_base"] * df["yield_value_filled"]
+    # weighted yield contribution (with segment-rebased weights)
+    df["w_yield"] = df["w_seg"] * df["yield_value_filled"]
 
     # implied multiple per stock (optional, for audit clarity)
     df["implied_multiple"] = np.where(
@@ -622,6 +629,7 @@ def debug_portfolio_valuation_point(
         "company_name",
         "isin",
         "w_base",
+        "w_seg",
         "market_cap",
         "fundamental_value",
         "yield_value",
@@ -631,16 +639,16 @@ def debug_portfolio_valuation_point(
         "was_missing_yield",
         "w_yield",
     ]
-    df_show = df[cols].sort_values("w_base", ascending=False).reset_index(drop=True)
+    df_show = df[cols].sort_values("w_seg", ascending=False).reset_index(drop=True)
     st.dataframe(df_show)
 
     agg_yield = float(np.nansum(df["w_yield"].to_numpy()))
-    coverage_weight = float(df.loc[~df["was_missing_yield"], "w_base"].sum())
+    coverage_weight = float(df.loc[~df["was_missing_yield"], "w_seg"].sum())
     valid_count = int((~df["was_missing_yield"]).sum())
 
     st.write("#### Step 4: Portfolio aggregation")
-    st.write(f"Non-missing-yield stocks: **{valid_count}** | Coverage weight (sum w_base over non-missing): **{coverage_weight:.4f}**")
-    st.write(f"Aggregate yield = SUM(w_base * yield_value_filled) = **{agg_yield:.8f}**")
+    st.write(f"Non-missing-yield stocks: **{valid_count}** | Coverage weight (sum w_seg over non-missing): **{coverage_weight:.4f}**")
+    st.write(f"Aggregate yield = SUM(w_seg * yield_value_filled) = **{agg_yield:.8f}**")
 
     if np.isnan(agg_yield) or agg_yield == 0:
         st.write(f"Result: Portfolio {metric_choice} = **NA** (agg_yield is zero/undefined for inversion)")
@@ -3210,11 +3218,11 @@ def rebuild_fund_monthly_valuations(
         pb = book_yield     (book_value / market_cap)
 
     - Compute fund-level multiples for Total / Financials / Non-financials by:
-        1) Use raw holding weights as provided (converted to fraction scale)
+        1) Rebase weights within each segment to 100%
         2) Force NaN yields to 0.0
-        3) Aggregate yield = SUM( w_base * yield_i )
+        3) Aggregate yield = SUM( w_seg * yield_i )
         4) Multiple = 1 / aggregate_yield, only undefined when aggregate_yield == 0
-      No sign-based filters and no weight re-normalization.
+      No sign-based filters and no yield-based dropping/re-normalization.
 
     - Reads existing fund_monthly_valuations rows in range and skips those keys.
     - Outputs a CSV for manual Supabase import.
@@ -3431,9 +3439,9 @@ def rebuild_fund_monthly_valuations(
     # --------------------------------------------------------------
     # 5) Compute fund-level multiples from yields.
     #    Logic aligned to debug_portfolio_valuation_point:
-    #      - No weight re-normalization
+    #      - Rebase weights within segment to 100%
     #      - NaN yield is forced to 0.0
-    #      - Multiple = 1 / SUM(w_base * yield_filled)
+    #      - Multiple = 1 / SUM(w_seg * yield_filled)
     #      - Undefined only when aggregate yield == 0
     # --------------------------------------------------------------
     df["is_financial"] = df["is_financial"].astype(bool)
@@ -3446,18 +3454,18 @@ def rebuild_fund_monthly_valuations(
 
         Steps:
           - Force NaN yields to 0.0
-          - coverage_weight_nonmissing = SUM(w_base where original yield was non-missing)
-          - Aggregate yield = SUM(w_base * yield_filled)
+          - coverage_weight_nonmissing = SUM(w_seg where original yield was non-missing)
+          - Aggregate yield = SUM(w_seg * yield_filled)
           - Multiple = 1 / aggregate_yield (undefined when aggregate_yield == 0)
         """
         g = seg_grp.copy()
         g[yield_col] = pd.to_numeric(g[yield_col], errors="coerce")
-        g["w_base"] = pd.to_numeric(g["w_base"], errors="coerce").fillna(0.0)
+        g["w_seg"] = pd.to_numeric(g["w_seg"], errors="coerce").fillna(0.0)
 
         nonmissing = g[yield_col].notna()
-        coverage_w = float(g.loc[nonmissing, "w_base"].sum())
+        coverage_w = float(g.loc[nonmissing, "w_seg"].sum())
         y_filled = g[yield_col].fillna(0.0)
-        agg_yield = float(np.nansum(g["w_base"] * y_filled))
+        agg_yield = float(np.nansum(g["w_seg"] * y_filled))
 
         if np.isnan(agg_yield) or agg_yield == 0:
             return (np.nan, int(nonmissing.sum()), coverage_w)
@@ -3495,6 +3503,13 @@ def rebuild_fund_monthly_valuations(
             if seg_grp.empty:
                 continue
 
+            # Rebase within segment so each segment is treated as a standalone portfolio
+            seg_sum = float(pd.to_numeric(seg_grp["w_base"], errors="coerce").fillna(0.0).sum())
+            if seg_sum <= 0:
+                continue
+            seg_grp = seg_grp.copy()
+            seg_grp["w_seg"] = pd.to_numeric(seg_grp["w_base"], errors="coerce").fillna(0.0) / seg_sum
+
             ps_val, ps_cnt, ps_cov = _seg_multiple_from_yield(seg_grp, "ps")  # sales yield
             pe_val, pe_cnt, pe_cov = _seg_multiple_from_yield(seg_grp, "pe")  # earnings yield
             pb_val, pb_cnt, pb_cov = _seg_multiple_from_yield(seg_grp, "pb")  # book yield
@@ -3504,8 +3519,8 @@ def rebuild_fund_monthly_valuations(
                 continue
 
             stock_count = int(max(ps_cnt, pe_cnt, pb_cnt))
-            # Keep total_weight as the segment base weight sum (no re-normalization)
-            total_weight_seg = float(pd.to_numeric(seg_grp["w_base"], errors="coerce").fillna(0.0).sum())
+            # Segment weights are rebased to 100%
+            total_weight_seg = float(pd.to_numeric(seg_grp["w_seg"], errors="coerce").fillna(0.0).sum())
 
             records.append(
                 {
@@ -3965,19 +3980,24 @@ def compute_portfolio_valuations_cube(
         how="left",
     )
 
-    # Prepare base weights once per (fund_id, month_key); no re-normalization by segment
+    # Prepare base weights once per (fund_id, month_key)
     df["weight_pct"] = pd.to_numeric(df["weight_pct"], errors="coerce").fillna(0.0)
     abs_sum_w = df.groupby(["fund_id", "month_key"])["weight_pct"].transform(lambda s: s.abs().sum())
     df["weight_scale"] = np.where(abs_sum_w > 2.0, 0.01, 1.0)
     df["w_base"] = df["weight_pct"] * df["weight_scale"]
 
-    # 5) Compute multiples per segment and per metric with NO weight re-normalization
+    # 5) Compute multiples per segment and per metric with segment rebasing to 100%
     def _seg_multiple(seg_df: pd.DataFrame, yield_col: str) -> float:
         g = seg_df.copy()
         g[yield_col] = pd.to_numeric(g[yield_col], errors="coerce")
 
+        seg_sum = float(pd.to_numeric(g["w_base"], errors="coerce").fillna(0.0).sum())
+        if seg_sum <= 0:
+            return np.nan
+        g["w_seg"] = pd.to_numeric(g["w_base"], errors="coerce").fillna(0.0) / seg_sum
+
         y_filled = g[yield_col].fillna(0.0)
-        agg_yield = float(np.nansum(g["w_base"] * y_filled))
+        agg_yield = float(np.nansum(g["w_seg"] * y_filled))
 
         if np.isnan(agg_yield) or agg_yield == 0:
             return np.nan
