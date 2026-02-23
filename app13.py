@@ -9208,6 +9208,7 @@ def _load_attrib_raw_window(
             "prices": pd.DataFrame(),
             "multiples": pd.DataFrame(),
             "yields": pd.DataFrame(),
+            "fund_valuations": pd.DataFrame(),
             "size_band": pd.DataFrame(),
             "bench_nav": pd.DataFrame(),
             "stock_master": pd.DataFrame(),
@@ -9294,6 +9295,28 @@ def _load_attrib_raw_window(
     else:
         yld = pd.DataFrame(columns=["isin", "month_end", "ps", "pe", "pb"])
 
+    # Fund-level precomputed valuations (monthly): use Total segment for domestic sleeve decomposition
+    q_fmv = text("""
+        SELECT
+            month_end::date AS month_end,
+            ps,
+            pe,
+            pb
+        FROM fundlab.fund_monthly_valuations
+        WHERE fund_id = :fund_id
+          AND segment = 'Total'
+          AND month_end BETWEEN :start_me AND :end_me
+        ORDER BY month_end
+    """)
+    fmv = pd.read_sql(q_fmv, engine, params={"fund_id": fund_id, "start_me": start_me, "end_me": end_me})
+    if not fmv.empty:
+        fmv["month_end"] = pd.to_datetime(fmv["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
+        for c in ["ps", "pe", "pb"]:
+            if c in fmv.columns:
+                fmv[c] = pd.to_numeric(fmv[c], errors="coerce")
+    else:
+        fmv = pd.DataFrame(columns=["month_end", "ps", "pe", "pb"])
+
     # Size band (monthly)
     if isins:
         q_sz = text("""
@@ -9336,6 +9359,7 @@ def _load_attrib_raw_window(
         "prices": px,
         "multiples": yld,
         "yields": yld,
+        "fund_valuations": fmv,
         "size_band": sz,
         "bench_nav": bn,
         "stock_master": sm,
@@ -9355,6 +9379,7 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
     h = raw["holdings"].copy()
     px = raw["prices"].copy()
     yld = raw.get("yields", raw.get("multiples", pd.DataFrame())).copy()
+    fmv = raw.get("fund_valuations", pd.DataFrame()).copy()
     sz = raw["size_band"].copy()
     bn = raw["bench_nav"].copy()
     sm = raw["stock_master"].copy()
@@ -9739,43 +9764,21 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         dom_total = dom_gross - 1.0 if np.isfinite(dom_gross) else np.nan
         dom_cagr = dom_gross ** (1.0 / years) - 1.0 if years > 0 and dom_gross > 0 else np.nan
 
-        # Yield pivot for selected lens
+        # Use precomputed fund-level valuation multiples from Supabase (no recomputation here)
         mult_col = "ps" if lens.startswith("Sales") else ("pe" if lens.startswith("Earnings") else "pb")
-        y_piv = pd.DataFrame(index=months, columns=domestic_isins, dtype=float)
-        if not yld.empty and mult_col in yld.columns:
-            y2 = yld[yld["isin"].astype(str).isin(domestic_isins)].copy()
-            if not y2.empty:
-                y2["month_end"] = pd.to_datetime(y2["month_end"]).dt.to_period("M").dt.to_timestamp("M")
-                yp = y2.pivot_table(index="month_end", columns="isin", values=mult_col, aggfunc="last").reindex(months)
-                for c in domestic_isins:
-                    if c in yp.columns:
-                        y_piv[c] = pd.to_numeric(yp[c], errors="coerce")
-
-        def _agg_yield(month_end: dt.date, w_row: pd.Series):
-            if y_piv.empty:
-                return np.nan, 0.0
-            y_vals = y_piv.loc[month_end, domestic_isins].to_numpy(dtype=float)
-            w_vals = w_row.to_numpy(dtype=float)
-            if lens.startswith("Earnings"):
-                valid = np.isfinite(y_vals) & (y_vals != 0.0)
-            else:
-                valid = np.isfinite(y_vals) & (y_vals > 0.0)
-            agg_y = float(np.sum(w_vals * np.where(valid, y_vals, 0.0)))
-            coverage = float(np.sum(w_vals * valid))
-            return agg_y, coverage
+        fmv_map = {}
+        if not fmv.empty and mult_col in fmv.columns:
+            fmv2 = fmv.copy()
+            fmv2["month_end"] = pd.to_datetime(fmv2["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+            fmv2[mult_col] = pd.to_numeric(fmv2[mult_col], errors="coerce")
+            fmv_map = dict(zip(fmv2["month_end"], fmv2[mult_col]))
 
         start_m = t0[0]
         end_m = t1[-1]
         end_w_m = t0[-1]
 
-        w_start = w0_dom_df.loc[start_m]
-        w_end = w0_dom_df.loc[end_w_m]
-
-        agg_y_start, cov_start = _agg_yield(start_m, w_start)
-        agg_y_end, cov_end = _agg_yield(end_m, w_end)
-
-        m_start = 1.0 / agg_y_start if np.isfinite(agg_y_start) and agg_y_start > 0 else np.nan
-        m_end = 1.0 / agg_y_end if np.isfinite(agg_y_end) and agg_y_end > 0 else np.nan
+        m_start = pd.to_numeric(fmv_map.get(start_m), errors="coerce")
+        m_end = pd.to_numeric(fmv_map.get(end_m), errors="coerce")
 
         multiple_gross = (m_end / m_start) if np.isfinite(m_start) and np.isfinite(m_end) and m_start > 0 and m_end > 0 else np.nan
         fundamental_gross = (dom_gross / multiple_gross) if np.isfinite(dom_gross) and np.isfinite(multiple_gross) and multiple_gross > 0 else np.nan
@@ -9798,14 +9801,15 @@ def _compute_attribution(raw: dict, start_date: dt.date, end_date: dt.date, benc
         dom_decomp_debug = {
             "start_month": start_m,
             "end_month": end_m,
-            "start_agg_yield": agg_y_start,
-            "end_agg_yield": agg_y_end,
-            "start_coverage_weight": cov_start,
-            "end_coverage_weight": cov_end,
+            "start_agg_yield": np.nan,
+            "end_agg_yield": np.nan,
+            "start_coverage_weight": np.nan,
+            "end_coverage_weight": np.nan,
             "start_multiple": m_start,
             "end_multiple": m_end,
             "multiple_gross": multiple_gross,
             "domestic_gross": dom_gross,
+            "multiple_source": "fundlab.fund_monthly_valuations (segment=Total)",
         }
 
         # Stock-level diagnostics: average weight + exact chained contributions (no scaling)
