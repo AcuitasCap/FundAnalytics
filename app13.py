@@ -50,6 +50,9 @@ from stock_corporate_actions import (
     validate_stock_corporate_actions,
 )
 
+import subprocess
+print("GIT HEAD:", subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip())
+print("LS:", subprocess.check_output(["ls", "-la"]).decode())
 
 def check_password():
     """Return True if the user entered the correct password."""
