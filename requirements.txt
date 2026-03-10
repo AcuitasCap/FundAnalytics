@@ -7,3 +7,4 @@ plotly
 numpy
 Matplotlib
 reportlab
+kaleido
