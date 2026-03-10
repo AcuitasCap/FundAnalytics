@@ -7,4 +7,4 @@ plotly
 numpy
 Matplotlib
 reportlab
-kaleido
+kaleido==0.2.1
