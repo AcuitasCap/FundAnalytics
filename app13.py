@@ -10350,6 +10350,7 @@ def _compute_attribution(
     dom_triangulation_summary_df = pd.DataFrame()
     dom_triangulation_mode = str(raw.get("dom_triangulation_mode", "Fallback to price growth"))
     dom_triangulation_coverage = {"valid_weight_sum": np.nan, "invalid_weight_sum": np.nan}
+    dom_decomp_runtime_mode = "not_run"
 
     if domestic_isins:
         # Domestic sleeve weights rebased to 1.0 each month (t0)
@@ -10369,6 +10370,7 @@ def _compute_attribution(
         # Monthly valuation and residual fundamental decomposition from stock-level multiples.
         helper_sig = inspect.signature(compute_monthly_portfolio_multiples)
         if "r_price_df" in helper_sig.parameters:
+            dom_decomp_runtime_mode = "monthly_drifted_end_weights"
             m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
                 multiples_df=yld,
                 months=months,
@@ -10378,6 +10380,7 @@ def _compute_attribution(
                 lens=lens,
             )
         else:
+            dom_decomp_runtime_mode = "legacy_start_weight_end_multiple"
             print(
                 "WARN: compute_monthly_portfolio_multiples imported without r_price_df support; "
                 "falling back to legacy valuation decomposition."
@@ -10452,6 +10455,8 @@ def _compute_attribution(
             "gross_price": gross_price,
             "gross_dividend": gross_div,
             "gross_fundamental": gross_fund,
+            "runtime_mode": dom_decomp_runtime_mode,
+            "helper_signature": str(helper_sig),
         }
 
         dom_decomp_monthly_audit_df = pd.DataFrame({
@@ -10776,6 +10781,8 @@ def fund_attribution_page():
         with st.expander("Diagnostics (domestic decomposition)"):
             if isinstance(dom_debug, dict) and dom_debug:
                 st.write({
+                    "runtime_mode": dom_debug.get("runtime_mode"),
+                    "helper_signature": dom_debug.get("helper_signature"),
                     "start_multiple": dom_debug.get("start_multiple"),
                     "end_multiple": dom_debug.get("end_multiple"),
                     "start_coverage_weight": dom_debug.get("start_coverage_weight"),
