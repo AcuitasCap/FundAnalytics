@@ -138,14 +138,19 @@ def compute_monthly_portfolio_multiples(
     months: list[pd.Timestamp],
     isins: list[str],
     w0_df: pd.DataFrame,
+    r_price_df: pd.DataFrame,
     lens: str,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """
-    Compute portfolio multiple at start/end of each month using t0 weights.
+    Compute portfolio multiple at start/end of each month.
+
+    Start-of-month multiple uses t0 weights.
+    End-of-month multiple uses drifted end weights implied by monthly price moves,
+    before the next month's rebalance.
 
     Returns:
       M_start: len(t1), portfolio multiple at t0
-      M_end: len(t1), portfolio multiple at t1 with t0 weights
+      M_end: len(t1), portfolio multiple at t1 with drifted end weights
       debug: coverage/aggregation diagnostics
     """
     t0 = months[:-1]
@@ -160,6 +165,7 @@ def compute_monthly_portfolio_multiples(
     cov1_arr = np.zeros(n, dtype=float)
     valid0_n = np.zeros(n, dtype=int)
     valid1_n = np.zeros(n, dtype=int)
+    end_weight_sum_arr = np.full(n, np.nan, dtype=float)
 
     mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
     valid_rule = "nonmissing_yield"
@@ -174,6 +180,7 @@ def compute_monthly_portfolio_multiples(
             "coverage_end_weight": cov1_arr,
             "valid_count_start": valid0_n,
             "valid_count_end": valid1_n,
+            "drifted_end_weight_sum": end_weight_sum_arr,
         }
         return m_start, m_end, debug
 
@@ -190,6 +197,7 @@ def compute_monthly_portfolio_multiples(
             "coverage_end_weight": cov1_arr,
             "valid_count_start": valid0_n,
             "valid_count_end": valid1_n,
+            "drifted_end_weight_sum": end_weight_sum_arr,
         }
         return m_start, m_end, debug
 
@@ -204,24 +212,35 @@ def compute_monthly_portfolio_multiples(
 
     w_aligned = w0_df.reindex(index=t0, columns=isins).fillna(0.0)
     w_mat = w_aligned.to_numpy(dtype=float)
+    r_price_aligned = r_price_df.reindex(index=t1, columns=isins).fillna(0.0)
+    r_price_mat = r_price_aligned.to_numpy(dtype=float)
 
     for i in range(n):
         w = w_mat[i, :]
+        r_price = r_price_mat[i, :]
         y0 = y_vals[i, :]
         y1 = y_vals[i + 1, :]
 
         m0 = np.isfinite(y0)
         m1 = np.isfinite(y1)
 
+        gross_end = w * (1.0 + r_price)
+        gross_end_sum = float(np.sum(gross_end))
+        end_weight_sum_arr[i] = gross_end_sum
+        if np.isfinite(gross_end_sum) and gross_end_sum > 0.0:
+            w_end = gross_end / gross_end_sum
+        else:
+            w_end = np.zeros_like(w)
+
         valid0_n[i] = int(m0.sum())
         valid1_n[i] = int(m1.sum())
         cov0_arr[i] = float(np.sum(w[m0])) if np.any(m0) else 0.0
-        cov1_arr[i] = float(np.sum(w[m1])) if np.any(m1) else 0.0
+        cov1_arr[i] = float(np.sum(w_end[m1])) if np.any(m1) else 0.0
 
         y0_filled = np.where(m0, y0, 0.0)
         y1_filled = np.where(m1, y1, 0.0)
         agg_y0 = float(np.sum(w * y0_filled))
-        agg_y1 = float(np.sum(w * y1_filled))
+        agg_y1 = float(np.sum(w_end * y1_filled))
         agg_y0_arr[i] = agg_y0
         agg_y1_arr[i] = agg_y1
 
@@ -237,5 +256,6 @@ def compute_monthly_portfolio_multiples(
         "coverage_end_weight": cov1_arr,
         "valid_count_start": valid0_n,
         "valid_count_end": valid1_n,
+        "drifted_end_weight_sum": end_weight_sum_arr,
     }
     return m_start, m_end, debug
