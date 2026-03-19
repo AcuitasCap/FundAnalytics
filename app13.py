@@ -52,7 +52,10 @@ from stock_corporate_actions import (
 
 import subprocess
 print("GIT HEAD:", subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip())
-print("LS:", subprocess.check_output(["ls", "-la"]).decode())
+try:
+    print("LS:", subprocess.check_output(["powershell", "-Command", "Get-ChildItem -Force"]).decode())
+except Exception as exc:
+    print("LS: <unavailable>", exc)
 
 def check_password():
     """Return True if the user entered the correct password."""
@@ -132,6 +135,34 @@ def month_year_to_last_day(year: int, month: int) -> dt.date:
     # first day of next month minus one day
     first_next = dt.date(year + (month // 12), ((month % 12) + 1), 1)
     return first_next - dt.timedelta(days=1)
+
+def ensure_unique_monthly_rows(
+    df: pd.DataFrame,
+    key_cols: list[str],
+    value_cols: list[str],
+    context: str,
+) -> pd.DataFrame:
+    """
+    Drop exact duplicate rows for a monthly merge key, but fail on conflicting duplicates.
+
+    This prevents many-to-many joins from silently duplicating portfolio weights when
+    the source table contains multiple rows for the same logical stock-month key.
+    """
+    if df.empty:
+        return df
+
+    cols = [c for c in key_cols + value_cols if c in df.columns]
+    work = df.loc[:, cols].drop_duplicates().copy()
+    dup_mask = work.duplicated(subset=key_cols, keep=False)
+    if dup_mask.any():
+        sample = work.loc[dup_mask, cols].sort_values(key_cols).head(12)
+        raise ValueError(
+            f"{context}: conflicting duplicate rows found for {key_cols}. "
+            "This would create a many-to-many merge and distort valuations.\n"
+            f"Sample:\n{sample.to_string(index=False)}"
+        )
+
+    return df.drop_duplicates(subset=key_cols, keep="last").copy()
 
 def load_stock_roe_roce():
     engine = get_engine()
@@ -541,6 +572,12 @@ def debug_portfolio_valuation_point(
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
     vals = vals.dropna(subset=["month_end"])
     vals["month_key"] = vals["month_end"].dt.to_period("M")
+    vals = ensure_unique_monthly_rows(
+        vals,
+        key_cols=["isin", "month_key"],
+        value_cols=["yield_value", "fundamental_value"],
+        context="fundlab.stock_monthly_valuations",
+    )
     vals = vals[vals["month_key"] == target_period].copy()
 
     if vals.empty:
@@ -576,6 +613,12 @@ def debug_portfolio_valuation_point(
     mcap_df = mcap_df.dropna(subset=["month_end"])
     mcap_df["month_key"] = mcap_df["month_end"].dt.to_period("M")
     mcap_df["market_cap"] = pd.to_numeric(mcap_df["market_cap"], errors="coerce")
+    mcap_df = ensure_unique_monthly_rows(
+        mcap_df,
+        key_cols=["isin", "month_key"],
+        value_cols=["market_cap"],
+        context="fundlab.stock_price",
+    )
     mcap_df = mcap_df[mcap_df["month_key"] == target_period]
     mcap_df = mcap_df[["isin", "month_key", "market_cap"]]
 
@@ -1347,8 +1390,8 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
       - market_cap
       - price
 
-    Primary key / unique constraint: (isin, price_date, market_cap, price)
-    ON CONFLICT DO NOTHING to avoid duplicate uploads.
+    Logical key should be (isin, price_date). If the table currently allows multiple
+    rows for the same ISIN/date, valuation rebuilds can be distorted downstream.
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -1356,9 +1399,7 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
         if n == 0:
             return
 
-        # IMPORTANT: ensure you have this unique constraint in Supabase:
-        # ALTER TABLE fundlab.stock_price
-        # ADD CONSTRAINT stock_price_unq UNIQUE (isin, price_date, market_cap, price);
+        # IMPORTANT: the database should enforce a single row per (isin, price_date).
         insert_sql = text("""
             INSERT INTO fundlab.stock_price (
                 isin,
@@ -3092,6 +3133,12 @@ def rebuild_stock_monthly_valuations(
     prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
 
     prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
+    prices = ensure_unique_monthly_rows(
+        prices,
+        key_cols=["isin", "month_end"],
+        value_cols=["market_cap"],
+        context="fundlab.stock_price",
+    )
     if prices.empty:
         st.info("After cleaning, no usable price/market_cap rows remain.")
         return
@@ -3525,6 +3572,12 @@ def rebuild_fund_monthly_valuations(
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
     vals = vals.dropna(subset=["month_end"])
     vals["month_key"] = vals["month_end"].dt.to_period("M")
+    vals = ensure_unique_monthly_rows(
+        vals,
+        key_cols=["isin", "month_key"],
+        value_cols=["ps", "pe", "pb"],
+        context="fundlab.stock_monthly_valuations",
+    )
 
     df = holdings.merge(
         vals[["isin", "month_key", "ps", "pe", "pb"]],
@@ -4102,6 +4155,12 @@ def compute_portfolio_valuations_cube(
     vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
     vals = vals.dropna(subset=["month_end"])
     vals["month_key"] = vals["month_end"].dt.to_period("M")
+    vals = ensure_unique_monthly_rows(
+        vals,
+        key_cols=["isin", "month_key"],
+        value_cols=["ps_yield", "pe_yield", "pb_yield"],
+        context="fundlab.stock_monthly_valuations",
+    )
     vals = vals[vals["month_key"].isin(month_periods)].copy()
     if vals.empty:
         return pd.DataFrame(columns=["fund_id", "month_end", "segment", "metric", "value"])
@@ -8934,17 +8993,18 @@ def validate_stock_prices_mc(df_raw: pd.DataFrame):
             + "\n\n→ Please upload/update Stock Master first."
         )
 
-    # In-file duplicate check
-    dup_keys = df.groupby(["isin", "price_date", "market_cap", "price"]).size()
+    # In-file duplicate check: one logical stock-price row per ISIN/date.
+    dup_keys = df.groupby(["isin", "price_date"]).size()
     dups = dup_keys[dup_keys > 1]
     if not dups.empty:
         raise ValueError(
-            f"Duplicate (isin, date, market_cap, price) rows found in file: {len(dups)} duplicates."
+            f"Duplicate (isin, date) rows found in file: {len(dups)} duplicates. "
+            "Price and market cap must be unique per ISIN/date."
         )
 
     summary = {
         "rows": int(len(df)),
-        "unique_isin_date_mcap_price": int(len(dup_keys)),
+        "unique_isin_date": int(len(dup_keys)),
     }
     return df, summary
 
@@ -10311,6 +10371,7 @@ def _compute_attribution(
             months=months,
             isins=domestic_isins,
             w0_df=w0_dom_df,
+            r_price_df=r_price_instr.loc[:, domestic_isins],
             lens=lens,
         )
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -10391,6 +10452,7 @@ def _compute_attribution(
             "coverage_end_weight": mult_debug.get("coverage_end_weight"),
             "valid_count_start": mult_debug.get("valid_count_start"),
             "valid_count_end": mult_debug.get("valid_count_end"),
+            "drifted_end_weight_sum": mult_debug.get("drifted_end_weight_sum"),
         })
 
         # Stock-level diagnostics: average weight + exact chained contributions (no scaling)
