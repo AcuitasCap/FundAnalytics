@@ -17,6 +17,7 @@ import os
 import re
 import math
 import io
+import inspect
 from io import BytesIO
 import datetime as dt   
 import numpy as np
@@ -10366,14 +10367,28 @@ def _compute_attribution(
         r_total_dom_m = r_price_dom_m + r_div_dom_m
 
         # Monthly valuation and residual fundamental decomposition from stock-level multiples.
-        m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
-            multiples_df=yld,
-            months=months,
-            isins=domestic_isins,
-            w0_df=w0_dom_df,
-            r_price_df=r_price_instr.loc[:, domestic_isins],
-            lens=lens,
-        )
+        helper_sig = inspect.signature(compute_monthly_portfolio_multiples)
+        if "r_price_df" in helper_sig.parameters:
+            m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
+                multiples_df=yld,
+                months=months,
+                isins=domestic_isins,
+                w0_df=w0_dom_df,
+                r_price_df=r_price_instr.loc[:, domestic_isins],
+                lens=lens,
+            )
+        else:
+            print(
+                "WARN: compute_monthly_portfolio_multiples imported without r_price_df support; "
+                "falling back to legacy valuation decomposition."
+            )
+            m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
+                multiples_df=yld,
+                months=months,
+                isins=domestic_isins,
+                w0_df=w0_dom_df,
+                lens=lens,
+            )
         with np.errstate(divide="ignore", invalid="ignore"):
             r_val_raw = (m_end_arr / m_start_arr) - 1.0
         r_val_m = np.where(np.isfinite(r_val_raw), r_val_raw, 0.0)
