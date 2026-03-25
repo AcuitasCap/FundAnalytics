@@ -128,6 +128,199 @@ def refresh_adjusted_prices() -> tuple[dict, pd.DataFrame]:
     """
     return _refresh_adjusted_prices_full(get_engine())
 
+
+ROLLING_WINDOWS_MONTHS = [12, 36]
+
+
+def _compute_rolling_cagr_from_monthly_nav(nav_series: pd.Series, months: int) -> pd.Series:
+    nav_series = pd.to_numeric(nav_series, errors="coerce").dropna().sort_index()
+    if nav_series.empty:
+        return pd.Series(dtype=float)
+    return (nav_series / nav_series.shift(months)) ** (12.0 / months) - 1.0
+
+
+def _prepare_monthly_nav_series(df: pd.DataFrame, id_col: str, date_col: str, value_col: str) -> dict[int, pd.Series]:
+    if df.empty:
+        return {}
+
+    work = df[[id_col, date_col, value_col]].copy()
+    work[date_col] = pd.to_datetime(work[date_col]).dt.to_period("M").dt.to_timestamp("M")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[id_col, date_col, value_col])
+    work = work.sort_values([id_col, date_col])
+    work = work.drop_duplicates(subset=[id_col, date_col], keep="last")
+
+    series_map: dict[int, pd.Series] = {}
+    for entity_id, grp in work.groupby(id_col):
+        series_map[int(entity_id)] = grp.set_index(date_col)[value_col].sort_index()
+    return series_map
+
+
+def _latest_rolling_asof_map(conn, table_name: str, id_col: str) -> dict[tuple[int, int], pd.Timestamp]:
+    query = text(f"""
+        SELECT {id_col} AS entity_id, window_months, MAX(asof_date)::date AS latest_asof
+        FROM {table_name}
+        GROUP BY {id_col}, window_months
+    """)
+    latest = pd.read_sql(query, conn, parse_dates=["latest_asof"])
+    if latest.empty:
+        return {}
+
+    return {
+        (int(row["entity_id"]), int(row["window_months"])): pd.Timestamp(row["latest_asof"])
+        for _, row in latest.iterrows()
+        if pd.notna(row["latest_asof"])
+    }
+
+
+def _insert_incremental_rolling_rows(
+    conn,
+    records_df: pd.DataFrame,
+    table_name: str,
+    id_col: str,
+    temp_table_name: str,
+) -> int:
+    if records_df.empty:
+        return 0
+
+    conn.execute(text(f"DROP TABLE IF EXISTS {temp_table_name};"))
+    conn.execute(text(f"CREATE TEMP TABLE {temp_table_name} AS SELECT * FROM {table_name} WITH NO DATA;"))
+    records_df.to_sql(temp_table_name, conn, if_exists="append", index=False)
+    result = conn.execute(text(f"""
+        INSERT INTO {table_name} ({id_col}, window_months, asof_date, rolling_cagr)
+        SELECT {id_col}, window_months, asof_date, rolling_cagr
+        FROM {temp_table_name}
+        ON CONFLICT ({id_col}, window_months, asof_date) DO NOTHING;
+    """))
+    return int(result.rowcount or 0)
+
+
+def refresh_precomputed_rolling_returns() -> dict:
+    """
+    Incrementally compute and store 1Y / 3Y rolling returns for funds and benchmarks.
+
+    Existing rows in Supabase are left untouched. Only rows with asof_date greater than
+    the latest stored date for each entity/window are inserted.
+    """
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        fund_navs = pd.read_sql(text("""
+            SELECT fund_id, nav_date::date AS nav_date, nav_value
+            FROM fundlab.fund_nav
+            ORDER BY fund_id, nav_date
+        """), conn, parse_dates=["nav_date"])
+
+        bench_navs = pd.read_sql(text("""
+            SELECT bench_id, nav_date::date AS nav_date, nav_value
+            FROM fundlab.bench_nav
+            ORDER BY bench_id, nav_date
+        """), conn, parse_dates=["nav_date"])
+
+        fund_latest = _latest_rolling_asof_map(conn, "fundlab.fund_rolling_return", "fund_id")
+        bench_latest = _latest_rolling_asof_map(conn, "fundlab.bench_rolling_return", "bench_id")
+
+        fund_series_map = _prepare_monthly_nav_series(fund_navs, "fund_id", "nav_date", "nav_value")
+        bench_series_map = _prepare_monthly_nav_series(bench_navs, "bench_id", "nav_date", "nav_value")
+
+        fund_records = []
+        bench_records = []
+        summary = {
+            "windows_months": list(ROLLING_WINDOWS_MONTHS),
+            "fund_entities_seen": len(fund_series_map),
+            "benchmark_entities_seen": len(bench_series_map),
+            "fund_rows_candidate": 0,
+            "benchmark_rows_candidate": 0,
+            "fund_rows_inserted": 0,
+            "benchmark_rows_inserted": 0,
+            "fund_entities_updated": 0,
+            "benchmark_entities_updated": 0,
+            "fund_entities_already_current": 0,
+            "benchmark_entities_already_current": 0,
+        }
+
+        for fund_id, nav_series in fund_series_map.items():
+            inserted_for_entity = False
+            for months in ROLLING_WINDOWS_MONTHS:
+                rolling = _compute_rolling_cagr_from_monthly_nav(nav_series, months).dropna()
+                if rolling.empty:
+                    continue
+
+                latest_asof = fund_latest.get((fund_id, months))
+                if latest_asof is not None:
+                    rolling = rolling[rolling.index > latest_asof]
+
+                if rolling.empty:
+                    summary["fund_entities_already_current"] += 1
+                    continue
+
+                inserted_for_entity = True
+                for asof_date, rolling_cagr in rolling.items():
+                    fund_records.append(
+                        {
+                            "fund_id": fund_id,
+                            "window_months": months,
+                            "asof_date": pd.Timestamp(asof_date).date(),
+                            "rolling_cagr": float(rolling_cagr),
+                        }
+                    )
+
+            if inserted_for_entity:
+                summary["fund_entities_updated"] += 1
+
+        for bench_id, nav_series in bench_series_map.items():
+            inserted_for_entity = False
+            for months in ROLLING_WINDOWS_MONTHS:
+                rolling = _compute_rolling_cagr_from_monthly_nav(nav_series, months).dropna()
+                if rolling.empty:
+                    continue
+
+                latest_asof = bench_latest.get((bench_id, months))
+                if latest_asof is not None:
+                    rolling = rolling[rolling.index > latest_asof]
+
+                if rolling.empty:
+                    summary["benchmark_entities_already_current"] += 1
+                    continue
+
+                inserted_for_entity = True
+                for asof_date, rolling_cagr in rolling.items():
+                    bench_records.append(
+                        {
+                            "bench_id": bench_id,
+                            "window_months": months,
+                            "asof_date": pd.Timestamp(asof_date).date(),
+                            "rolling_cagr": float(rolling_cagr),
+                        }
+                    )
+
+            if inserted_for_entity:
+                summary["benchmark_entities_updated"] += 1
+
+        fund_df = pd.DataFrame.from_records(fund_records)
+        bench_df = pd.DataFrame.from_records(bench_records)
+        summary["fund_rows_candidate"] = int(len(fund_df))
+        summary["benchmark_rows_candidate"] = int(len(bench_df))
+
+        summary["fund_rows_inserted"] = _insert_incremental_rolling_rows(
+            conn,
+            fund_df,
+            "fundlab.fund_rolling_return",
+            "fund_id",
+            "tmp_fund_roll_incremental",
+        )
+        summary["benchmark_rows_inserted"] = _insert_incremental_rolling_rows(
+            conn,
+            bench_df,
+            "fundlab.bench_rolling_return",
+            "bench_id",
+            "tmp_bench_roll_incremental",
+        )
+
+    load_fund_rolling.clear()
+    load_bench_rolling.clear()
+    return summary
+
 ##### HELPER FUNCTIONS RESIDE IN THIS BLOCK, <BEFORE>! THE PAGE FUNCTIONS #####
 
 def month_year_to_last_day(year: int, month: int) -> dt.date:
@@ -9309,6 +9502,34 @@ def housekeeping_page():
         st.caption(f"Rows: {st.session_state.get('fund_valuations_rows', 0):,}")
 
     st.markdown("---")
+    st.subheader("Precompute rolling returns")
+
+    if st.button("6. Pre-compute and store 3Y and 1Y rolling returns"):
+        st.session_state["rolling_refresh_summary"] = refresh_precomputed_rolling_returns()
+
+    if "rolling_refresh_summary" in st.session_state:
+        s = st.session_state["rolling_refresh_summary"]
+        st.write(
+            "Summary:",
+            {
+                "windows_months": s.get("windows_months"),
+                "fund_entities_seen": s.get("fund_entities_seen"),
+                "benchmark_entities_seen": s.get("benchmark_entities_seen"),
+                "fund_rows_candidate": s.get("fund_rows_candidate"),
+                "benchmark_rows_candidate": s.get("benchmark_rows_candidate"),
+                "fund_rows_inserted": s.get("fund_rows_inserted"),
+                "benchmark_rows_inserted": s.get("benchmark_rows_inserted"),
+                "fund_entities_updated": s.get("fund_entities_updated"),
+                "benchmark_entities_updated": s.get("benchmark_entities_updated"),
+            },
+        )
+        total_inserted = int(s.get("fund_rows_inserted", 0)) + int(s.get("benchmark_rows_inserted", 0))
+        if total_inserted > 0:
+            st.success(f"Inserted {total_inserted:,} new rolling-return rows without modifying existing data.")
+        else:
+            st.info("No new month-end NAV windows were available to append to the rolling-return tables.")
+
+    st.markdown("---")
     st.subheader("Refresh stock dividend yields")
 
     div_yield_scope = st.selectbox(
@@ -9317,7 +9538,7 @@ def housekeeping_page():
         key="dividend_yield_scope",
     )
 
-    if st.button("6. Refresh stock dividend yields"):
+    if st.button("7. Refresh stock dividend yields"):
         st.session_state.pop("div_yield_excel_bytes", None)
         st.session_state.pop("div_yield_excel_name", None)
         st.session_state.pop("div_yield_exc_rows", None)
@@ -9370,7 +9591,7 @@ def housekeeping_page():
     st.markdown("---")
     st.subheader("Refresh adjusted prices")
 
-    if st.button("7. Refresh adjusted prices (adj_multiplier + adj_price)"):
+    if st.button("8. Refresh adjusted prices (adj_multiplier + adj_price)"):
         st.session_state.pop("adj_price_exc_excel_bytes", None)
         st.session_state.pop("adj_price_exc_excel_name", None)
         st.session_state.pop("adj_price_exc_rows", None)
@@ -9439,7 +9660,7 @@ def housekeeping_page():
     if uploaded_val_file is not None:
         st.write(f"Selected file: **{uploaded_val_file.name}**")
 
-    if st.button("8. Upload this workbook to Supabase"):
+    if st.button("9. Upload this workbook to Supabase"):
         upload_stock_monthly_valuations_from_excel(uploaded_val_file)
 
     # ---------------------------------------------------------------
@@ -10781,12 +11002,8 @@ def fund_attribution_page():
         with st.expander("Diagnostics (domestic decomposition)"):
             if isinstance(dom_debug, dict) and dom_debug:
                 st.write({
-                    "runtime_mode": dom_debug.get("runtime_mode"),
-                    "helper_signature": dom_debug.get("helper_signature"),
                     "start_multiple": dom_debug.get("start_multiple"),
                     "end_multiple": dom_debug.get("end_multiple"),
-                    "start_coverage_weight": dom_debug.get("start_coverage_weight"),
-                    "end_coverage_weight": dom_debug.get("end_coverage_weight"),
                 })
             if isinstance(dom_contrib, pd.DataFrame) and not dom_contrib.empty:
                 st.dataframe(dom_contrib, use_container_width=True)
@@ -10797,15 +11014,6 @@ def fund_attribution_page():
                 st.dataframe(dom_tri, use_container_width=True)
             if isinstance(dom_tri_summary, pd.DataFrame) and not dom_tri_summary.empty:
                 st.dataframe(dom_tri_summary, use_container_width=True)
-
-    with st.expander("Diagnostics (adj_price return basis)"):
-        if isinstance(adj_invalid, pd.DataFrame) and not adj_invalid.empty:
-            st.markdown("**Invalid price-return rows (adj_price guardrail)**")
-            st.dataframe(adj_invalid.head(300), use_container_width=True)
-        audit = diag.get("adj_price_return_audit_df", pd.DataFrame())
-        if isinstance(audit, pd.DataFrame) and not audit.empty:
-            st.markdown("**Price return audit sample (adj_price_t / adj_price_t-1 - 1)**")
-            st.dataframe(audit.head(300), use_container_width=True)
 
 
 
