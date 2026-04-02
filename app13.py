@@ -9736,7 +9736,7 @@ def _to_month_end(d: dt.date) -> dt.date:
     return month_year_to_last_day(d.year, d.month)
 
 def _month_ends_between(start_me: dt.date, end_me: dt.date) -> list:
-    idx = pd.date_range(start=pd.Timestamp(start_me), end=pd.Timestamp(end_me), freq="M")
+    idx = pd.date_range(start=pd.Timestamp(start_me), end=pd.Timestamp(end_me), freq="ME")
     return [x.date() for x in idx]
 
 def _monthly_cash_return() -> float:
