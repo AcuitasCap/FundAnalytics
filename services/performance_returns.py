@@ -139,7 +139,6 @@ def clean_nav_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-@st.cache_data
 def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "Fund name": "fund",
@@ -180,7 +179,6 @@ def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-@st.cache_data
 def _clean_bench(df_raw: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "benchmark_name": "benchmark_name",
