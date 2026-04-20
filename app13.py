@@ -46,6 +46,7 @@ from attribution_returns import (
     compute_dividend_yield_returns,
     compute_monthly_portfolio_multiples,
 )
+from pages.performance_page import performance_page as performance_page_v2
 from stock_corporate_actions import (
     upload_stock_corporate_actions,
     validate_stock_corporate_actions,
@@ -6831,7 +6832,7 @@ def render_current_manager_summary(df: pd.DataFrame):
 
 
 # 🔄 Load from PostgreSQL instead of file upload
-def performance_page():
+def _legacy_performance_page():
     home_button()
     raw_funds_df = load_funds_from_db()
     if raw_funds_df.empty:
@@ -8761,7 +8762,7 @@ def portfolio_view_subpage():
         if first_col != "Instrument":
             holdings_num = holdings_num.rename(columns={first_col: "Instrument"})
 
-        holdings_num.insert(0, "Sr. No", range(1, len(holdings_num) + 1))
+        holdings_num.insert(0, "Sr. No", pd.Series(range(1, len(holdings_num) + 1), dtype="object"))
         holdings_num.loc[holdings_num["Instrument"].astype(str) == "Total", "Sr. No"] = ""
 
         holdings_display = holdings_num.copy()
@@ -11088,7 +11089,7 @@ def main():
     if page == "Home":
         home_page()
     elif page == "Performance":
-        performance_page()
+        performance_page_v2(home_button)
     elif page == "Portfolio quality":
         portfolio_quality_page()
     elif page == "Portfolio valuations":
