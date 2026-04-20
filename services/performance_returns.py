@@ -164,8 +164,26 @@ def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     if not needed.issubset(df.columns):
         raise ValueError("Funds CSV must contain: Fund name, month-end, NAV, market-cap, style")
 
-    df["date"] = smart_to_month_end(df["date"])
-    df["nav"] = clean_nav_series(df["nav"])
+    raw_dates = df["date"]
+    parsed_dates = pd.to_datetime(raw_dates, errors="coerce")
+    if parsed_dates.notna().any():
+        df["date"] = parsed_dates.dt.to_period("M").dt.to_timestamp("M")
+    else:
+        df["date"] = smart_to_month_end(raw_dates)
+
+    raw_nav = df["nav"]
+    numeric_nav = pd.to_numeric(raw_nav, errors="coerce")
+    if numeric_nav.notna().any():
+        df["nav"] = numeric_nav
+    else:
+        df["nav"] = clean_nav_series(raw_nav)
+
+    df["fund"] = (
+        df["fund"]
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+    )
     df = df.dropna(subset=["fund", "date", "nav"]).copy()
     df["market_cap"] = df["market_cap"].astype(str)
     df["style"] = df["style"].astype(str)
@@ -204,8 +222,26 @@ def _clean_bench(df_raw: pd.DataFrame) -> pd.DataFrame:
     if not needed.issubset(df.columns):
         raise ValueError("Benchmarks CSV must contain: benchmark_name, month-end, NAV, category_type, category_value")
 
-    df["date"] = smart_to_month_end(df["date"])
-    df["nav"] = clean_nav_series(df["nav"])
+    raw_dates = df["date"]
+    parsed_dates = pd.to_datetime(raw_dates, errors="coerce")
+    if parsed_dates.notna().any():
+        df["date"] = parsed_dates.dt.to_period("M").dt.to_timestamp("M")
+    else:
+        df["date"] = smart_to_month_end(raw_dates)
+
+    raw_nav = df["nav"]
+    numeric_nav = pd.to_numeric(raw_nav, errors="coerce")
+    if numeric_nav.notna().any():
+        df["nav"] = numeric_nav
+    else:
+        df["nav"] = clean_nav_series(raw_nav)
+
+    df["benchmark_name"] = (
+        df["benchmark_name"]
+        .astype(str)
+        .str.strip()
+        .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+    )
     df = df.dropna(subset=["benchmark_name", "date", "nav"]).copy()
     df["category_type"] = df["category_type"].astype(str)
     df["category_value"] = df["category_value"].astype(str)
