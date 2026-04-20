@@ -121,10 +121,14 @@ def parse_month_end_cell(x):
 
 
 def smart_to_month_end(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return to_eom(series)
     return series.astype(str).map(parse_month_end_cell)
 
 
 def clean_nav_series(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors="coerce")
     s = (
         s.astype(str)
         .str.replace("\u00A0", "", regex=False)
