@@ -29,6 +29,7 @@ from services.performance_returns import (
 
 def performance_page(home_button):
     home_button()
+    st.caption("Performance diagnostics v1 - 20 Apr 2026")
     raw_funds_df = load_funds_from_db()
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")
@@ -62,6 +63,7 @@ def performance_page(home_button):
     st.caption(f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}")
 
     all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
+    st.caption(f"Performance diagnostics: market-cap options found = {len(all_caps)}")
     caps = st.multiselect(
         "Market-cap (select one or more)",
         options=all_caps,
