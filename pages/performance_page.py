@@ -29,7 +29,7 @@ from services.performance_returns import (
 
 def performance_page(home_button):
     home_button()
-    st.caption("Performance diagnostics v2 - 20 Apr 2026")
+    st.caption("Performance diagnostics v3 - 20 Apr 2026")
     raw_funds_df = load_funds_from_db()
     raw_date_dtype = str(raw_funds_df["month-end"].dtype) if "month-end" in raw_funds_df.columns else "missing"
     raw_nav_dtype = str(raw_funds_df["NAV"].dtype) if "NAV" in raw_funds_df.columns else "missing"

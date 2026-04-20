@@ -3,7 +3,6 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 
 
-@st.cache_resource
 def get_performance_engine():
     return create_engine(
         "postgresql+psycopg2://",
@@ -19,7 +18,6 @@ def get_performance_engine():
     )
 
 
-@st.cache_data(ttl=600, show_spinner="Loading precomputed rolling returns (funds)...")
 def load_fund_rolling(window_months: int, fund_names, start=None, end=None):
     if not fund_names:
         return pd.DataFrame([])
@@ -52,7 +50,6 @@ def load_fund_rolling(window_months: int, fund_names, start=None, end=None):
         return pd.read_sql(text(query), conn, params=params, parse_dates=["asof_date"])
 
 
-@st.cache_data(ttl=600, show_spinner="Loading precomputed rolling returns (benchmark)...")
 def load_bench_rolling(window_months: int, bench_name: str, start=None, end=None):
     if bench_name is None:
         return pd.DataFrame([])
@@ -84,7 +81,6 @@ def load_bench_rolling(window_months: int, bench_name: str, start=None, end=None
         return pd.read_sql(text(query), conn, params=params, parse_dates=["asof_date"])
 
 
-@st.cache_data(ttl=60, show_spinner="Loading fund NAVs from database...")
 def load_funds_from_db():
     query = """
         SELECT
@@ -106,7 +102,6 @@ def load_funds_from_db():
         return pd.read_sql(query, conn, parse_dates=["month-end"])
 
 
-@st.cache_data(ttl=60, show_spinner="Loading benchmark NAVs from database...")
 def load_bench_from_db():
     query = """
         SELECT
