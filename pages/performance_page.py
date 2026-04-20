@@ -29,7 +29,7 @@ from services.performance_returns import (
 
 def performance_page(home_button):
     home_button()
-    st.caption("Performance diagnostics v1 - 20 Apr 2026")
+    st.caption("Performance diagnostics v1 - 20 Apr 2026!")
     raw_funds_df = load_funds_from_db()
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")
