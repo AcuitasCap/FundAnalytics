@@ -61,21 +61,16 @@ def performance_page(home_button):
     num_funds = funds_df[fund_col].nunique() if fund_col is not None else "N/A"
     st.caption(f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}")
 
-    def checkbox_group(title: str, options: list, key_prefix: str) -> list:
-        st.markdown(f"**{title}**")
-        cols = st.columns(min(4, max(1, len(options))))
-        chosen = []
-        for i, opt in enumerate(options):
-            with cols[i % len(cols)]:
-                if st.checkbox(opt, value=False, key=f"{key_prefix}_{opt}"):
-                    chosen.append(opt)
-        return chosen
-
     all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
-    caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
+    caps = st.multiselect(
+        "Market-cap (select one or more)",
+        options=all_caps,
+        default=[],
+        key="perf_market_caps",
+    )
     st.divider()
     if not caps:
-        st.warning("Tick at least one Market-cap to continue.")
+        st.warning("Select at least one Market-cap to continue.")
         st.stop()
 
     filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
@@ -90,7 +85,12 @@ def performance_page(home_button):
         bench_label = None
         bench_ser = None
     else:
-        bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
+        bench_selected = st.multiselect(
+            "Benchmarks (select one or more)",
+            options=bench_names,
+            default=[],
+            key="perf_benchmarks",
+        )
         if bench_selected:
             bench_label = bench_selected[0]
             bmask = bench_df["benchmark_name"] == bench_label
