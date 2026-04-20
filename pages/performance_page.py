@@ -31,11 +31,23 @@ def performance_page(home_button):
     home_button()
     st.caption("Performance diagnostics v1 - 20 Apr 2026!")
     raw_funds_df = load_funds_from_db()
+    raw_date_dtype = str(raw_funds_df["month-end"].dtype) if "month-end" in raw_funds_df.columns else "missing"
+    raw_nav_dtype = str(raw_funds_df["NAV"].dtype) if "NAV" in raw_funds_df.columns else "missing"
+    st.caption(
+        f"Performance diagnostics: raw NAV rows = {len(raw_funds_df)} | "
+        f"month-end dtype = {raw_date_dtype} | NAV dtype = {raw_nav_dtype}"
+    )
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")
         st.stop()
 
     funds_df = _clean_funds(raw_funds_df.copy())
+    clean_latest = funds_df["date"].max() if ("date" in funds_df.columns and not funds_df.empty) else "NaT"
+    st.caption(
+        f"Performance diagnostics: cleaned rows = {len(funds_df)} | "
+        f"clean funds = {funds_df['fund'].nunique() if 'fund' in funds_df.columns and not funds_df.empty else 0} | "
+        f"clean latest = {clean_latest}"
+    )
 
     bench_df = None
     try:
