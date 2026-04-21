@@ -19,7 +19,6 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     coerce_num,
-    debug_clean_funds,
     make_multi_fund_rolling_df,
     make_rolling_df,
     rolling_outperf_stats,
@@ -30,33 +29,12 @@ from services.performance_returns import (
 
 def performance_page(home_button):
     home_button()
-    st.caption("Performance diagnostics v3 - 20 Apr 2026")
     raw_funds_df = load_funds_from_db()
-    raw_date_dtype = str(raw_funds_df["month-end"].dtype) if "month-end" in raw_funds_df.columns else "missing"
-    raw_nav_dtype = str(raw_funds_df["NAV"].dtype) if "NAV" in raw_funds_df.columns else "missing"
-    st.caption(
-        f"Performance diagnostics: raw NAV rows = {len(raw_funds_df)} | "
-        f"month-end dtype = {raw_date_dtype} | NAV dtype = {raw_nav_dtype}"
-    )
-    dbg = debug_clean_funds(raw_funds_df.copy())
-    st.caption(
-        "Performance diagnosticsV1: "
-        f"date_non_null_after_to_datetime = {dbg.get('date_non_null_after_to_datetime')} | "
-        f"nav_non_null_after_to_numeric = {dbg.get('nav_non_null_after_to_numeric')} | "
-        f"fund_non_null_after_clean = {dbg.get('fund_non_null_after_clean')} | "
-        f"final_rows = {dbg.get('final_rows', 'ERR')}"
-    )
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")
         st.stop()
 
     funds_df = _clean_funds(raw_funds_df.copy())
-    clean_latest = funds_df["date"].max() if ("date" in funds_df.columns and not funds_df.empty) else "NaT"
-    st.caption(
-        f"Performance diagnostics: cleaned rows = {len(funds_df)} | "
-        f"clean funds = {funds_df['fund'].nunique() if 'fund' in funds_df.columns and not funds_df.empty else 0} | "
-        f"clean latest = {clean_latest}"
-    )
 
     bench_df = None
     try:
@@ -83,17 +61,21 @@ def performance_page(home_button):
     num_funds = funds_df[fund_col].nunique() if fund_col is not None else "N/A"
     st.caption(f"Data source: Supabase · Funds: {num_funds} · Latest NAV date: {latest_str}")
 
+    def checkbox_group(title: str, options: list, key_prefix: str) -> list:
+        st.markdown(f"**{title}**")
+        cols = st.columns(min(4, max(1, len(options))))
+        chosen = []
+        for i, opt in enumerate(options):
+            with cols[i % len(cols)]:
+                if st.checkbox(opt, value=False, key=f"{key_prefix}_{opt}"):
+                    chosen.append(opt)
+        return chosen
+
     all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
-    st.caption(f"Performance diagnostics: market-cap options found = {len(all_caps)}")
-    caps = st.multiselect(
-        "Market-cap (select one or more)",
-        options=all_caps,
-        default=[],
-        key="perf_market_caps",
-    )
+    caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
     st.divider()
     if not caps:
-        st.warning("Select at least one Market-cap to continue.")
+        st.warning("Tick at least one Market-cap to continue.")
         st.stop()
 
     filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
@@ -108,12 +90,7 @@ def performance_page(home_button):
         bench_label = None
         bench_ser = None
     else:
-        bench_selected = st.multiselect(
-            "Benchmarks (select one or more)",
-            options=bench_names,
-            default=[],
-            key="perf_benchmarks",
-        )
+        bench_selected = checkbox_group("Benchmarks (tick multiple as needed)", bench_names, "bench")
         if bench_selected:
             bench_label = bench_selected[0]
             bmask = bench_df["benchmark_name"] == bench_label
