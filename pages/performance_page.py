@@ -40,7 +40,7 @@ def performance_page(home_button):
     )
     dbg = debug_clean_funds(raw_funds_df.copy())
     st.caption(
-        "Performance diagnostics: "
+        "Performance diagnosticsV1: "
         f"date_non_null_after_to_datetime = {dbg.get('date_non_null_after_to_datetime')} | "
         f"nav_non_null_after_to_numeric = {dbg.get('nav_non_null_after_to_numeric')} | "
         f"fund_non_null_after_clean = {dbg.get('fund_non_null_after_clean')} | "
