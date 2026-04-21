@@ -252,12 +252,12 @@ def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
         .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
     )
     df = df.dropna(subset=["fund", "date", "nav"]).copy()
-    df["market_cap"] = df["market_cap"].astype(str)
-    df["style"] = df["style"].astype(str)
+    df["market_cap"] = df["market_cap"].fillna("").astype(str).str.strip()
+    df["style"] = df["style"].fillna("").astype(str).str.strip()
 
     return (
         df.sort_values(["fund", "date"])
-        .groupby(["fund", "date", "market_cap", "style"], as_index=False)
+        .groupby(["fund", "date"], as_index=False)
         .last()
         .sort_values(["fund", "date"])
         .reset_index(drop=True)
@@ -310,12 +310,12 @@ def _clean_bench(df_raw: pd.DataFrame) -> pd.DataFrame:
         .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
     )
     df = df.dropna(subset=["benchmark_name", "date", "nav"]).copy()
-    df["category_type"] = df["category_type"].astype(str)
-    df["category_value"] = df["category_value"].astype(str)
+    df["category_type"] = df["category_type"].fillna("").astype(str).str.strip()
+    df["category_value"] = df["category_value"].fillna("").astype(str).str.strip()
 
     return (
         df.sort_values(["benchmark_name", "date"])
-        .groupby(["benchmark_name", "date", "category_type", "category_value"], as_index=False)
+        .groupby(["benchmark_name", "date"], as_index=False)
         .last()
         .sort_values(["benchmark_name", "date"])
         .reset_index(drop=True)
