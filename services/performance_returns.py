@@ -34,6 +34,7 @@ def _cy_bounds(y_label: int):
     return start, end
 
 
+@st.cache_data(show_spinner=False)
 def yearly_returns_with_custom_domain(
     nav_series: pd.Series,
     start_domain: pd.Timestamp,
@@ -330,6 +331,7 @@ def window_label_series(end_idx: pd.Index, months: int) -> pd.Series:
     return pd.Series([f"{s:%b %Y}-{e:%Y}" for s, e in zip(start, end)], index=end_idx)
 
 
+@st.cache_data(show_spinner=False)
 def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, start_domain, end_domain):
     fund_roll = load_fund_rolling(window_months=months, fund_names=selected_funds, start=None, end=None)
     if fund_roll.empty:
@@ -375,6 +377,7 @@ def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, sta
     return wide
 
 
+@st.cache_data(show_spinner=False)
 def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain):
     if not selected_funds:
         return pd.DataFrame()
@@ -407,10 +410,12 @@ def make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_
     return wide
 
 
+@st.cache_data(show_spinner=False)
 def make_multi_fund_rolling_df(funds_df, selected_funds, months, start_domain, end_domain):
     return make_multi_fund_rolling(funds_df, selected_funds, months, start_domain, end_domain)
 
 
+@st.cache_data(show_spinner=False)
 def rolling_outperf_stats(df: pd.DataFrame, focus_name: str, bench_label: str | None = None):
     if df is None or df.empty or focus_name not in df.columns:
         return None
