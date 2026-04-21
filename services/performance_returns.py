@@ -206,6 +206,7 @@ def debug_clean_funds(df_raw: pd.DataFrame) -> dict:
     return info
 
 
+@st.cache_data
 def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "Fund name": "fund",
@@ -264,6 +265,7 @@ def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+@st.cache_data
 def _clean_bench(df_raw: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "benchmark_name": "benchmark_name",
