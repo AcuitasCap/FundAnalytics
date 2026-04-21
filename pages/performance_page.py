@@ -19,6 +19,7 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     coerce_num,
+    debug_clean_funds,
     make_multi_fund_rolling_df,
     make_rolling_df,
     rolling_outperf_stats,
@@ -36,6 +37,14 @@ def performance_page(home_button):
     st.caption(
         f"Performance diagnostics: raw NAV rows = {len(raw_funds_df)} | "
         f"month-end dtype = {raw_date_dtype} | NAV dtype = {raw_nav_dtype}"
+    )
+    dbg = debug_clean_funds(raw_funds_df.copy())
+    st.caption(
+        "Performance diagnostics: "
+        f"date_non_null_after_to_datetime = {dbg.get('date_non_null_after_to_datetime')} | "
+        f"nav_non_null_after_to_numeric = {dbg.get('nav_non_null_after_to_numeric')} | "
+        f"fund_non_null_after_clean = {dbg.get('fund_non_null_after_clean')} | "
+        f"final_rows = {dbg.get('final_rows', 'ERR')}"
     )
     if raw_funds_df.empty:
         st.error("No fund NAV data found in database.")

@@ -139,6 +139,73 @@ def clean_nav_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+def debug_clean_funds(df_raw: pd.DataFrame) -> dict:
+    info: dict[str, object] = {
+        "raw_rows": int(len(df_raw)),
+        "raw_columns": list(df_raw.columns),
+        "raw_dtypes": {c: str(t) for c, t in df_raw.dtypes.items()},
+    }
+
+    rename = {
+        "Fund name": "fund",
+        "fund name": "fund",
+        "fund": "fund",
+        "month-end": "date",
+        "month_end": "date",
+        "date": "date",
+        "NAV": "nav",
+        "nav": "nav",
+        "market-cap": "market_cap",
+        "market cap": "market_cap",
+        "market_cap": "market_cap",
+        "style": "style",
+    }
+    fixed = {}
+    for k, v in rename.items():
+        for c in df_raw.columns:
+            if c.lower() == k.lower():
+                fixed[c] = v
+
+    df = df_raw.rename(columns=fixed)
+    info["renamed_columns"] = list(df.columns)
+
+    if "date" in df.columns:
+        parsed_dates = pd.to_datetime(df["date"], errors="coerce")
+        info["date_non_null_after_to_datetime"] = int(parsed_dates.notna().sum())
+        info["date_sample_after_to_datetime"] = [str(x) for x in parsed_dates.head(3).tolist()]
+    else:
+        info["date_non_null_after_to_datetime"] = "missing"
+
+    if "nav" in df.columns:
+        numeric_nav = pd.to_numeric(df["nav"], errors="coerce")
+        info["nav_non_null_after_to_numeric"] = int(numeric_nav.notna().sum())
+        info["nav_sample_after_to_numeric"] = [None if pd.isna(x) else float(x) for x in numeric_nav.head(3).tolist()]
+    else:
+        info["nav_non_null_after_to_numeric"] = "missing"
+
+    if "fund" in df.columns:
+        cleaned_fund = (
+            df["fund"]
+            .astype(str)
+            .str.strip()
+            .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+        )
+        info["fund_non_null_after_clean"] = int(cleaned_fund.notna().sum())
+        info["fund_sample_after_clean"] = cleaned_fund.head(3).tolist()
+    else:
+        info["fund_non_null_after_clean"] = "missing"
+
+    try:
+        clean_df = _clean_funds(df_raw.copy())
+        info["final_rows"] = int(len(clean_df))
+        info["final_funds"] = int(clean_df["fund"].nunique()) if not clean_df.empty else 0
+        info["final_latest"] = str(clean_df["date"].max()) if ("date" in clean_df.columns and not clean_df.empty) else "NaT"
+    except Exception as exc:
+        info["final_error"] = repr(exc)
+
+    return info
+
+
 def _clean_funds(df_raw: pd.DataFrame) -> pd.DataFrame:
     rename = {
         "Fund name": "fund",
