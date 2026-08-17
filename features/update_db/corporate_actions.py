@@ -17,9 +17,9 @@ def _resolve_engine():
     if _ENGINE_GETTER is not None:
         return _ENGINE_GETTER()
     try:
-        import app13  # lazy import to avoid hard dependency during tests
+        from core.db import get_engine
 
-        return app13.get_engine()
+        return get_engine()
     except Exception as e:
         raise RuntimeError("Could not resolve database engine for corporate action upload.") from e
 

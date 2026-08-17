@@ -1,22 +1,13 @@
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from core.db import get_engine
 
 
-@st.cache_resource
 def get_performance_engine():
-    return create_engine(
-        "postgresql+psycopg2://",
-        connect_args={
-            "host": st.secrets["pg"]["host"],
-            "port": st.secrets["pg"]["port"],
-            "user": st.secrets["pg"]["user"],
-            "password": st.secrets["pg"]["password"],
-            "dbname": st.secrets["pg"]["database"],
-            "sslmode": "require",
-        },
-        pool_pre_ping=True,
-    )
+    """Backward-compatible performance accessor for the shared DB engine."""
+    return get_engine()
 
 
 @st.cache_data(ttl=600, show_spinner="Loading precomputed rolling returns (funds)...")
