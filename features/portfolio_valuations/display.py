@@ -1,135 +1,145 @@
-"""Presentation for Portfolio Valuations results and diagnostics."""
+"""Presentation helpers for live Portfolio Valuations ranges."""
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 
-def display_valuation_time_series(
-    df_cube: pd.DataFrame,
+def display_anchor_months(
+    holdings: pd.DataFrame,
+    fund_names: dict[int, str],
+    requested_end_date,
+) -> None:
+    """Disclose the actual current-portfolio anchor chosen for every fund."""
+    if holdings.empty:
+        return
+    anchors = holdings[["fund_id", "anchor_month_end"]].drop_duplicates().copy()
+    anchors["Fund"] = anchors["fund_id"].map(fund_names).fillna(anchors["fund_id"].astype(str))
+    anchors["Portfolio used"] = pd.to_datetime(anchors["anchor_month_end"]).dt.strftime("%b %Y")
+    anchors = anchors.sort_values("Fund")
+    requested_period = pd.Period(requested_end_date, freq="M")
+    fallback_count = int(
+        (pd.to_datetime(anchors["anchor_month_end"]).dt.to_period("M") != requested_period).sum()
+    )
+    if fallback_count:
+        st.warning(
+            f"Exact end-period portfolios were unavailable for {fallback_count} selected fund(s). "
+            "Their latest available portfolio on or before the end period was used."
+        )
+    with st.expander("Portfolio anchor months", expanded=fallback_count > 0):
+        st.dataframe(anchors[["Fund", "Portfolio used"]], use_container_width=True, hide_index=True)
+
+
+def display_valuation_ranges(
+    series: pd.DataFrame,
+    ranges: pd.DataFrame,
     *,
-    focus_fund_id: int,
-    segment: str,
     metric: str,
+    focus_fund_id: int,
+    fund_names: dict[int, str],
 ) -> bool:
-    """Render the selected valuation series. Return whether diagnostics may continue."""
-    if df_cube.empty:
+    """Render focus and peer interquartile bands, medians, and an audit table."""
+    if series.empty:
         st.info("No valuation data available for the selected filters.")
         return False
 
-    # Slice locally (no DB)
-    df_slice = df_cube[
-        (df_cube["segment"] == segment) &
-        (df_cube["metric"] == metric)
-    ].copy()
+    focus_rows = ranges[ranges["fund_id"] == focus_fund_id]
+    insufficient_focus = int(focus_rows["median"].isna().sum()) if not focus_rows.empty else 0
+    if insufficient_focus:
+        st.warning(
+            f"The focus fund has {insufficient_focus} period(s) with fewer than five valid stocks; "
+            "no percentiles are shown for those periods."
+        )
 
-    if df_slice.empty:
-        st.info("No valuation data after applying segment/metric filters.")
+    valid_series = series.dropna(subset=["p25", "median", "p75"]).copy()
+    if valid_series.empty:
+        st.info("No period has at least five valid stock multiples for this selection.")
+        return False
+    available_series = set(valid_series["series"])
+    if "Focus fund" not in available_series:
+        st.error("The focus fund has no period with at least five valid stocks for this selection.")
+        return False
+    if "Peer-set" not in available_series:
+        st.error("No peer fund has at least five valid stocks for the selected periods.")
         return False
 
-    # Focus vs median series locally
-    focus = df_slice[df_slice["fund_id"] == focus_fund_id][["month_end", "value"]].copy()
-    focus["series"] = "Focus fund"
+    colors = alt.Scale(domain=["Focus fund", "Peer-set"], range=["#1f77b4", "#ff7f0e"])
+    base = alt.Chart(valid_series).encode(
+        x=alt.X("month_end:T", title="Period", axis=alt.Axis(format="%b %Y", labelAngle=-45)),
+        color=alt.Color("series:N", title="Series", scale=colors),
+    )
+    bands = base.mark_area(opacity=0.16).encode(
+        y=alt.Y("p25:Q", title=f"{metric} (x)"),
+        y2="p75:Q",
+        tooltip=[
+            alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+            alt.Tooltip("series:N", title="Series"),
+            alt.Tooltip("p25:Q", title="25th percentile", format=".2f"),
+            alt.Tooltip("median:Q", title="Median", format=".2f"),
+            alt.Tooltip("p75:Q", title="75th percentile", format=".2f"),
+            alt.Tooltip("peer_fund_count:Q", title="Peer funds", format=".0f"),
+        ],
+    )
+    medians = base.mark_line(point=True, strokeWidth=2.5).encode(
+        y=alt.Y("median:Q", title=f"{metric} (x)"),
+        tooltip=[
+            alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
+            alt.Tooltip("series:N", title="Series"),
+            alt.Tooltip("p25:Q", title="25th percentile", format=".2f"),
+            alt.Tooltip("median:Q", title="Median", format=".2f"),
+            alt.Tooltip("p75:Q", title="75th percentile", format=".2f"),
+        ],
+    )
+    st.altair_chart((bands + medians).properties(height=430), use_container_width=True)
+    st.caption(
+        "Bands show the unweighted 25th–75th percentile range. The peer-set lines are the "
+        "median of each corresponding statistic across eligible peer funds."
+    )
 
-    others = df_slice[df_slice["fund_id"] != focus_fund_id][["month_end", "value"]].copy()
-    if others.empty:
-        st.error("Need at least one other fund besides the focus fund to compute universe median.")
-        return False
+    st.subheader("Valuation range data")
+    table = valid_series.copy()
+    table["Period"] = pd.to_datetime(table["month_end"]).dt.strftime("%b %Y")
+    table = table.rename(
+        columns={
+            "series": "Series",
+            "p25": "25th percentile",
+            "median": "Median",
+            "p75": "75th percentile",
+            "valid_stock_count": "Valid stocks",
+            "peer_fund_count": "Eligible peer funds",
+        }
+    )
+    st.dataframe(
+        table[
+            [
+                "Period",
+                "Series",
+                "25th percentile",
+                "Median",
+                "75th percentile",
+                "Valid stocks",
+                "Eligible peer funds",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    median_others = others.groupby("month_end", as_index=False)["value"].median()
-    median_others["series"] = "Universe median (others)"
-
-    df_val = pd.concat([focus, median_others], ignore_index=True)
-    df_val["month_end"] = pd.to_datetime(df_val["month_end"], errors="coerce")
-    df_val = df_val.dropna(subset=["month_end"])
-    df_val = df_val.sort_values(["month_end", "series"]).reset_index(drop=True)
-
-    if df_val.empty:
-        st.info("No valuation series to chart.")
-        return False
-
-    # Chart
-    val_chart = (
-        alt.Chart(df_val)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "month_end:T",
-                title="Period",
-                axis=alt.Axis(format="%b %Y", labelAngle=-45),
+    with st.expander("Coverage diagnostics"):
+        diagnostics = ranges.copy()
+        diagnostics["Period"] = pd.to_datetime(diagnostics["month_end"]).dt.strftime("%b %Y")
+        diagnostics["Fund"] = diagnostics["fund_id"].map(fund_names).fillna(diagnostics["fund_id"].astype(str))
+        st.dataframe(
+            diagnostics[
+                ["Period", "Fund", "selected_stock_count", "valid_stock_count", "coverage_pct"]
+            ].rename(
+                columns={
+                    "selected_stock_count": "Selected stocks",
+                    "valid_stock_count": "Valid stocks",
+                    "coverage_pct": "Valid valuation weight (%)",
+                }
             ),
-            y=alt.Y("value:Q", title=f"{metric} (x)"),
-            color=alt.Color("series:N", title="Series"),
-            tooltip=[
-                alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                alt.Tooltip("series:N", title="Series"),
-                alt.Tooltip("value:Q", title=f"{metric} (x)", format=".2f"),
-            ],
+            use_container_width=True,
+            hide_index=True,
         )
-        .properties(height=400)
-    )
-    st.altair_chart(val_chart, use_container_width=True)
-
-    # ------------------------------------------------------------
-    # 5B) Valuation data table (HORIZONTAL months; 2 rows)
-    # ------------------------------------------------------------
-    st.subheader("Valuation data")
-
-    df_t = df_val.copy()
-    df_t["month_label"] = df_t["month_end"].dt.strftime("%b %Y")
-
-    month_order = (
-        df_t[["month_end", "month_label"]]
-        .drop_duplicates()
-        .sort_values("month_end")
-    )
-    ordered_labels = month_order["month_label"].tolist()
-
-    wide = (
-        df_t.pivot_table(
-            index="series",
-            columns="month_label",
-            values="value",
-            aggfunc="first",
-        )
-        .reindex(columns=ordered_labels)
-        .reindex(["Focus fund", "Universe median (others)"])
-        .reset_index()
-        .rename(columns={"series": "Series"})
-    )
-
-    st.dataframe(wide, use_container_width=True)
     return True
-
-
-def display_exposure_diagnostics(df_exp: pd.DataFrame) -> None:
-    """Render the existing exposure diagnostic charts without changing their specifications."""
-    if df_exp.empty:
-        st.info("No exposure diagnostics available for this selection.")
-        return
-
-    for metric_label in df_exp["metric"].dropna().unique().tolist():
-        sub = df_exp[df_exp["metric"] == metric_label].copy()
-        if sub.empty:
-            continue
-
-        ch = (
-            alt.Chart(sub)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X(
-                    "month_end:T",
-                    title="Period",
-                    axis=alt.Axis(format="%b %Y", labelAngle=-45),
-                ),
-                y=alt.Y("value:Q", title=metric_label),
-                color=alt.Color("series:N", title="Series"),
-                tooltip=[
-                    alt.Tooltip("month_end:T", title="Period", format="%b %Y"),
-                    alt.Tooltip("series:N", title="Series"),
-                    alt.Tooltip("value:Q", title=metric_label, format=".2f"),
-                ],
-            )
-            .properties(height=250)
-        )
-        st.altair_chart(ch, use_container_width=True)

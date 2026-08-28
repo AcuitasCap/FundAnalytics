@@ -168,7 +168,7 @@ def compute_monthly_portfolio_multiples(
     end_weight_sum_arr = np.full(n, np.nan, dtype=float)
 
     mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
-    valid_rule = "nonmissing_yield"
+    valid_rule = "positive_stock_multiple"
 
     if multiples_df is None or multiples_df.empty or not isins:
         debug = {
@@ -208,7 +208,10 @@ def compute_monthly_portfolio_multiples(
 
     m_piv = mul.pivot_table(index="month_end", columns="isin", values=mult_col, aggfunc="last").reindex(months)
     m_piv = m_piv.reindex(columns=isins)
-    y_vals = m_piv.to_numpy(dtype=float)
+    # The database stores P/S, P/E and P/B.  Harmonic portfolio aggregation
+    # operates on implied yields, so invert only valid positive multiples.
+    multiple_vals = m_piv.to_numpy(dtype=float)
+    y_vals = np.where(np.isfinite(multiple_vals) & (multiple_vals > 0), 1.0 / multiple_vals, np.nan)
 
     w_aligned = w0_df.reindex(index=t0, columns=isins).fillna(0.0)
     w_mat = w_aligned.to_numpy(dtype=float)

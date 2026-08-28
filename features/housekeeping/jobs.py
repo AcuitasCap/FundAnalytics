@@ -780,6 +780,38 @@ def recompute_quality_quartiles(batch_size: int = 10000):
             conn.execute(insert_sql, params)
 
 
+def _calculate_stock_valuation_multiples(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, dict[str, int]]]:
+    """Apply freshness, validity and clipping rules to aligned stock inputs."""
+    out = df.copy()
+    mc = pd.to_numeric(out["market_cap"], errors="coerce")
+    ttm_sales = pd.to_numeric(out["ttm_sales"], errors="coerce")
+    ttm_pat = pd.to_numeric(out["ttm_pat"], errors="coerce")
+    bv = pd.to_numeric(out["book_value"], errors="coerce")
+    q_anchor = pd.to_datetime(out["quarter_anchor"], errors="coerce")
+    b_anchor = pd.to_datetime(out["book_anchor"], errors="coerce")
+    month_end = pd.to_datetime(out["month_end"], errors="coerce")
+    quarterly_fresh = q_anchor.notna() & (q_anchor >= month_end - pd.DateOffset(months=3))
+    book_fresh = b_anchor.notna() & (b_anchor >= month_end - pd.DateOffset(months=12))
+
+    diagnostics: dict[str, dict[str, int]] = {}
+    for label, denominator, fresh, column, lower, upper in (
+        ("P/S", ttm_sales, quarterly_fresh, "ps", 0.5, 30.0),
+        ("P/E", ttm_pat, quarterly_fresh, "pe", 5.0, 200.0),
+        ("P/B", bv, book_fresh, "pb", 0.5, 40.0),
+    ):
+        valid = mc.notna() & (mc > 0) & denominator.notna() & (denominator > 0) & fresh
+        raw = mc / denominator
+        out[column] = np.where(valid, raw.clip(lower=lower, upper=upper), np.nan)
+        diagnostics[label] = {
+            "missing": int(denominator.isna().sum()),
+            "non_positive": int((denominator.notna() & (denominator <= 0)).sum()),
+            "stale": int((denominator.notna() & ~fresh).sum()),
+            "invalid_market_cap": int((mc.isna() | (mc <= 0)).sum()),
+            "capped": int((out[column].notna() & ((raw < lower) | (raw > upper))).sum()),
+        }
+    return out, diagnostics
+
+
 def rebuild_stock_monthly_valuations(
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
@@ -788,18 +820,17 @@ def rebuild_stock_monthly_valuations(
     debug_anchor_isin: str | None = None,
 ):
     """
-    Housekeeping job (rebuild stock_monthly_valuations as YIELDS):
+    Rebuild stock_monthly_valuations as stock-level valuation multiples.
 
     1) Reads monthly market cap from fundlab.stock_price
     2) Attaches TTM sales / PAT (from fundlab.stock_quarterly_financials, consolidated)
     3) Attaches latest annual book value (from fundlab.stock_annual_book_value, consolidated)
-    4) Computes stock-level YIELDS with ONLY guardrail:
-          - market_cap > 0 (else yield = NULL)
-       No other adjustments, no caps, no dropping, negative/zero numerators allowed.
+    4) Uses only fundamentals strictly before each valuation month (no look-ahead),
+       rejects missing, non-positive or stale inputs, then clips valid multiples.
     5) Writes directly to fundlab.stock_monthly_valuations:
-          - ps stores Sales Yield  = ttm_sales / market_cap
-          - pe stores Earnings Yield = ttm_pat / market_cap
-          - pb stores Book Yield   = book_value / market_cap
+          - ps stores P/S = market_cap / TTM sales, clipped to [0.5, 30]
+          - pe stores P/E = market_cap / TTM PAT, clipped to [5, 200]
+          - pb stores P/B = market_cap / book value, clipped to [0.5, 40]
 
     Output columns (aligned to fundlab.stock_monthly_valuations):
       isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
@@ -963,6 +994,8 @@ def rebuild_stock_monthly_valuations(
     base["ttm_sales"] = np.nan
     base["ttm_pat"] = np.nan
     base["book_value"] = np.nan
+    base["quarter_anchor"] = pd.NaT
+    base["book_anchor"] = pd.NaT
 
     # ---- TTM sales/PAT via "as-of" alignment (vectorized per ISIN) ----
     if not qdf_ttm.empty:
@@ -983,12 +1016,15 @@ def rebuild_stock_monthly_valuations(
 
             aligned_sales = np.full(h_dates.shape, np.nan)
             aligned_pat = np.full(h_dates.shape, np.nan)
+            aligned_anchors = np.full(h_dates.shape, np.datetime64("NaT"), dtype="datetime64[ns]")
 
             aligned_sales[valid] = sub_ttm["ttm_sales"].values[pos[valid]]
             aligned_pat[valid] = sub_ttm["ttm_pat"].values[pos[valid]]
+            aligned_anchors[valid] = q_dates[pos[valid]]
 
             base.loc[idx, "ttm_sales"] = aligned_sales
             base.loc[idx, "ttm_pat"] = aligned_pat
+            base.loc[idx, "quarter_anchor"] = aligned_anchors
 
     # ---- Book value via "as-of" alignment ----
     if not bvdf.empty:
@@ -1008,8 +1044,11 @@ def rebuild_stock_monthly_valuations(
                 continue
 
             aligned_bv = np.full(h_dates.shape, np.nan)
+            aligned_anchors = np.full(h_dates.shape, np.datetime64("NaT"), dtype="datetime64[ns]")
             aligned_bv[valid] = sub_bv["book_value"].values[pos[valid]]
+            aligned_anchors[valid] = b_dates[pos[valid]]
             base.loc[idx, "book_value"] = aligned_bv
+            base.loc[idx, "book_anchor"] = aligned_anchors
 
     if debug_anchor_isin:
         _isin = str(debug_anchor_isin).strip()
@@ -1051,7 +1090,8 @@ def rebuild_stock_monthly_valuations(
                 )
 
     # --------------------------------------------------------------
-    # 4) Compute yields (ONLY guardrail: market_cap > 0)
+    # 4) Compute capped multiples.  A quarterly TTM may be at most three
+    # calendar months old; annual book value may be at most twelve.
     # --------------------------------------------------------------
     df = base.copy()
 
@@ -1060,10 +1100,15 @@ def rebuild_stock_monthly_valuations(
     ttm_pat = pd.to_numeric(df["ttm_pat"], errors="coerce")
     bv = pd.to_numeric(df["book_value"], errors="coerce")
 
-    # Yields stored in ps/pe/pb (schema unchanged)
-    df["ps"] = np.where(mc > 0, ttm_sales / mc, np.nan)   # sales yield
-    df["pe"] = np.where(mc > 0, ttm_pat / mc, np.nan)     # earnings yield
-    df["pb"] = np.where(mc > 0, bv / mc, np.nan)          # book yield
+    df, diagnostics = _calculate_stock_valuation_multiples(df)
+    for label, detail in diagnostics.items():
+        missing = detail["missing"]
+        non_positive = detail["non_positive"]
+        stale = detail["stale"]
+        bad_market_cap = detail["invalid_market_cap"]
+        capped = detail["capped"]
+        if missing or non_positive or stale or bad_market_cap or capped:
+            st.warning(f"{label}: nulls from missing fundamentals={missing:,}, non-positive fundamentals={non_positive:,}, stale fundamentals={stale:,}, invalid market cap={bad_market_cap:,}; capped={capped:,}.")
 
     valuations_df = df[["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]].copy()
 
@@ -1113,397 +1158,6 @@ def rebuild_stock_monthly_valuations(
         method="multi",
     )
 
-    st.success("stock_monthly_valuations rebuilt (yields) and written to Supabase successfully.")
+    st.success("stock_monthly_valuations rebuilt (multiples) and written to Supabase successfully.")
     return None
-
-
-def rebuild_fund_monthly_valuations(
-    start_date: dt.date | None = None,
-    end_date: dt.date | None = None,
-    fund_ids: list[int] | None = None,
-):
-    """
-    Housekeeping job (CSV version) — UPDATED FOR YIELDS IN stock_monthly_valuations:
-
-    - Pulls Domestic Equity holdings (fundlab.fund_portfolio) joined to stock_master for is_financial
-    - Join to stock_monthly_valuations by (isin, month_key) (year-month)
-      NOTE: stock_monthly_valuations.ps/pe/pb now store YIELDS:
-        ps = sales_yield    (ttm_sales / market_cap)
-        pe = earnings_yield (ttm_pat / market_cap)
-        pb = book_yield     (book_value / market_cap)
-
-    - Compute fund-level multiples for Total / Financials / Non-financials by:
-        1) Rebase weights within each segment to 100%
-        2) Force NaN yields to 0.0
-        3) Aggregate yield = SUM( w_seg * yield_i )
-        4) Multiple = 1 / aggregate_yield, only undefined when aggregate_yield == 0
-      No sign-based filters and no yield-based dropping/re-normalization.
-
-    - Reads existing fund_monthly_valuations rows in range and skips those keys.
-    - Outputs a CSV for manual Supabase import.
-    """
-
-    engine = get_engine()
-
-    # --------------------------------------------------------------
-    # 0) Derive date range from fund_portfolio if needed
-    # --------------------------------------------------------------
-    with engine.begin() as conn:
-        if start_date is None or end_date is None:
-            if fund_ids:
-                rng = conn.execute(
-                    text(
-                        """
-                        SELECT
-                            MIN(month_end)::date AS min_d,
-                            MAX(month_end)::date AS max_d
-                        FROM fundlab.fund_portfolio
-                        WHERE fund_id = ANY(:fund_ids)
-                        """
-                    ),
-                    {"fund_ids": fund_ids},
-                ).fetchone()
-            else:
-                rng = conn.execute(
-                    text(
-                        """
-                        SELECT
-                            MIN(month_end)::date AS min_d,
-                            MAX(month_end)::date AS max_d
-                        FROM fundlab.fund_portfolio
-                        """
-                    )
-                ).fetchone()
-
-            if not rng or rng.min_d is None or rng.max_d is None:
-                st.warning("No data in fundlab.fund_portfolio to infer date range.")
-                return
-
-            if start_date is None:
-                start_date = rng.min_d
-            if end_date is None:
-                end_date = rng.max_d
-
-    if start_date > end_date:
-        st.error(f"Invalid date range: start_date {start_date} > end_date {end_date}.")
-        return
-
-    # --------------------------------------------------------------
-    # 1) Fetch holdings (Domestic Equities only) for the period
-    # --------------------------------------------------------------
-    with engine.begin() as conn:
-        if fund_ids:
-            holdings_sql = text(
-                """
-                SELECT
-                    fp.fund_id,
-                    fp.month_end,
-                    fp.isin,
-                    fp.holding_weight AS weight_pct,
-                    sm.is_financial
-                FROM fundlab.fund_portfolio fp
-                JOIN fundlab.stock_master sm
-                  ON fp.isin = sm.isin
-                WHERE fp.month_end BETWEEN :start_date AND :end_date
-                  AND fp.asset_type = 'Domestic Equities'
-                  AND fp.fund_id = ANY(:fund_ids)
-                ORDER BY fp.fund_id, fp.month_end, fp.isin
-                """
-            )
-            holdings = pd.read_sql(
-                holdings_sql,
-                conn,
-                params={"start_date": start_date, "end_date": end_date, "fund_ids": fund_ids},
-            )
-        else:
-            holdings_sql = text(
-                """
-                SELECT
-                    fp.fund_id,
-                    fp.month_end,
-                    fp.isin,
-                    fp.holding_weight AS weight_pct,
-                    sm.is_financial
-                FROM fundlab.fund_portfolio fp
-                JOIN fundlab.stock_master sm
-                  ON fp.isin = sm.isin
-                WHERE fp.month_end BETWEEN :start_date AND :end_date
-                  AND fp.asset_type = 'Domestic Equities'
-                ORDER BY fp.fund_id, fp.month_end, fp.isin
-                """
-            )
-            holdings = pd.read_sql(
-                holdings_sql,
-                conn,
-                params={"start_date": start_date, "end_date": end_date},
-            )
-
-    if holdings.empty:
-        st.info("No fund_portfolio holdings found in the given period.")
-        return
-
-    holdings["isin"] = holdings["isin"].astype(str).str.strip()
-    holdings["month_end"] = pd.to_datetime(holdings["month_end"], errors="coerce")
-    holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
-    holdings = holdings.dropna(subset=["fund_id", "isin", "month_end", "weight_pct"])
-
-    if holdings.empty:
-        st.info("No usable holdings after cleaning.")
-        return
-
-    # --------------------------------------------------------------
-    # 2) Prepare base weights WITHOUT re-normalization
-    # --------------------------------------------------------------
-    holdings["month_key"] = holdings["month_end"].dt.to_period("M")
-    abs_sum_w = holdings.groupby(["fund_id", "month_key"])["weight_pct"].transform(lambda s: s.abs().sum())
-    holdings["weight_scale"] = np.where(abs_sum_w > 2.0, 0.01, 1.0)
-    holdings["w_base"] = holdings["weight_pct"] * holdings["weight_scale"]
-
-    # canonical month_end (date) for output keys
-    holdings["month_end"] = holdings["month_key"].dt.to_timestamp("M").dt.date
-
-    # --------------------------------------------------------------
-    # 3) Pull stock yields for relevant ISINs and date window
-    #    and merge by (isin, month_key)
-    # --------------------------------------------------------------
-    all_isins = sorted(holdings["isin"].unique().tolist())
-    min_month = pd.Timestamp(min(holdings["month_end"]))
-    max_month = pd.Timestamp(max(holdings["month_end"]))
-
-    with engine.begin() as conn:
-        val_sql = text(
-            """
-            SELECT
-                isin,
-                month_end,
-                ps,
-                pe,
-                pb
-            FROM fundlab.stock_monthly_valuations
-            WHERE isin = ANY(:isins)
-              AND month_end BETWEEN :start_date AND :end_date
-            """
-        )
-        vals = pd.read_sql(
-            val_sql,
-            conn,
-            params={
-                "isins": all_isins,
-                "start_date": min_month.date(),
-                "end_date": max_month.date(),
-            },
-        )
-
-    if vals.empty:
-        st.info("No stock_monthly_valuations rows found for the given holdings.")
-        return
-
-    vals["isin"] = vals["isin"].astype(str).str.strip()
-    vals["month_end"] = pd.to_datetime(vals["month_end"], errors="coerce")
-    vals = vals.dropna(subset=["month_end"])
-    vals["month_key"] = vals["month_end"].dt.to_period("M")
-    vals = ensure_unique_monthly_rows(
-        vals,
-        key_cols=["isin", "month_key"],
-        value_cols=["ps", "pe", "pb"],
-        context="fundlab.stock_monthly_valuations",
-    )
-
-    df = holdings.merge(
-        vals[["isin", "month_key", "ps", "pe", "pb"]],
-        on=["isin", "month_key"],
-        how="left",
-    )
-
-    # Ensure numeric
-    for c in ("ps", "pe", "pb", "w_base"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    if df[["ps", "pe", "pb"]].isna().all(axis=None):
-        st.info("All merged yields are NaN after month_key merge; nothing to compute.")
-        return
-
-    # --------------------------------------------------------------
-    # 4) Load existing fund_monthly_valuations keys (incremental mode)
-    # --------------------------------------------------------------
-    with engine.begin() as conn:
-        if fund_ids:
-            existing_sql = text(
-                """
-                SELECT fund_id, month_end, segment
-                FROM fundlab.fund_monthly_valuations
-                WHERE month_end BETWEEN :start_date AND :end_date
-                  AND fund_id = ANY(:fund_ids)
-                """
-            )
-            existing_rows = conn.execute(
-                existing_sql,
-                {"start_date": start_date, "end_date": end_date, "fund_ids": fund_ids},
-            ).fetchall()
-        else:
-            existing_sql = text(
-                """
-                SELECT fund_id, month_end, segment
-                FROM fundlab.fund_monthly_valuations
-                WHERE month_end BETWEEN :start_date AND :end_date
-                """
-            )
-            existing_rows = conn.execute(
-                existing_sql,
-                {"start_date": start_date, "end_date": end_date},
-            ).fetchall()
-
-    existing_keys: set[tuple[int, dt.date, str]] = set()
-    for r in existing_rows:
-        existing_keys.add((int(r.fund_id), r.month_end, str(r.segment)))
-
-    # --------------------------------------------------------------
-    # 5) Compute fund-level multiples from yields.
-    #    Logic aligned to the retired valuation diagnostic:
-    #      - Rebase weights within segment to 100%
-    #      - NaN yield is forced to 0.0
-    #      - Multiple = 1 / SUM(w_seg * yield_filled)
-    #      - Undefined only when aggregate yield == 0
-    # --------------------------------------------------------------
-    df["is_financial"] = df["is_financial"].astype(bool)
-
-    def _seg_multiple_from_yield(
-        seg_grp: pd.DataFrame, yield_col: str
-    ) -> tuple[float, int, float]:
-        """
-        Returns (portfolio_multiple, nonmissing_stock_count, coverage_weight_nonmissing)
-
-        Steps:
-          - Force NaN yields to 0.0
-          - coverage_weight_nonmissing = SUM(w_seg where original yield was non-missing)
-          - Aggregate yield = SUM(w_seg * yield_filled)
-          - Multiple = 1 / aggregate_yield (undefined when aggregate_yield == 0)
-        """
-        g = seg_grp.copy()
-        g[yield_col] = pd.to_numeric(g[yield_col], errors="coerce")
-        g["w_seg"] = pd.to_numeric(g["w_seg"], errors="coerce").fillna(0.0)
-
-        nonmissing = g[yield_col].notna()
-        coverage_w = float(g.loc[nonmissing, "w_seg"].sum())
-        y_filled = g[yield_col].fillna(0.0)
-        agg_yield = float(np.nansum(g["w_seg"] * y_filled))
-
-        if np.isnan(agg_yield) or agg_yield == 0:
-            return (np.nan, int(nonmissing.sum()), coverage_w)
-
-        return (float(1.0 / agg_yield), int(nonmissing.sum()), coverage_w)
-
-    segments = ["Total", "Financials", "Non-financials"]
-    records: list[dict] = []
-
-    grouped = df.groupby(["fund_id", "month_end"], sort=True)
-    n_groups = len(grouped)
-
-    progress = st.progress(0)
-    status_placeholder = st.empty()
-
-    if n_groups == 0:
-        st.info("No (fund, month_end) groups after merge; nothing to compute.")
-        return
-
-    for i, ((fund_id, month_end_date), grp) in enumerate(grouped, start=1):
-        grp = grp.copy()
-
-        for seg in segments:
-            key = (int(fund_id), month_end_date, seg)
-            if key in existing_keys:
-                continue
-
-            if seg == "Financials":
-                seg_grp = grp[grp["is_financial"]].copy()
-            elif seg == "Non-financials":
-                seg_grp = grp[~grp["is_financial"]].copy()
-            else:
-                seg_grp = grp.copy()
-
-            if seg_grp.empty:
-                continue
-
-            # Rebase within segment so each segment is treated as a standalone portfolio
-            seg_sum = float(pd.to_numeric(seg_grp["w_base"], errors="coerce").fillna(0.0).sum())
-            if seg_sum <= 0:
-                continue
-            seg_grp = seg_grp.copy()
-            seg_grp["w_seg"] = pd.to_numeric(seg_grp["w_base"], errors="coerce").fillna(0.0) / seg_sum
-
-            ps_val, ps_cnt, ps_cov = _seg_multiple_from_yield(seg_grp, "ps")  # sales yield
-            pe_val, pe_cnt, pe_cov = _seg_multiple_from_yield(seg_grp, "pe")  # earnings yield
-            pb_val, pb_cnt, pb_cov = _seg_multiple_from_yield(seg_grp, "pb")  # book yield
-
-            # If nothing computable, skip
-            if np.isnan(ps_val) and np.isnan(pe_val) and np.isnan(pb_val):
-                continue
-
-            stock_count = int(max(ps_cnt, pe_cnt, pb_cnt))
-            # Segment weights are rebased to 100%
-            total_weight_seg = float(pd.to_numeric(seg_grp["w_seg"], errors="coerce").fillna(0.0).sum())
-
-            records.append(
-                {
-                    "fund_id": int(fund_id),
-                    "month_end": month_end_date,
-                    "segment": seg,
-                    "ps": None if np.isnan(ps_val) else float(ps_val),
-                    "pe": None if np.isnan(pe_val) else float(pe_val),
-                    "pb": None if np.isnan(pb_val) else float(pb_val),
-                    "stock_count": stock_count,
-                    "total_weight": total_weight_seg,
-                    "notes": (
-                        f"coverage_w(ps/pe/pb)={ps_cov:.3f}/{pe_cov:.3f}/{pb_cov:.3f}"
-                    ),
-                }
-            )
-
-        # progress UI
-        if n_groups > 0:
-            pct = int(i * 100 / n_groups)
-            progress.progress(min(pct, 100))
-            if i % 50 == 0 or i == n_groups:
-                status_placeholder.text(f"Processed {i} / {n_groups} fund-month groups")
-
-    progress.empty()
-    status_placeholder.empty()
-
-    if not records:
-        st.success(
-            f"No *new* fund_monthly_valuations rows needed between {start_date} and {end_date}. "
-            f"Table already up to date for this range."
-        )
-        return
-
-    df_out = pd.DataFrame.from_records(records)
-    df_out.sort_values(["fund_id", "month_end", "segment"], inplace=True)
-
-    st.write(
-        f"Prepared **{len(df_out)}** new (fund_id, month_end, segment) valuation rows "
-        f"between {start_date} and {end_date} that do *not* yet exist in "
-        f"`fundlab.fund_monthly_valuations`."
-    )
-    st.dataframe(df_out.head(50))
-
-    csv_bytes = df_out.to_csv(index=False).encode("utf-8")
-
-    # Persist for housekeeping_page() so the download button survives reruns
-    st.session_state["fund_valuations_csv_bytes"] = csv_bytes
-    st.session_state["fund_valuations_csv_name"] = "fund_monthly_valuations_delta.csv"
-    st.session_state["fund_valuations_rows"] = int(len(df_out))
-
-    st.download_button(
-        label="⬇️ Download fund_monthly_valuations CSV (new rows only)",
-        data=csv_bytes,
-        file_name="fund_monthly_valuations_delta.csv",
-        mime="text/csv",
-    )
-
-    st.info(
-        "Upload this CSV into Supabase (fundlab.fund_monthly_valuations). "
-        "Because we only included rows that don't already exist for this date range, "
-        "it will act as an incremental update."
-    )
-
 

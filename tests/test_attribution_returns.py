@@ -147,21 +147,21 @@ def test_monthly_chaining_and_valuation_fundamental_identities_hold():
     assert len(m_end) == len(t1)
 
 
-def test_portfolio_multiple_from_yields_is_single_inversion_of_weighted_yield():
+def test_portfolio_multiple_uses_single_inversion_of_weighted_implied_yield():
     months = _months((2024, 1, 31), (2024, 2, 29))
     w0_df = pd.DataFrame({"A": [0.6], "B": [0.4]}, index=months[:-1])
-    yields_df = pd.DataFrame(
+    multiples_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.03, "pb": 0.50, "ps": 0.20},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.02, "pb": 0.40, "ps": 0.10},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.04, "pb": 0.45, "ps": 0.22},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 0.01, "pb": 0.35, "ps": 0.12},
+            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 1 / 0.03, "pb": 2.0, "ps": 5.0},
+            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 50.0, "pb": 2.5, "ps": 10.0},
+            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 25.0, "pb": 1 / 0.45, "ps": 1 / 0.22},
+            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 100.0, "pb": 1 / 0.35, "ps": 1 / 0.12},
         ]
     )
 
     r_price_df = pd.DataFrame({"A": [0.20], "B": [-0.10]}, index=months[1:])
     m_start, m_end, dbg = compute_monthly_portfolio_multiples(
-        yields_df, months, ["A", "B"], w0_df, r_price_df, "Earnings (P/E)"
+        multiples_df, months, ["A", "B"], w0_df, r_price_df, "Earnings (P/E)"
     )
 
     expected_y0 = 0.6 * 0.03 + 0.4 * 0.02
@@ -182,17 +182,17 @@ def test_end_multiple_uses_drifted_weights_from_price_moves():
     months = _months((2024, 1, 31), (2024, 2, 29))
     w0_df = pd.DataFrame({"A": [0.05], "B": [0.95]}, index=months[:-1])
     r_price_df = pd.DataFrame({"A": [1.0], "B": [-0.05263157894736842]}, index=months[1:])
-    yields_df = pd.DataFrame(
+    multiples_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.20},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.20},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.05, "pb": 0.50, "ps": 0.20},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 0.20, "pb": 0.50, "ps": 0.20},
+            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
+            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
+            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 20.0, "pb": 2.0, "ps": 5.0},
+            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 5.0, "pb": 2.0, "ps": 5.0},
         ]
     )
 
     _, m_end, dbg = compute_monthly_portfolio_multiples(
-        yields_df, months, ["A", "B"], w0_df, r_price_df, "Earnings (P/E)"
+        multiples_df, months, ["A", "B"], w0_df, r_price_df, "Earnings (P/E)"
     )
 
     assert np.isclose(float(dbg["drifted_end_weight_sum"][0]), 1.0, atol=1e-12)

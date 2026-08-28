@@ -5,7 +5,7 @@ import streamlit as st
 
 from core.navigation import home_button
 from . import jobs
-from .display import show_fund_valuation_download, show_exception_report, store_exception_report
+from .display import show_exception_report, store_exception_report
 
 def housekeeping_page():
     home_button()
@@ -23,19 +23,9 @@ def housekeeping_page():
             job()
             st.success(success)
 
-    if st.button("5. Refresh fund valuations"):
-        for key in ("fund_valuations_csv_bytes", "fund_valuations_csv_name", "fund_valuations_rows"):
-            st.session_state.pop(key, None)
-        jobs.rebuild_fund_monthly_valuations()
-        if "fund_valuations_csv_bytes" in st.session_state:
-            st.success(f"Fund valuations prepared: {st.session_state.get('fund_valuations_rows', 0):,} rows.")
-        else:
-            st.success("Fund valuations updated (no CSV produced).")
-    show_fund_valuation_download()
-
     st.markdown("---")
     st.subheader("Precompute rolling returns")
-    if st.button("6. Pre-compute and store 3Y and 1Y rolling returns"):
+    if st.button("5. Pre-compute and store 3Y and 1Y rolling returns"):
         st.session_state["rolling_refresh_summary"] = jobs.refresh_precomputed_rolling_returns()
     if "rolling_refresh_summary" in st.session_state:
         summary = st.session_state["rolling_refresh_summary"]
@@ -49,7 +39,7 @@ def housekeeping_page():
     st.markdown("---")
     st.subheader("Refresh stock dividend yields")
     scope = st.selectbox("Dividend yield refresh scope", ["All", "Last 3 years"], key="dividend_yield_scope")
-    if st.button("7. Refresh stock dividend yields"):
+    if st.button("6. Refresh stock dividend yields"):
         for suffix in ("excel_bytes", "excel_name", "exc_rows", "exceptions_preview"):
             st.session_state.pop(f"div_yield_{suffix}", None)
         summary, exceptions_df = jobs.refresh_stock_dividend_yields(scope=scope)
@@ -62,7 +52,7 @@ def housekeeping_page():
 
     st.markdown("---")
     st.subheader("Refresh adjusted prices")
-    if st.button("8. Refresh adjusted prices (adj_multiplier + adj_price)"):
+    if st.button("7. Refresh adjusted prices (adj_multiplier + adj_price)"):
         for suffix in ("exc_excel_bytes", "exc_excel_name", "exc_rows", "exceptions_preview", "summary"):
             st.session_state.pop(f"adj_price_{suffix}", None)
         summary, exceptions_df = jobs.refresh_adjusted_prices()
@@ -94,5 +84,5 @@ def housekeeping_page():
     uploaded = st.file_uploader("Select a stock valuations Excel workbook (.xlsx)", type=["xlsx"], key="stock_val_upload")
     if uploaded is not None:
         st.write(f"Selected file: **{uploaded.name}**")
-    if st.button("9. Upload this workbook to Supabase"):
+    if st.button("8. Upload this workbook to Supabase"):
         jobs.upload_stock_monthly_valuations_from_excel(uploaded)

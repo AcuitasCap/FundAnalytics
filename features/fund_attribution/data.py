@@ -61,7 +61,6 @@ def _load_attrib_raw_window(
             "prices": pd.DataFrame(),
             "multiples": pd.DataFrame(),
             "yields": pd.DataFrame(),
-            "fund_valuations": pd.DataFrame(),
             "size_band": pd.DataFrame(),
             "bench_nav": pd.DataFrame(),
             "stock_master": pd.DataFrame(),
@@ -127,7 +126,7 @@ def _load_attrib_raw_window(
     else:
         px = pd.DataFrame(columns=["isin", "month_end", "adj_price", "price", "dividend_yield"])
 
-    # Stock valuation yields (monthly): PS/PE/PB already computed on Supabase
+    # Stock valuation multiples (monthly): P/S, P/E and P/B computed on Supabase.
     if isins:
         q_mul = text("""
             SELECT
@@ -149,28 +148,6 @@ def _load_attrib_raw_window(
                     yld[c] = pd.to_numeric(yld[c], errors="coerce")
     else:
         yld = pd.DataFrame(columns=["isin", "month_end", "ps", "pe", "pb"])
-
-    # Fund-level precomputed valuations (monthly): use Total segment for domestic sleeve decomposition
-    q_fmv = text("""
-        SELECT
-            month_end::date AS month_end,
-            ps,
-            pe,
-            pb
-        FROM fundlab.fund_monthly_valuations
-        WHERE fund_id = :fund_id
-          AND segment = 'Total'
-          AND month_end BETWEEN :start_me AND :end_me
-        ORDER BY month_end
-    """)
-    fmv = pd.read_sql(q_fmv, engine, params={"fund_id": fund_id, "start_me": start_me, "end_me": end_me})
-    if not fmv.empty:
-        fmv["month_end"] = pd.to_datetime(fmv["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
-        for c in ["ps", "pe", "pb"]:
-            if c in fmv.columns:
-                fmv[c] = pd.to_numeric(fmv[c], errors="coerce")
-    else:
-        fmv = pd.DataFrame(columns=["month_end", "ps", "pe", "pb"])
 
     # Size band (monthly)
     if isins:
@@ -214,7 +191,6 @@ def _load_attrib_raw_window(
         "prices": px,
         "multiples": yld,
         "yields": yld,
-        "fund_valuations": fmv,
         "size_band": sz,
         "bench_nav": bn,
         "stock_master": sm,

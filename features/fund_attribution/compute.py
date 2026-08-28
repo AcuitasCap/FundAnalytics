@@ -110,10 +110,10 @@ def _compute_domestic_triangulation_tables(
         m_start = float(mult_piv.loc[hold_start, isin]) if (hold_start in mult_piv.index and isin in mult_piv.columns) else np.nan
         m_end = float(mult_piv.loc[hold_end, isin]) if (hold_end in mult_piv.index and isin in mult_piv.columns) else np.nan
 
-        y_start = float(m_start) if np.isfinite(m_start) else np.nan
-        y_end = float(m_end) if np.isfinite(m_end) else np.nan
-        f_start = p_start * y_start if np.isfinite(p_start) and np.isfinite(y_start) else np.nan
-        f_end = p_end * y_end if np.isfinite(p_end) and np.isfinite(y_end) else np.nan
+        # P/M = fundamental, since stock_monthly_valuations now stores M
+        # directly (P/S, P/E, or P/B), rather than its inverse yield.
+        f_start = p_start / m_start if np.isfinite(p_start) and np.isfinite(m_start) and m_start > 0 else np.nan
+        f_end = p_end / m_end if np.isfinite(p_end) and np.isfinite(m_end) and m_end > 0 else np.nan
 
         if n_hold_months == 1:
             growth = 0.0
@@ -123,8 +123,10 @@ def _compute_domestic_triangulation_tables(
             missing_ep = not (
                 np.isfinite(p_start)
                 and np.isfinite(p_end)
-                and np.isfinite(y_start)
-                and np.isfinite(y_end)
+                and np.isfinite(m_start)
+                and np.isfinite(m_end)
+                and m_start > 0
+                and m_end > 0
                 and np.isfinite(f_start)
                 and np.isfinite(f_end)
             )
@@ -232,7 +234,6 @@ def _compute_attribution(
     h = raw["holdings"].copy()
     px = raw["prices"].copy()
     yld = raw.get("yields", raw.get("multiples", pd.DataFrame())).copy()
-    fmv = raw.get("fund_valuations", pd.DataFrame()).copy()
     sz = raw["size_band"].copy()
     bn = raw["bench_nav"].copy()
     sm = raw["stock_master"].copy()

@@ -54,6 +54,9 @@ def test_router_uses_extracted_housekeeping_page_and_debug_tool_is_removed():
     )
     assert "debug_portfolio_valuation_point" not in active_sources
     assert "dbg_val_" not in active_sources
+    assert "rebuild_fund_monthly_valuations" not in active_sources
+    assert "fund_valuations_csv" not in active_sources
+    assert "Refresh fund valuations" not in active_sources
 
 
 def test_adjusted_price_adapter_only_calls_external_job_when_invoked(monkeypatch):
