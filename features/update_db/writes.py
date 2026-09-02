@@ -125,12 +125,15 @@ def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
                 t.isin
             FROM (
                 SELECT
-                    unnest(:scheme_names)      AS scheme_name,
-                    unnest(:month_ends)        AS month_end,
-                    unnest(:instrument_names)  AS instrument_name,
-                    unnest(:weights)           AS holding_weight,
-                    unnest(:asset_types)       AS asset_type,
-                    unnest(:isins)             AS isin
+                    -- Explicit array casts prevent PostgreSQL from inferring a
+                    -- numeric type for the ISIN array when this statement is
+                    -- prepared through the DB driver.
+                    unnest(CAST(:scheme_names AS text[]))            AS scheme_name,
+                    unnest(CAST(:month_ends AS date[]))              AS month_end,
+                    unnest(CAST(:instrument_names AS text[]))        AS instrument_name,
+                    unnest(CAST(:weights AS double precision[]))     AS holding_weight,
+                    unnest(CAST(:asset_types AS text[]))             AS asset_type,
+                    unnest(CAST(:isins AS text[]))                   AS isin
             ) t
             JOIN fundlab.fund f
               ON f.fund_name = t.scheme_name
