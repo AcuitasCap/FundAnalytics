@@ -19,6 +19,7 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     coerce_num,
+    make_up_down_capture_table,
     make_multi_fund_rolling_df,
     make_rolling_df,
     rolling_outperf_stats,
@@ -163,6 +164,7 @@ def performance_page(home_button):
                 "Rolling returns - multiple funds",
                 "Returns (Strict FY/CY endpoints)",
                 "Point to point returns & relative return vs. benchmark (1/3/5/7 year CAGR)",
+                "Up / down capture",
             ],
             index=0,
             key="perf_analysis_mode",
@@ -257,6 +259,41 @@ def performance_page(home_button):
                 st.plotly_chart(fig1m, use_container_width=True)
                 if st.checkbox("To print", key="print_fig1m"):
                     print_items.append(("1Y Rolling - Multiple funds", fig1m))
+
+    elif analysis_mode == "Up / down capture":
+        st.subheader("Up / down capture – rolling 1-year returns")
+        if bench_label is None:
+            st.warning("Select a benchmark to calculate capture.")
+        elif not window_ok(start_domain, end_domain, 12):
+            st.info("Selected range is too short for rolling 1-year windows.")
+        else:
+            capture_table = make_up_down_capture_table(
+                focus_fund=focus_fund,
+                benchmark_name=bench_label,
+                start_domain=start_domain,
+                end_domain=end_domain,
+            )
+            if capture_table.empty:
+                st.info("No overlapping precomputed 1-year fund and benchmark returns were found.")
+            else:
+                capture_display = capture_table.set_index(["Benchmark bucket", "Starting year"])
+                st.dataframe(
+                    capture_display.style.format(
+                        {
+                            "Average benchmark return (%)": "{:.2f}%",
+                            "Average focus fund return (%)": "{:.2f}%",
+                            "Median capture (x)": "{:.2f}x",
+                            "Observations": "{:.0f}",
+                        },
+                        na_rep="—",
+                    ),
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Capture is calculated for each overlapping rolling 1-year observation as "
+                    "focus-fund return ÷ benchmark return, capped at ±5x, then summarised by the median. "
+                    "Benchmark returns of exactly zero are excluded from Capture and Observations."
+                )
 
     elif analysis_mode == "Returns (Strict FY/CY endpoints)":
         st.header("Yearly Returns (Strict FY/CY endpoints)")

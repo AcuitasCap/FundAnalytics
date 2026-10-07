@@ -331,6 +331,151 @@ def window_label_series(end_idx: pd.Index, months: int) -> pd.Series:
     return pd.Series([f"{s:%b %Y}-{e:%Y}" for s, e in zip(start, end)], index=end_idx)
 
 
+CAPTURE_COLUMNS = [
+    "Benchmark bucket",
+    "Starting year",
+    "Average benchmark return (%)",
+    "Average focus fund return (%)",
+    "Median capture (x)",
+    "Observations",
+]
+
+
+def build_up_down_capture_table(
+    fund_roll: pd.DataFrame,
+    bench_roll: pd.DataFrame,
+    *,
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+    capture_cap: float = 5.0,
+) -> pd.DataFrame:
+    """Summarise pointwise 1Y capture by benchmark quartile and window-start year.
+
+    Quartile thresholds are calculated from all valid benchmark observations in
+    the selected domain. Row calculations use dates where both the focus fund
+    and benchmark have a stored 12-month return. Individual capture ratios are
+    clipped to ``[-capture_cap, capture_cap]`` before taking their median.
+    """
+    empty = pd.DataFrame(columns=CAPTURE_COLUMNS)
+    if fund_roll is None or bench_roll is None or fund_roll.empty or bench_roll.empty:
+        return empty
+    if capture_cap <= 0:
+        raise ValueError("capture_cap must be positive")
+
+    fund = fund_roll.copy()
+    bench = bench_roll.copy()
+    required_fund = {"fund_name", "asof_date", "rolling_cagr"}
+    required_bench = {"bench_name", "asof_date", "rolling_cagr"}
+    if not required_fund.issubset(fund.columns) or not required_bench.issubset(bench.columns):
+        return empty
+
+    fund = fund[fund["fund_name"] == focus_fund].copy()
+    bench = bench[bench["bench_name"] == benchmark_name].copy()
+    fund["asof_date"] = pd.to_datetime(fund["asof_date"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
+    bench["asof_date"] = pd.to_datetime(bench["asof_date"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
+    fund["fund_return"] = pd.to_numeric(fund["rolling_cagr"], errors="coerce")
+    bench["benchmark_return"] = pd.to_numeric(bench["rolling_cagr"], errors="coerce")
+    fund = fund.dropna(subset=["asof_date", "fund_return"]).drop_duplicates("asof_date", keep="last")
+    bench = bench.dropna(subset=["asof_date", "benchmark_return"]).drop_duplicates("asof_date", keep="last")
+
+    bench["window_start"] = (
+        bench["asof_date"] - pd.DateOffset(months=12)
+    ).dt.to_period("M").dt.to_timestamp("M")
+    start_eom = pd.Timestamp(start_domain).to_period("M").to_timestamp("M")
+    end_eom = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
+    bench = bench[(bench["window_start"] >= start_eom) & (bench["asof_date"] <= end_eom)].copy()
+    if bench.empty:
+        return empty
+
+    q25 = float(bench["benchmark_return"].quantile(0.25))
+    q75 = float(bench["benchmark_return"].quantile(0.75))
+    bench["Benchmark bucket"] = np.select(
+        [bench["benchmark_return"] <= q25, bench["benchmark_return"] >= q75],
+        ["Bottom quartile", "Top quartile"],
+        default="Middle two quartiles",
+    )
+    bench["Starting year"] = bench["window_start"].dt.year.astype(int)
+
+    merged = bench[
+        ["asof_date", "benchmark_return", "Benchmark bucket", "Starting year"]
+    ].merge(
+        fund[["asof_date", "fund_return"]],
+        on="asof_date",
+        how="inner",
+    )
+    if merged.empty:
+        return empty
+
+    valid_capture = (
+        np.isfinite(merged["fund_return"])
+        & np.isfinite(merged["benchmark_return"])
+        & (merged["benchmark_return"] != 0)
+    )
+    merged["capture"] = np.nan
+    merged.loc[valid_capture, "capture"] = (
+        merged.loc[valid_capture, "fund_return"]
+        / merged.loc[valid_capture, "benchmark_return"]
+    ).clip(-capture_cap, capture_cap)
+
+    rows = []
+    for (bucket, starting_year), group in merged.groupby(
+        ["Benchmark bucket", "Starting year"], sort=False
+    ):
+        captures = group["capture"].dropna()
+        rows.append(
+            {
+                "Benchmark bucket": bucket,
+                "Starting year": int(starting_year),
+                "Average benchmark return (%)": float(group["benchmark_return"].mean() * 100.0),
+                "Average focus fund return (%)": float(group["fund_return"].mean() * 100.0),
+                "Median capture (x)": float(captures.median()) if not captures.empty else np.nan,
+                "Observations": int(len(captures)),
+            }
+        )
+
+    result = pd.DataFrame.from_records(rows, columns=CAPTURE_COLUMNS)
+    bucket_order = pd.CategoricalDtype(
+        ["Top quartile", "Middle two quartiles", "Bottom quartile"], ordered=True
+    )
+    result["Benchmark bucket"] = result["Benchmark bucket"].astype(bucket_order)
+    return result.sort_values(["Benchmark bucket", "Starting year"]).reset_index(drop=True)
+
+
+def make_up_down_capture_table(
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+) -> pd.DataFrame:
+    """Fetch precomputed 12-month returns and build the capture table."""
+    first_asof = (
+        pd.Timestamp(start_domain) + pd.DateOffset(months=12)
+    ).to_period("M").to_timestamp("M")
+    last_asof = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
+    fund_roll = load_fund_rolling(
+        window_months=12,
+        fund_names=[focus_fund],
+        start=first_asof,
+        end=last_asof,
+    )
+    bench_roll = load_bench_rolling(
+        window_months=12,
+        bench_name=benchmark_name,
+        start=first_asof,
+        end=last_asof,
+    )
+    return build_up_down_capture_table(
+        fund_roll,
+        bench_roll,
+        focus_fund=focus_fund,
+        benchmark_name=benchmark_name,
+        start_domain=start_domain,
+        end_domain=end_domain,
+    )
+
+
 @st.cache_data(show_spinner=False)
 def make_rolling_df(funds_df, selected_funds, focus_fund, bench_ser, months, start_domain, end_domain):
     fund_roll = load_fund_rolling(window_months=months, fund_names=selected_funds, start=None, end=None)
