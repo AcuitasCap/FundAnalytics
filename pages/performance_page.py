@@ -16,12 +16,14 @@ from services.performance_plots import (
     style_relative_multi_horizon,
 )
 from services.performance_returns import (
+    CAPTURE_BUCKETS,
     _clean_bench,
     _clean_funds,
     coerce_num,
     make_up_down_capture_table,
     make_multi_fund_rolling_df,
     make_rolling_df,
+    prepare_capture_bucket_table,
     rolling_outperf_stats,
     to_eom,
     yearly_returns_with_custom_domain,
@@ -276,22 +278,34 @@ def performance_page(home_button):
             if capture_table.empty:
                 st.info("No overlapping precomputed 1-year fund and benchmark returns were found.")
             else:
-                capture_display = capture_table.set_index(["Benchmark bucket", "Starting year"])
-                st.dataframe(
-                    capture_display.style.format(
-                        {
-                            "Average benchmark return (%)": "{:.2f}%",
-                            "Average focus fund return (%)": "{:.2f}%",
-                            "Median capture (x)": "{:.2f}x",
-                            "Observations": "{:.0f}",
-                        },
-                        na_rep="—",
-                    ),
-                    use_container_width=True,
-                )
+                def format_observations(value):
+                    if pd.isna(value):
+                        return "—"
+                    number = float(value)
+                    return f"{number:.0f}" if number.is_integer() else f"{number:.1f}"
+
+                for bucket in CAPTURE_BUCKETS:
+                    st.markdown(f"**{bucket}**")
+                    bucket_table = prepare_capture_bucket_table(capture_table, bucket)
+                    if bucket_table.empty:
+                        st.info(f"No observations are available for {bucket.lower()}.")
+                        continue
+                    capture_display = bucket_table.set_index("Starting year")
+                    st.dataframe(
+                        capture_display.style.format(
+                            {
+                                "Average benchmark return (%)": "{:.1f}%",
+                                "Average focus fund return (%)": "{:.1f}%",
+                                "Median capture (%)": "{:.1f}%",
+                                "Observations": format_observations,
+                            },
+                            na_rep="—",
+                        ),
+                        use_container_width=True,
+                    )
                 st.caption(
                     "Capture is calculated for each overlapping rolling 1-year observation as "
-                    "focus-fund return ÷ benchmark return, capped at ±5x, then summarised by the median. "
+                    "focus-fund return ÷ benchmark return, capped at ±500%, then summarised by the median. "
                     "Benchmark returns of exactly zero are excluded from Capture and Observations."
                 )
 

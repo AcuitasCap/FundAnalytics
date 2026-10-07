@@ -16,11 +16,12 @@ def test_performance_page_and_services_import_without_app_legacy_helpers():
     assert callable(database.load_bench_from_db)
     assert callable(returns.make_rolling_df)
     assert callable(returns.make_up_down_capture_table)
+    assert callable(returns.prepare_capture_bucket_table)
     assert callable(plots.plot_rolling)
 
     page_source = Path("pages/performance_page.py").read_text(encoding="utf-8")
     assert '"Up / down capture"' in page_source
-    assert "Median capture (x)" in page_source
+    assert "Median capture (%)" in page_source
 
 
 def test_app13_does_not_define_extracted_performance_symbols():

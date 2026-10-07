@@ -336,7 +336,15 @@ CAPTURE_COLUMNS = [
     "Starting year",
     "Average benchmark return (%)",
     "Average focus fund return (%)",
-    "Median capture (x)",
+    "Median capture (%)",
+    "Observations",
+]
+
+CAPTURE_BUCKETS = ["Top quartile", "Middle two quartiles", "Bottom quartile"]
+CAPTURE_VALUE_COLUMNS = [
+    "Average benchmark return (%)",
+    "Average focus fund return (%)",
+    "Median capture (%)",
     "Observations",
 ]
 
@@ -430,17 +438,52 @@ def build_up_down_capture_table(
                 "Starting year": int(starting_year),
                 "Average benchmark return (%)": float(group["benchmark_return"].mean() * 100.0),
                 "Average focus fund return (%)": float(group["fund_return"].mean() * 100.0),
-                "Median capture (x)": float(captures.median()) if not captures.empty else np.nan,
+                "Median capture (%)": (
+                    float(captures.median() * 100.0) if not captures.empty else np.nan
+                ),
                 "Observations": int(len(captures)),
             }
         )
 
     result = pd.DataFrame.from_records(rows, columns=CAPTURE_COLUMNS)
-    bucket_order = pd.CategoricalDtype(
-        ["Top quartile", "Middle two quartiles", "Bottom quartile"], ordered=True
-    )
+    bucket_order = pd.CategoricalDtype(CAPTURE_BUCKETS, ordered=True)
     result["Benchmark bucket"] = result["Benchmark bucket"].astype(bucket_order)
     return result.sort_values(["Benchmark bucket", "Starting year"]).reset_index(drop=True)
+
+
+def prepare_capture_bucket_table(capture_table: pd.DataFrame, bucket: str) -> pd.DataFrame:
+    """Return one benchmark bucket, ranked by return, with an average row."""
+    display_columns = ["Starting year", *CAPTURE_VALUE_COLUMNS]
+    if (
+        capture_table is None
+        or capture_table.empty
+        or bucket not in CAPTURE_BUCKETS
+        or not set(CAPTURE_COLUMNS).issubset(capture_table.columns)
+    ):
+        return pd.DataFrame(columns=display_columns)
+
+    bucket_table = capture_table.loc[
+        capture_table["Benchmark bucket"] == bucket, display_columns
+    ].copy()
+    if bucket_table.empty:
+        return bucket_table
+
+    for column in CAPTURE_VALUE_COLUMNS:
+        bucket_table[column] = pd.to_numeric(bucket_table[column], errors="coerce")
+    bucket_table = bucket_table.sort_values(
+        ["Average benchmark return (%)", "Starting year"],
+        ascending=[False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    average_row = {"Starting year": "Average"}
+    average_row.update(
+        {column: bucket_table[column].mean() for column in CAPTURE_VALUE_COLUMNS}
+    )
+    return pd.concat(
+        [bucket_table, pd.DataFrame([average_row], columns=display_columns)],
+        ignore_index=True,
+    )
 
 
 def make_up_down_capture_table(
