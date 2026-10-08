@@ -13,6 +13,7 @@ from services.performance_plots import (
     df_to_table_figure,
     plot_multi_fund_rolling,
     plot_rolling,
+    plot_up_down_capture,
     style_relative_multi_horizon,
 )
 from services.performance_returns import (
@@ -278,36 +279,41 @@ def performance_page(home_button):
             if capture_table.empty:
                 st.info("No overlapping precomputed 1-year fund and benchmark returns were found.")
             else:
-                def format_observations(value):
-                    if pd.isna(value):
-                        return "—"
-                    number = float(value)
-                    return f"{number:.0f}" if number.is_integer() else f"{number:.1f}"
+                capture_fig = plot_up_down_capture(capture_table, focus_fund, bench_label)
+                if capture_fig is not None:
+                    st.plotly_chart(capture_fig, use_container_width=True)
 
-                for bucket in CAPTURE_BUCKETS:
-                    st.markdown(f"**{bucket}**")
-                    bucket_table = prepare_capture_bucket_table(capture_table, bucket)
-                    if bucket_table.empty:
-                        st.info(f"No observations are available for {bucket.lower()}.")
-                        continue
-                    capture_display = bucket_table.set_index("Starting year")
-                    st.dataframe(
-                        capture_display.style.format(
-                            {
-                                "Average benchmark return (%)": "{:.1f}%",
-                                "Average focus fund return (%)": "{:.1f}%",
-                                "Median capture (%)": "{:.1f}%",
-                                "Observations": format_observations,
-                            },
-                            na_rep="—",
-                        ),
-                        use_container_width=True,
+                with st.expander("View up / down capture tables", expanded=False):
+                    def format_observations(value):
+                        if pd.isna(value):
+                            return "—"
+                        number = float(value)
+                        return f"{number:.0f}" if number.is_integer() else f"{number:.1f}"
+
+                    for bucket in CAPTURE_BUCKETS:
+                        st.markdown(f"**{bucket}**")
+                        bucket_table = prepare_capture_bucket_table(capture_table, bucket)
+                        if bucket_table.empty:
+                            st.info(f"No observations are available for {bucket.lower()}.")
+                            continue
+                        capture_display = bucket_table.set_index("Starting year")
+                        st.dataframe(
+                            capture_display.style.format(
+                                {
+                                    "Average benchmark return (%)": "{:.1f}%",
+                                    "Average focus fund return (%)": "{:.1f}%",
+                                    "Median capture (%)": "{:.1f}%",
+                                    "Observations": format_observations,
+                                },
+                                na_rep="—",
+                            ),
+                            use_container_width=True,
+                        )
+                    st.caption(
+                        "Capture is calculated for each overlapping rolling 1-year observation as "
+                        "focus-fund return ÷ benchmark return, capped at ±500%, then summarised by the median. "
+                        "Benchmark returns of exactly zero are excluded from Capture and Observations."
                     )
-                st.caption(
-                    "Capture is calculated for each overlapping rolling 1-year observation as "
-                    "focus-fund return ÷ benchmark return, capped at ±500%, then summarised by the median. "
-                    "Benchmark returns of exactly zero are excluded from Capture and Observations."
-                )
 
     elif analysis_mode == "Returns (Strict FY/CY endpoints)":
         st.header("Yearly Returns (Strict FY/CY endpoints)")

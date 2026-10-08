@@ -4,7 +4,67 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from services.performance_returns import window_label_series
+from services.performance_returns import CAPTURE_BUCKETS, window_label_series
+
+
+def plot_up_down_capture(capture_table, focus_name, benchmark_name):
+    """Plot the fund and benchmark averages by bucket and starting year."""
+    required = {
+        "Benchmark bucket",
+        "Starting year",
+        "Average benchmark return (%)",
+        "Average focus fund return (%)",
+    }
+    if capture_table is None or capture_table.empty or not required.issubset(capture_table.columns):
+        return None
+
+    plot_df = capture_table.loc[:, list(required)].copy()
+    plot_df = plot_df[plot_df["Benchmark bucket"].isin(CAPTURE_BUCKETS)].copy()
+    for column in ["Starting year", "Average benchmark return (%)", "Average focus fund return (%)"]:
+        plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Starting year"])
+    if plot_df.empty:
+        return None
+
+    plot_df["bucket_order"] = plot_df["Benchmark bucket"].map(
+        {bucket: index for index, bucket in enumerate(CAPTURE_BUCKETS)}
+    ).astype(int)
+    plot_df = plot_df.sort_values(["bucket_order", "Starting year"])
+    bucket_labels = plot_df["Benchmark bucket"].replace(
+        {"Middle two quartiles": "Middle quartiles"}
+    ).astype(str).tolist()
+    year_labels = plot_df["Starting year"].astype(int).astype(str).tolist()
+    hover_data = list(zip(bucket_labels, year_labels))
+
+    fig = go.Figure()
+    for name, column, color in [
+        (benchmark_name, "Average benchmark return (%)", "#f28e2b"),
+        (focus_name, "Average focus fund return (%)", "#1f77b4"),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=[bucket_labels, year_labels],
+                y=plot_df[column].tolist(),
+                customdata=hover_data,
+                mode="markers",
+                name=name,
+                marker=dict(color=color, size=11),
+                hovertemplate=(
+                    "%{customdata[0]} · %{customdata[1]}<br>"
+                    "Average return: %{y:.1f}%<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        height=520,
+        margin=dict(l=40, r=30, t=30, b=85),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="closest",
+    )
+    fig.update_xaxes(type="multicategory", title_text="Benchmark quartile / starting year")
+    fig.update_yaxes(title_text="Average rolling 1-year return (%)", ticksuffix="%", showgrid=True)
+    return fig
 
 
 def plot_rolling(df, months, focus_name, bench_label, chart_height=560, include_cols=None):
