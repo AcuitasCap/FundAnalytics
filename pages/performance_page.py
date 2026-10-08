@@ -21,7 +21,7 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     coerce_num,
-    make_up_down_capture_table,
+    make_up_down_capture_data,
     make_multi_fund_rolling_df,
     make_rolling_df,
     prepare_capture_bucket_table,
@@ -270,7 +270,7 @@ def performance_page(home_button):
         elif not window_ok(start_domain, end_domain, 12):
             st.info("Selected range is too short for rolling 1-year windows.")
         else:
-            capture_table = make_up_down_capture_table(
+            capture_table, capture_observations = make_up_down_capture_data(
                 focus_fund=focus_fund,
                 benchmark_name=bench_label,
                 start_domain=start_domain,
@@ -279,7 +279,7 @@ def performance_page(home_button):
             if capture_table.empty:
                 st.info("No overlapping precomputed 1-year fund and benchmark returns were found.")
             else:
-                capture_fig = plot_up_down_capture(capture_table, focus_fund, bench_label)
+                capture_fig = plot_up_down_capture(capture_observations, focus_fund, bench_label)
                 if capture_fig is not None:
                     st.plotly_chart(capture_fig, use_container_width=True)
 

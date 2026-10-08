@@ -7,39 +7,43 @@ import plotly.graph_objects as go
 from services.performance_returns import CAPTURE_BUCKETS, window_label_series
 
 
-def plot_up_down_capture(capture_table, focus_name, benchmark_name):
-    """Plot the fund and benchmark averages by bucket and starting year."""
-    required = {
+def plot_up_down_capture(observations, focus_name, benchmark_name):
+    """Plot each matched rolling return under its quartile and start year."""
+    columns = [
         "Benchmark bucket",
         "Starting year",
-        "Average benchmark return (%)",
-        "Average focus fund return (%)",
-    }
-    if capture_table is None or capture_table.empty or not required.issubset(capture_table.columns):
+        "asof_date",
+        "Benchmark return (%)",
+        "Focus fund return (%)",
+    ]
+    if observations is None or observations.empty or not set(columns).issubset(observations.columns):
         return None
 
-    plot_df = capture_table.loc[:, list(required)].copy()
+    plot_df = observations.loc[:, columns].copy()
+    plot_df["Benchmark bucket"] = plot_df["Benchmark bucket"].astype(str)
     plot_df = plot_df[plot_df["Benchmark bucket"].isin(CAPTURE_BUCKETS)].copy()
-    for column in ["Starting year", "Average benchmark return (%)", "Average focus fund return (%)"]:
+    for column in ["Starting year", "Benchmark return (%)", "Focus fund return (%)"]:
         plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
-    plot_df = plot_df.dropna(subset=["Starting year"])
+    plot_df["asof_date"] = pd.to_datetime(plot_df["asof_date"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Starting year", "asof_date"])
     if plot_df.empty:
         return None
 
     plot_df["bucket_order"] = plot_df["Benchmark bucket"].map(
         {bucket: index for index, bucket in enumerate(CAPTURE_BUCKETS)}
     ).astype(int)
-    plot_df = plot_df.sort_values(["bucket_order", "Starting year"])
-    bucket_labels = plot_df["Benchmark bucket"].replace(
-        {"Middle two quartiles": "Middle quartiles"}
-    ).astype(str).tolist()
+    plot_df = plot_df.sort_values(["bucket_order", "Starting year", "asof_date"])
+    bucket_labels = [
+        "Middle quartiles" if bucket == "Middle two quartiles" else bucket
+        for bucket in plot_df["Benchmark bucket"]
+    ]
     year_labels = plot_df["Starting year"].astype(int).astype(str).tolist()
-    hover_data = list(zip(bucket_labels, year_labels))
+    hover_data = list(zip(bucket_labels, year_labels, plot_df["asof_date"].dt.strftime("%b %Y")))
 
     fig = go.Figure()
     for name, column, color in [
-        (benchmark_name, "Average benchmark return (%)", "#f28e2b"),
-        (focus_name, "Average focus fund return (%)", "#1f77b4"),
+        (benchmark_name, "Benchmark return (%)", "#f28e2b"),
+        (focus_name, "Focus fund return (%)", "#1f77b4"),
     ]:
         fig.add_trace(
             go.Scatter(
@@ -48,10 +52,11 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
                 customdata=hover_data,
                 mode="markers",
                 name=name,
-                marker=dict(color=color, size=11),
+                marker=dict(color=color, size=9, opacity=0.75),
                 hovertemplate=(
                     "%{customdata[0]} · %{customdata[1]}<br>"
-                    "Average return: %{y:.1f}%<extra>%{fullData.name}</extra>"
+                    "Rolling period ending %{customdata[2]}<br>"
+                    "Return: %{y:.1f}%<extra>%{fullData.name}</extra>"
                 ),
             )
         )
@@ -63,7 +68,7 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
         hovermode="closest",
     )
     fig.update_xaxes(type="multicategory", title_text="Benchmark quartile / starting year")
-    fig.update_yaxes(title_text="Average rolling 1-year return (%)", ticksuffix="%", showgrid=True)
+    fig.update_yaxes(title_text="Rolling 1-year return (%)", ticksuffix="%", showgrid=True)
     return fig
 
 

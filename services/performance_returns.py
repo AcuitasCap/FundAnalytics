@@ -347,9 +347,16 @@ CAPTURE_VALUE_COLUMNS = [
     "Median capture (%)",
     "Observations",
 ]
+CAPTURE_OBSERVATION_COLUMNS = [
+    "asof_date",
+    "Benchmark bucket",
+    "Starting year",
+    "Benchmark return (%)",
+    "Focus fund return (%)",
+]
 
 
-def build_up_down_capture_table(
+def build_up_down_capture_observations(
     fund_roll: pd.DataFrame,
     bench_roll: pd.DataFrame,
     *,
@@ -357,20 +364,11 @@ def build_up_down_capture_table(
     benchmark_name: str,
     start_domain,
     end_domain,
-    capture_cap: float = 5.0,
 ) -> pd.DataFrame:
-    """Summarise pointwise 1Y capture by benchmark quartile and window-start year.
-
-    Quartile thresholds are calculated from all valid benchmark observations in
-    the selected domain. Row calculations use dates where both the focus fund
-    and benchmark have a stored 12-month return. Individual capture ratios are
-    clipped to ``[-capture_cap, capture_cap]`` before taking their median.
-    """
-    empty = pd.DataFrame(columns=CAPTURE_COLUMNS)
+    """Match stored 1Y returns and assign each observation a benchmark quartile."""
+    empty = pd.DataFrame(columns=CAPTURE_OBSERVATION_COLUMNS)
     if fund_roll is None or bench_roll is None or fund_roll.empty or bench_roll.empty:
         return empty
-    if capture_cap <= 0:
-        raise ValueError("capture_cap must be positive")
 
     fund = fund_roll.copy()
     bench = bench_roll.copy()
@@ -415,16 +413,26 @@ def build_up_down_capture_table(
     )
     if merged.empty:
         return empty
+    merged["Benchmark return (%)"] = merged["benchmark_return"] * 100.0
+    merged["Focus fund return (%)"] = merged["fund_return"] * 100.0
+    return merged[CAPTURE_OBSERVATION_COLUMNS].sort_values("asof_date").reset_index(drop=True)
 
-    valid_capture = (
-        np.isfinite(merged["fund_return"])
-        & np.isfinite(merged["benchmark_return"])
-        & (merged["benchmark_return"] != 0)
-    )
+
+def _summarize_capture_observations(observations: pd.DataFrame, capture_cap: float) -> pd.DataFrame:
+    """Summarise matched observations by quartile and window-start year."""
+    if capture_cap <= 0:
+        raise ValueError("capture_cap must be positive")
+    empty = pd.DataFrame(columns=CAPTURE_COLUMNS)
+    if observations.empty:
+        return empty
+
+    merged = observations.copy()
+    benchmark_return = merged["Benchmark return (%)"]
+    fund_return = merged["Focus fund return (%)"]
+    valid_capture = np.isfinite(fund_return) & np.isfinite(benchmark_return) & (benchmark_return != 0)
     merged["capture"] = np.nan
     merged.loc[valid_capture, "capture"] = (
-        merged.loc[valid_capture, "fund_return"]
-        / merged.loc[valid_capture, "benchmark_return"]
+        fund_return.loc[valid_capture] / benchmark_return.loc[valid_capture]
     ).clip(-capture_cap, capture_cap)
 
     rows = []
@@ -436,8 +444,8 @@ def build_up_down_capture_table(
             {
                 "Benchmark bucket": bucket,
                 "Starting year": int(starting_year),
-                "Average benchmark return (%)": float(group["benchmark_return"].mean() * 100.0),
-                "Average focus fund return (%)": float(group["fund_return"].mean() * 100.0),
+                "Average benchmark return (%)": float(group["Benchmark return (%)"].mean()),
+                "Average focus fund return (%)": float(group["Focus fund return (%)"].mean()),
                 "Median capture (%)": (
                     float(captures.median() * 100.0) if not captures.empty else np.nan
                 ),
@@ -449,6 +457,34 @@ def build_up_down_capture_table(
     bucket_order = pd.CategoricalDtype(CAPTURE_BUCKETS, ordered=True)
     result["Benchmark bucket"] = result["Benchmark bucket"].astype(bucket_order)
     return result.sort_values(["Benchmark bucket", "Starting year"]).reset_index(drop=True)
+
+
+def build_up_down_capture_table(
+    fund_roll: pd.DataFrame,
+    bench_roll: pd.DataFrame,
+    *,
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+    capture_cap: float = 5.0,
+) -> pd.DataFrame:
+    """Summarise pointwise 1Y capture by benchmark quartile and window-start year.
+
+    Quartile thresholds are calculated from all valid benchmark observations in
+    the selected domain. Row calculations use dates where both the focus fund
+    and benchmark have a stored 12-month return. Individual capture ratios are
+    clipped to ``[-capture_cap, capture_cap]`` before taking their median.
+    """
+    observations = build_up_down_capture_observations(
+        fund_roll,
+        bench_roll,
+        focus_fund=focus_fund,
+        benchmark_name=benchmark_name,
+        start_domain=start_domain,
+        end_domain=end_domain,
+    )
+    return _summarize_capture_observations(observations, capture_cap)
 
 
 def prepare_capture_bucket_table(capture_table: pd.DataFrame, bucket: str) -> pd.DataFrame:
@@ -486,13 +522,13 @@ def prepare_capture_bucket_table(capture_table: pd.DataFrame, bucket: str) -> pd
     )
 
 
-def make_up_down_capture_table(
+def _load_up_down_capture_returns(
     focus_fund: str,
     benchmark_name: str,
     start_domain,
     end_domain,
-) -> pd.DataFrame:
-    """Fetch precomputed 12-month returns and build the capture table."""
+):
+    """Fetch both stored 12-month return series once for the selected period."""
     first_asof = (
         pd.Timestamp(start_domain) + pd.DateOffset(months=12)
     ).to_period("M").to_timestamp("M")
@@ -508,6 +544,40 @@ def make_up_down_capture_table(
         bench_name=benchmark_name,
         start=first_asof,
         end=last_asof,
+    )
+    return fund_roll, bench_roll
+
+
+def make_up_down_capture_data(
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return summary rows and the matched observations used to make them."""
+    fund_roll, bench_roll = _load_up_down_capture_returns(
+        focus_fund, benchmark_name, start_domain, end_domain
+    )
+    observations = build_up_down_capture_observations(
+        fund_roll,
+        bench_roll,
+        focus_fund=focus_fund,
+        benchmark_name=benchmark_name,
+        start_domain=start_domain,
+        end_domain=end_domain,
+    )
+    return _summarize_capture_observations(observations, 5.0), observations
+
+
+def make_up_down_capture_table(
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+) -> pd.DataFrame:
+    """Fetch precomputed 12-month returns and build the capture table."""
+    fund_roll, bench_roll = _load_up_down_capture_returns(
+        focus_fund, benchmark_name, start_domain, end_domain
     )
     return build_up_down_capture_table(
         fund_roll,
