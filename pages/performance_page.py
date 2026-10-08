@@ -294,7 +294,8 @@ def performance_page(home_button):
                     st.plotly_chart(ranked_fig, use_container_width=True)
                     st.caption(
                         "Each position is one rolling 1-year period. The fund line uses the same "
-                        "periods as the benchmark line, ranked by benchmark return within each quartile."
+                        "periods as the benchmark line, ranked by benchmark return within each quartile. "
+                        "Hit-rate is the share of these periods in which the fund return exceeds the benchmark return."
                     )
 
                 with st.expander("View up / down capture tables", expanded=False):

@@ -341,6 +341,7 @@ CAPTURE_COLUMNS = [
 ]
 
 CAPTURE_BUCKETS = ["Top quartile", "Middle two quartiles", "Bottom quartile"]
+CAPTURE_QUARTILES = ["Top quartile", "Second quartile", "Third quartile", "Bottom quartile"]
 CAPTURE_VALUE_COLUMNS = [
     "Average benchmark return (%)",
     "Average focus fund return (%)",
@@ -350,6 +351,7 @@ CAPTURE_VALUE_COLUMNS = [
 CAPTURE_OBSERVATION_COLUMNS = [
     "asof_date",
     "Benchmark bucket",
+    "Benchmark quartile",
     "Starting year",
     "Benchmark return (%)",
     "Focus fund return (%)",
@@ -396,16 +398,26 @@ def build_up_down_capture_observations(
         return empty
 
     q25 = float(bench["benchmark_return"].quantile(0.25))
+    q50 = float(bench["benchmark_return"].quantile(0.50))
     q75 = float(bench["benchmark_return"].quantile(0.75))
     bench["Benchmark bucket"] = np.select(
         [bench["benchmark_return"] <= q25, bench["benchmark_return"] >= q75],
         ["Bottom quartile", "Top quartile"],
         default="Middle two quartiles",
     )
+    bench["Benchmark quartile"] = np.select(
+        [
+            bench["benchmark_return"] <= q25,
+            bench["benchmark_return"] >= q75,
+            bench["benchmark_return"] >= q50,
+        ],
+        ["Bottom quartile", "Top quartile", "Second quartile"],
+        default="Third quartile",
+    )
     bench["Starting year"] = bench["window_start"].dt.year.astype(int)
 
     merged = bench[
-        ["asof_date", "benchmark_return", "Benchmark bucket", "Starting year"]
+        ["asof_date", "benchmark_return", "Benchmark bucket", "Benchmark quartile", "Starting year"]
     ].merge(
         fund[["asof_date", "fund_return"]],
         on="asof_date",

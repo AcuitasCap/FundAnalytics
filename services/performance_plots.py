@@ -4,15 +4,15 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from services.performance_returns import CAPTURE_BUCKETS, window_label_series
+from services.performance_returns import CAPTURE_BUCKETS, CAPTURE_QUARTILES, window_label_series
 
 
-def _capture_bucket_positions(plot_df):
+def _capture_bucket_positions(plot_df, bucket_order=CAPTURE_BUCKETS):
     """Assign fixed x positions so each bucket keeps its supplied row order."""
     positioned = []
     spans = []
     next_position = 0
-    for bucket in CAPTURE_BUCKETS:
+    for bucket in bucket_order:
         group = plot_df.loc[plot_df["Benchmark bucket"] == bucket].copy()
         if group.empty:
             continue
@@ -23,16 +23,19 @@ def _capture_bucket_positions(plot_df):
     return pd.concat(positioned, ignore_index=True), spans
 
 
-def _style_capture_bucket_axis(fig, spans, *, years=None):
+def _style_capture_bucket_axis(fig, spans, *, years=None, hit_rates=None):
     for index, (bucket, first, last) in enumerate(spans):
         if index:
             fig.add_vline(x=first - 1.5, line_color="#d1d5db", line_dash="dot")
+        label = "Middle quartiles" if bucket == "Middle two quartiles" else bucket
+        if hit_rates is not None:
+            label += f"<br>Hit-rate: {hit_rates[bucket]:.1f}%"
         fig.add_annotation(
             x=(first + last) / 2,
             y=-0.20 if years is not None else -0.10,
             xref="x",
             yref="paper",
-            text="Middle quartiles" if bucket == "Middle two quartiles" else bucket,
+            text=label,
             showarrow=False,
             font=dict(size=12),
         )
@@ -120,7 +123,7 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
 def plot_up_down_capture_ranked_returns(observations, focus_name, benchmark_name):
     """Plot individual matched returns as lines ordered by benchmark return."""
     columns = [
-        "Benchmark bucket",
+        "Benchmark quartile",
         "Starting year",
         "asof_date",
         "Benchmark return (%)",
@@ -129,9 +132,11 @@ def plot_up_down_capture_ranked_returns(observations, focus_name, benchmark_name
     if observations is None or observations.empty or not set(columns).issubset(observations.columns):
         return None
 
-    plot_df = observations.loc[:, columns].copy()
+    plot_df = observations.loc[:, columns].rename(
+        columns={"Benchmark quartile": "Benchmark bucket"}
+    ).copy()
     plot_df["Benchmark bucket"] = plot_df["Benchmark bucket"].astype(str)
-    plot_df = plot_df[plot_df["Benchmark bucket"].isin(CAPTURE_BUCKETS)].copy()
+    plot_df = plot_df[plot_df["Benchmark bucket"].isin(CAPTURE_QUARTILES)].copy()
     for column in ["Benchmark return (%)", "Focus fund return (%)"]:
         plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
     plot_df["asof_date"] = pd.to_datetime(plot_df["asof_date"], errors="coerce")
@@ -144,7 +149,11 @@ def plot_up_down_capture_ranked_returns(observations, focus_name, benchmark_name
     plot_df = plot_df.sort_values(
         ["Benchmark return (%)", "asof_date"], ascending=[False, True]
     )
-    plot_df, spans = _capture_bucket_positions(plot_df)
+    plot_df, spans = _capture_bucket_positions(plot_df, CAPTURE_QUARTILES)
+    hit_rates = {
+        bucket: 100.0 * (group["Focus fund return (%)"] > group["Benchmark return (%)"]).mean()
+        for bucket, group in plot_df.groupby("Benchmark bucket")
+    }
 
     fig = go.Figure()
     for bucket_index, (bucket, _, _) in enumerate(spans):
@@ -178,11 +187,11 @@ def plot_up_down_capture_ranked_returns(observations, focus_name, benchmark_name
 
     fig.update_layout(
         height=520,
-        margin=dict(l=40, r=30, t=45, b=85),
+        margin=dict(l=40, r=30, t=45, b=105),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
     )
-    _style_capture_bucket_axis(fig, spans)
+    _style_capture_bucket_axis(fig, spans, hit_rates=hit_rates)
     fig.update_yaxes(title_text="Rolling 1-year return (%)", ticksuffix="%", showgrid=True)
     return fig
 
