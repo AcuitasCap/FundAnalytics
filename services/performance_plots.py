@@ -7,6 +7,53 @@ import plotly.graph_objects as go
 from services.performance_returns import CAPTURE_BUCKETS, window_label_series
 
 
+def _capture_bucket_positions(plot_df):
+    """Assign fixed x positions so each bucket keeps its supplied row order."""
+    positioned = []
+    spans = []
+    next_position = 0
+    for bucket in CAPTURE_BUCKETS:
+        group = plot_df.loc[plot_df["Benchmark bucket"] == bucket].copy()
+        if group.empty:
+            continue
+        group["x_position"] = range(next_position, next_position + len(group))
+        spans.append((bucket, next_position, next_position + len(group) - 1))
+        positioned.append(group)
+        next_position += len(group) + 2
+    return pd.concat(positioned, ignore_index=True), spans
+
+
+def _style_capture_bucket_axis(fig, spans, *, years=None):
+    for index, (bucket, first, last) in enumerate(spans):
+        if index:
+            fig.add_vline(x=first - 1.5, line_color="#d1d5db", line_dash="dot")
+        fig.add_annotation(
+            x=(first + last) / 2,
+            y=-0.20 if years is not None else -0.10,
+            xref="x",
+            yref="paper",
+            text="Middle quartiles" if bucket == "Middle two quartiles" else bucket,
+            showarrow=False,
+            font=dict(size=12),
+        )
+    axis_options = dict(
+        type="linear",
+        range=[spans[0][1] - 0.5, spans[-1][2] + 0.5],
+        showgrid=False,
+        zeroline=False,
+    )
+    if years is None:
+        axis_options.update(showticklabels=False, ticks="")
+    else:
+        axis_options.update(
+            tickmode="array",
+            tickvals=years["x_position"].tolist(),
+            ticktext=years["Starting year"].astype(int).astype(str).tolist(),
+            tickangle=0,
+        )
+    fig.update_xaxes(**axis_options)
+
+
 def plot_up_down_capture(capture_table, focus_name, benchmark_name):
     """Plot yearly average returns, ranked within each benchmark quartile."""
     columns = [
@@ -27,13 +74,11 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
     if plot_df.empty:
         return None
 
-    plot_df["bucket_order"] = plot_df["Benchmark bucket"].map(
-        {bucket: index for index, bucket in enumerate(CAPTURE_BUCKETS)}
-    ).astype(int)
     plot_df = plot_df.sort_values(
-        ["bucket_order", "Average benchmark return (%)", "Starting year"],
-        ascending=[True, False, True],
+        ["Average benchmark return (%)", "Starting year"],
+        ascending=[False, True],
     )
+    plot_df, spans = _capture_bucket_positions(plot_df)
     bucket_labels = [
         "Middle quartiles" if bucket == "Middle two quartiles" else bucket
         for bucket in plot_df["Benchmark bucket"]
@@ -48,7 +93,7 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
     ]:
         fig.add_trace(
             go.Scatter(
-                x=[bucket_labels, year_labels],
+                x=plot_df["x_position"].tolist(),
                 y=plot_df[column].tolist(),
                 customdata=hover_data,
                 mode="markers",
@@ -63,12 +108,82 @@ def plot_up_down_capture(capture_table, focus_name, benchmark_name):
 
     fig.update_layout(
         height=520,
-        margin=dict(l=40, r=30, t=30, b=85),
+        margin=dict(l=40, r=30, t=45, b=115),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="closest",
     )
-    fig.update_xaxes(type="multicategory", title_text="Benchmark quartile / starting year")
+    _style_capture_bucket_axis(fig, spans, years=plot_df)
     fig.update_yaxes(title_text="Average rolling 1-year return (%)", ticksuffix="%", showgrid=True)
+    return fig
+
+
+def plot_up_down_capture_ranked_returns(observations, focus_name, benchmark_name):
+    """Plot individual matched returns as lines ordered by benchmark return."""
+    columns = [
+        "Benchmark bucket",
+        "Starting year",
+        "asof_date",
+        "Benchmark return (%)",
+        "Focus fund return (%)",
+    ]
+    if observations is None or observations.empty or not set(columns).issubset(observations.columns):
+        return None
+
+    plot_df = observations.loc[:, columns].copy()
+    plot_df["Benchmark bucket"] = plot_df["Benchmark bucket"].astype(str)
+    plot_df = plot_df[plot_df["Benchmark bucket"].isin(CAPTURE_BUCKETS)].copy()
+    for column in ["Benchmark return (%)", "Focus fund return (%)"]:
+        plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
+    plot_df["asof_date"] = pd.to_datetime(plot_df["asof_date"], errors="coerce")
+    plot_df = plot_df.dropna(
+        subset=["asof_date", "Benchmark return (%)", "Focus fund return (%)"]
+    )
+    if plot_df.empty:
+        return None
+
+    plot_df = plot_df.sort_values(
+        ["Benchmark return (%)", "asof_date"], ascending=[False, True]
+    )
+    plot_df, spans = _capture_bucket_positions(plot_df)
+
+    fig = go.Figure()
+    for bucket_index, (bucket, _, _) in enumerate(spans):
+        group = plot_df.loc[plot_df["Benchmark bucket"] == bucket]
+        hover_data = list(zip(
+            group["Starting year"].astype(int).astype(str),
+            group["asof_date"].dt.strftime("%b %Y"),
+        ))
+        for name, column, color in [
+            (benchmark_name, "Benchmark return (%)", "#f28e2b"),
+            (focus_name, "Focus fund return (%)", "#1f77b4"),
+        ]:
+            fig.add_trace(
+                go.Scatter(
+                    x=group["x_position"].tolist(),
+                    y=group[column].tolist(),
+                    customdata=hover_data,
+                    mode="lines" if len(group) > 1 else "markers",
+                    name=name,
+                    legendgroup=name,
+                    showlegend=bucket_index == 0,
+                    line=dict(color=color, width=2.5),
+                    marker=dict(color=color, size=8),
+                    hovertemplate=(
+                        f"{bucket}<br>Starting year %{{customdata[0]}}<br>"
+                        "Rolling period ending %{customdata[1]}<br>"
+                        "Return: %{y:.1f}%<extra>%{fullData.name}</extra>"
+                    ),
+                )
+            )
+
+    fig.update_layout(
+        height=520,
+        margin=dict(l=40, r=30, t=45, b=85),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="closest",
+    )
+    _style_capture_bucket_axis(fig, spans)
+    fig.update_yaxes(title_text="Rolling 1-year return (%)", ticksuffix="%", showgrid=True)
     return fig
 
 

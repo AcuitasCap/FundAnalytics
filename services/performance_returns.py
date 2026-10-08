@@ -548,6 +548,27 @@ def _load_up_down_capture_returns(
     return fund_roll, bench_roll
 
 
+def make_up_down_capture_data(
+    focus_fund: str,
+    benchmark_name: str,
+    start_domain,
+    end_domain,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fetch stored returns once and return yearly summaries and matched observations."""
+    fund_roll, bench_roll = _load_up_down_capture_returns(
+        focus_fund, benchmark_name, start_domain, end_domain
+    )
+    observations = build_up_down_capture_observations(
+        fund_roll,
+        bench_roll,
+        focus_fund=focus_fund,
+        benchmark_name=benchmark_name,
+        start_domain=start_domain,
+        end_domain=end_domain,
+    )
+    return _summarize_capture_observations(observations, 5.0), observations
+
+
 def make_up_down_capture_table(
     focus_fund: str,
     benchmark_name: str,

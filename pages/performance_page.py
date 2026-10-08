@@ -14,6 +14,7 @@ from services.performance_plots import (
     plot_multi_fund_rolling,
     plot_rolling,
     plot_up_down_capture,
+    plot_up_down_capture_ranked_returns,
     style_relative_multi_horizon,
 )
 from services.performance_returns import (
@@ -21,7 +22,7 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     coerce_num,
-    make_up_down_capture_table,
+    make_up_down_capture_data,
     make_multi_fund_rolling_df,
     make_rolling_df,
     prepare_capture_bucket_table,
@@ -270,7 +271,7 @@ def performance_page(home_button):
         elif not window_ok(start_domain, end_domain, 12):
             st.info("Selected range is too short for rolling 1-year windows.")
         else:
-            capture_table = make_up_down_capture_table(
+            capture_table, capture_observations = make_up_down_capture_data(
                 focus_fund=focus_fund,
                 benchmark_name=bench_label,
                 start_domain=start_domain,
@@ -281,7 +282,20 @@ def performance_page(home_button):
             else:
                 capture_fig = plot_up_down_capture(capture_table, focus_fund, bench_label)
                 if capture_fig is not None:
+                    st.markdown("**Yearly average returns**")
                     st.plotly_chart(capture_fig, use_container_width=True)
+                    st.caption("Starting years are ranked by average benchmark return within each quartile.")
+
+                ranked_fig = plot_up_down_capture_ranked_returns(
+                    capture_observations, focus_fund, bench_label
+                )
+                if ranked_fig is not None:
+                    st.markdown("**Individual rolling returns, ranked by benchmark return**")
+                    st.plotly_chart(ranked_fig, use_container_width=True)
+                    st.caption(
+                        "Each position is one rolling 1-year period. The fund line uses the same "
+                        "periods as the benchmark line, ranked by benchmark return within each quartile."
+                    )
 
                 with st.expander("View up / down capture tables", expanded=False):
                     def format_observations(value):
