@@ -13,7 +13,6 @@ from services.performance_plots import (
     df_to_table_figure,
     plot_multi_fund_rolling,
     plot_rolling,
-    plot_up_down_capture,
     plot_up_down_capture_ranked_returns,
     style_relative_multi_horizon,
 )
@@ -30,6 +29,74 @@ from services.performance_returns import (
     to_eom,
     yearly_returns_with_custom_domain,
 )
+
+
+def _fund_picker_options(category_funds, shortlisted_funds):
+    """Keep shortlisted funds available when market-cap filters change."""
+    return ["ALL", *sorted(set(category_funds) | set(shortlisted_funds))]
+
+
+def _save_performance_shortlist(state, category_funds):
+    picked = state.get("perf_fund_picker", [])
+    if "ALL" in picked:
+        picked = sorted(set(category_funds) | set(state.get("perf_shortlisted_funds", [])))
+    else:
+        picked = [fund for fund in picked if fund != "ALL"]
+    state["perf_shortlisted_funds"] = picked
+    state["perf_fund_picker"] = picked
+
+
+def _save_performance_focus(state):
+    state["perf_saved_focus_fund"] = state.get("perf_focus_picker", "-- none --")
+
+
+def _reset_performance_fund_selection(state):
+    state["perf_shortlisted_funds"] = []
+    state["perf_fund_picker"] = []
+    state["perf_saved_focus_fund"] = "-- none --"
+    state["perf_focus_picker"] = "-- none --"
+    state["perf_filters_applied"] = False
+
+
+def _render_performance_fund_shortlist(category_funds, all_funds):
+    state = st.session_state
+    all_funds = set(all_funds)
+    shortlisted = [
+        fund for fund in state.get("perf_shortlisted_funds", []) if fund in all_funds
+    ]
+    state["perf_shortlisted_funds"] = shortlisted
+    state["perf_fund_picker"] = shortlisted
+
+    st.markdown("**Funds (multi-select)**")
+    st.multiselect(
+        "Choose funds (include 'ALL' to add all funds in selected market-caps)",
+        options=_fund_picker_options(category_funds, shortlisted),
+        key="perf_fund_picker",
+        on_change=_save_performance_shortlist,
+        args=(state, category_funds),
+    )
+    funds_selected = state["perf_shortlisted_funds"]
+
+    saved_focus = state.get("perf_saved_focus_fund", "-- none --")
+    if saved_focus not in funds_selected:
+        saved_focus = "-- none --"
+    state["perf_saved_focus_fund"] = saved_focus
+    state["perf_focus_picker"] = saved_focus
+    focus_fund = st.selectbox(
+        "Focus fund (vs. peers)",
+        options=["-- none --", *funds_selected],
+        key="perf_focus_picker",
+        on_change=_save_performance_focus,
+        args=(state,),
+    )
+    st.button(
+        "Reset",
+        key="perf_fund_reset",
+        help="Clear the shortlisted funds and focus fund.",
+        on_click=_reset_performance_fund_selection,
+        args=(state,),
+    )
+    return funds_selected, focus_fund
 
 
 def performance_page(home_button):
@@ -79,11 +146,15 @@ def performance_page(home_button):
     all_caps = sorted(funds_df["market_cap"].dropna().unique().tolist())
     caps = checkbox_group("Market-cap (tick multiple as needed)", all_caps, "cap")
     st.divider()
-    if not caps:
+    all_funds = set(funds_df["fund"].dropna().unique().tolist())
+    shortlisted = set(st.session_state.get("perf_shortlisted_funds", [])) & all_funds
+    if not caps and not shortlisted:
         st.warning("Tick at least one Market-cap to continue.")
         st.stop()
 
-    filtered = funds_df[funds_df["market_cap"].isin(caps)].copy()
+    category_funds = sorted(
+        funds_df.loc[funds_df["market_cap"].isin(caps), "fund"].dropna().unique().tolist()
+    )
 
     if bench_df is not None and not bench_df.empty:
         bench_names = sorted(bench_df["benchmark_name"].dropna().unique().tolist())
@@ -110,24 +181,19 @@ def performance_page(home_button):
             bench_label = None
             bench_ser = None
 
-    filtered["date"] = to_eom(filtered["date"])
-    filtered["nav"] = coerce_num(filtered["nav"])
-    filtered = filtered.sort_values(["fund", "date"]).drop_duplicates(subset=["fund", "date"], keep="last")
-
-    fund_options = sorted(filtered["fund"].unique().tolist())
-    st.markdown("**Funds (multi-select)**")
-    funds_with_all = ["ALL"] + fund_options
-    funds_selected = st.multiselect("Choose funds (include 'ALL' for all in list)", options=funds_with_all, default=[])
-    if any(str(f).upper() == "ALL" for f in funds_selected):
-        funds_selected = fund_options
+    funds_selected, focus_fund = _render_performance_fund_shortlist(category_funds, all_funds)
     if not funds_selected:
         st.warning("Select at least one fund.")
         st.stop()
 
-    focus_fund = st.selectbox("Focus fund (vs. peers)", options=["-- none --"] + funds_selected, index=0)
     if focus_fund == "-- none --":
         st.warning("Pick a Focus fund to compute Peers Avg (we exclude the focus from peers).")
         st.stop()
+
+    filtered = funds_df[funds_df["fund"].isin(funds_selected)].copy()
+    filtered["date"] = to_eom(filtered["date"])
+    filtered["nav"] = coerce_num(filtered["nav"])
+    filtered = filtered.sort_values(["fund", "date"]).drop_duplicates(subset=["fund", "date"], keep="last")
 
     st.header("Performance analysis - rolling, yearly, and P2P")
 
@@ -280,12 +346,6 @@ def performance_page(home_button):
             if capture_table.empty:
                 st.info("No overlapping precomputed 1-year fund and benchmark returns were found.")
             else:
-                capture_fig = plot_up_down_capture(capture_table, focus_fund, bench_label)
-                if capture_fig is not None:
-                    st.markdown("**Yearly average returns**")
-                    st.plotly_chart(capture_fig, use_container_width=True)
-                    st.caption("Starting years are ranked by average benchmark return within each quartile.")
-
                 ranked_fig = plot_up_down_capture_ranked_returns(
                     capture_observations, focus_fund, bench_label
                 )

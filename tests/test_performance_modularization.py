@@ -3,6 +3,12 @@
 import ast
 import importlib
 from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def test_performance_page_and_services_import_without_app_legacy_helpers():
@@ -22,6 +28,44 @@ def test_performance_page_and_services_import_without_app_legacy_helpers():
     page_source = Path("pages/performance_page.py").read_text(encoding="utf-8")
     assert '"Up / down capture"' in page_source
     assert "Median capture (%)" in page_source
+
+
+def test_fund_shortlist_survives_category_changes_until_reset():
+    from streamlit.testing.v1 import AppTest
+
+    def selection_app():
+        import streamlit as st
+        from pages.performance_page import _render_performance_fund_shortlist
+
+        categories = st.multiselect("Market-cap categories", ["A", "B"], key="test_categories")
+        candidates = [fund for category, fund in [("A", "Fund A"), ("B", "Fund B")]
+                      if category in categories]
+        _render_performance_fund_shortlist(candidates, ["Fund A", "Fund B"])
+
+    app = AppTest.from_function(selection_app).run()
+    app.multiselect[0].set_value(["A"]).run()
+    app.multiselect[1].set_value(["Fund A"]).run()
+    app.selectbox[0].set_value("Fund A").run()
+
+    app.multiselect[0].set_value(["A", "B"]).run()
+    assert app.multiselect[1].value == ["Fund A"]
+    assert app.selectbox[0].value == "Fund A"
+
+    app.multiselect[1].set_value(["Fund A", "Fund B"]).run()
+    app.multiselect[0].set_value(["B"]).run()
+    assert app.multiselect[1].value == ["Fund A", "Fund B"]
+    assert app.selectbox[0].value == "Fund A"
+
+    app.multiselect[0].set_value([]).run()
+    assert app.multiselect[1].value == ["Fund A", "Fund B"]
+    app.multiselect[0].set_value(["B"]).run()
+    app.button[0].click().run()
+    assert app.multiselect[0].value == ["B"]
+    assert app.multiselect[1].value == []
+    assert app.selectbox[0].value == "-- none --"
+    app.multiselect[1].set_value(["ALL"]).run()
+    assert app.multiselect[1].value == ["Fund B"]
+    assert not app.exception
 
 
 def test_app13_does_not_define_extracted_performance_symbols():

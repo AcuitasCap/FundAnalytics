@@ -18,7 +18,6 @@ from services.performance_returns import (
     prepare_capture_bucket_table,
 )
 from services.performance_plots import (
-    plot_up_down_capture,
     plot_up_down_capture_ranked_returns,
 )
 
@@ -105,41 +104,6 @@ def test_bucket_table_is_ranked_and_ends_with_column_averages():
     assert average["Average focus fund return (%)"] == 19.0
     assert average["Median capture (%)"] == 100.0
     assert average["Observations"] == 3.0
-
-
-def test_capture_chart_ranks_yearly_averages_within_each_quartile():
-    capture_table = pd.DataFrame(
-        {
-            "Benchmark bucket": [
-                "Bottom quartile", "Top quartile", "Middle two quartiles",
-                "Top quartile", "Bottom quartile", "Middle two quartiles",
-            ],
-            "Starting year": [2021, 2021, 2020, 2023, 2019, 2022],
-            "Average benchmark return (%)": [-10.0, 15.0, 5.0, 25.0, -20.0, 8.0],
-            "Average focus fund return (%)": [-8.0, 18.0, 6.0, 20.0, -15.0, 9.0],
-            "Median capture (%)": [80.0, 120.0, 120.0, 80.0, 75.0, 112.5],
-            "Observations": [3, 2, 4, 4, 2, 5],
-        }
-    )
-    capture_table["Benchmark bucket"] = capture_table["Benchmark bucket"].astype(
-        pd.CategoricalDtype(
-            ["Top quartile", "Middle two quartiles", "Bottom quartile"], ordered=True
-        )
-    )
-
-    fig = plot_up_down_capture(capture_table, "Focus", "Benchmark")
-
-    assert fig.layout.xaxis.type == "linear"
-    assert len(fig.data) == 2
-    assert [trace.mode for trace in fig.data] == ["markers", "markers"]
-    assert [trace.marker.color for trace in fig.data] == ["#f28e2b", "#1f77b4"]
-    assert list(fig.data[0].x) == [0, 1, 4, 5, 8, 9]
-    assert list(fig.layout.xaxis.ticktext) == ["2023", "2021", "2022", "2020", "2021", "2019"]
-    assert [annotation.text for annotation in fig.layout.annotations] == [
-        "Top quartile", "Middle quartiles", "Bottom quartile"
-    ]
-    assert list(fig.data[0].y) == [25.0, 15.0, 8.0, 5.0, -10.0, -20.0]
-    assert list(fig.data[1].y) == [20.0, 18.0, 9.0, 6.0, -8.0, -15.0]
 
 
 def test_ranked_return_lines_preserve_benchmark_order_and_fund_alignment():
