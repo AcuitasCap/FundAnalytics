@@ -40,6 +40,42 @@ def test_fund_nav_validation_is_pure_dataframe_work():
     assert clean.loc[0, "fund_name"] == "Example Fund"
 
 
+def test_company_financial_validators_parse_uploaded_periods_without_database_access():
+    from features.update_db.validation import (
+        validate_annual_book_value,
+        validate_quarterly_pat,
+        validate_quarterly_sales,
+    )
+
+    quarterly_upload = pd.DataFrame(
+        {
+            "ISIN": ["ine000000001", "INE000000001"],
+            "Quarter end": [202503, 202506],
+            "Value": [100.0, 125.0],
+        }
+    )
+    for validate, value_column in (
+        (validate_quarterly_sales, "sales"),
+        (validate_quarterly_pat, "pat"),
+    ):
+        clean, summary = validate(quarterly_upload)
+        assert summary["rows_clean"] == 2
+        assert clean["isin"].tolist() == ["INE000000001", "INE000000001"]
+        assert clean["period_end"].dt.strftime("%Y-%m-%d").tolist() == [
+            "2025-03-31", "2025-06-30"
+        ]
+        assert clean["fiscal_quarter"].tolist() == [1, 2]
+        assert clean[value_column].tolist() == [100.0, 125.0]
+
+    annual_upload = pd.DataFrame(
+        {"ISIN": ["INE000000001"], "Year end": [202503], "Book value": [500.0]}
+    )
+    clean, summary = validate_annual_book_value(annual_upload)
+    assert summary["rows_clean"] == 1
+    assert clean.loc[0, "year_end"] == pd.Timestamp("2025-03-31")
+    assert clean.loc[0, "book_value"] == 500.0
+
+
 def test_writer_only_mutates_when_explicitly_called(monkeypatch):
     from features.update_db import writes
 

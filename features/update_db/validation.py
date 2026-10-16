@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from core.dates import parse_period_to_month_end
+
 FUND_NAV_COLS = {
     "fund_name": ["fund", "scheme", "scheme name", "fund_name"],
     "nav_date": ["date", "nav date", "month_end", "month-end"],
