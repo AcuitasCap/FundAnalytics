@@ -106,6 +106,47 @@ def test_writer_only_mutates_when_explicitly_called(monkeypatch):
     assert calls
 
 
+def test_annual_book_value_upload_checks_conflicts_before_inserting(monkeypatch):
+    from features.update_db import data, writes
+
+    statements = []
+
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+            return Result()
+
+    class Engine:
+        def begin(self):
+            class Context:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Context()
+
+    engine = Engine()
+    monkeypatch.setattr(data, "get_engine", lambda: engine)
+    monkeypatch.setattr(writes, "get_engine", lambda: engine)
+
+    writes.upload_annual_book_value(
+        pd.DataFrame(
+            [{"isin": "INE000000001", "year_end": pd.Timestamp("2025-03-31"),
+              "fiscal_year": 2025, "book_value": 500.0}]
+        )
+    )
+
+    assert len(statements) == 2
+    assert "stock_annual_book_value" in statements[0][0]
+    assert "INSERT INTO fundlab.stock_annual_book_value" in statements[1][0]
+
+
 def test_app_routes_only_to_extracted_update_db_page():
     source = open("app13.py", encoding="utf-8").read()
     assert "from features.update_db.page import update_db_page" in source
