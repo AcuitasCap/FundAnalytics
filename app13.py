@@ -12,6 +12,7 @@ from features.housekeeping.page import housekeeping_page
 from features.portfolio.page import portfolio_page
 from features.portfolio_quality.page import portfolio_quality_page
 from features.portfolio_valuations.page import portfolio_valuations_page
+from features.market_valuations.page import market_valuations_page
 from features.update_db.page import update_db_page
 from pages.performance_page import performance_page as performance_page_v2
 
@@ -47,7 +48,7 @@ def home_page() -> None:
 
         - **Performance** – NAV-based rolling returns, yearly returns, P2P, and PDF export.
         - **Portfolio quality** – RoE / RoCE and quality buckets based on portfolios.
-        - **Portfolio valuations** – P/E, P/B, P/S for funds vs peers.
+        - **Valuations** – fund and market P/E, P/B, P/S analysis.
         - **Portfolio** – Holdings explorer, active share, look-through.
         - **Update DB** – Upload and refresh raw datasets.
         - **Housekeeping** – Rebuild precomputed tables and diagnostics.
@@ -64,8 +65,8 @@ def home_page() -> None:
     if st.button("📊 Portfolio quality"):
         st.session_state["page"] = "Portfolio quality"
         st.rerun()
-    if st.button("💹 Portfolio valuations"):
-        st.session_state["page"] = "Portfolio valuations"
+    if st.button("💹 Valuations"):
+        st.session_state["page"] = "Valuations"
         st.rerun()
     if st.button("📉 Fund attribution"):
         st.session_state["page"] = "Fund attribution"
@@ -84,12 +85,26 @@ def home_page() -> None:
         st.rerun()
 
 
+def valuations_page() -> None:
+    """Choose between the existing fund analysis and market-wide valuations."""
+    home_button()
+    st.header("Valuations")
+    if st.button("Fund valuations"):
+        st.session_state["page"] = "Fund valuations"
+        st.rerun()
+    if st.button("Market valuations"):
+        st.session_state["page"] = "Market valuations"
+        st.rerun()
+
+
 # The router is intentionally the only place that connects page modules to Streamlit startup.
 PAGE_HANDLERS = {
     "Home": home_page,
     "Performance": lambda: performance_page_v2(home_button),
     "Portfolio quality": portfolio_quality_page,
-    "Portfolio valuations": portfolio_valuations_page,
+    "Valuations": valuations_page,
+    "Fund valuations": portfolio_valuations_page,
+    "Market valuations": market_valuations_page,
     "Fund attribution": fund_attribution_page,
     "Portfolio": portfolio_page,
     "Fund manager tenure": fund_manager_tenure_page,

@@ -64,7 +64,7 @@ def test_router_uses_extracted_valuations_page_and_layers_are_one_way():
     import app13
     from features.portfolio_valuations.page import portfolio_valuations_page
 
-    assert app13.PAGE_HANDLERS["Portfolio valuations"] is portfolio_valuations_page
+    assert app13.PAGE_HANDLERS["Fund valuations"] is portfolio_valuations_page
     tree = ast.parse((ROOT / "app13.py").read_text(encoding="utf-8"))
     functions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
     assert "portfolio_valuations_page" not in functions

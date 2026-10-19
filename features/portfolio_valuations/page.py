@@ -14,7 +14,10 @@ from .display import display_anchor_months, display_valuation_ranges
 
 def portfolio_valuations_page():
     home_button()
-    st.header("Portfolio valuations")
+    if st.button("← Valuations"):
+        st.session_state["page"] = "Valuations"
+        st.rerun()
+    st.header("Fund valuations")
 
     categories = fetch_categories()
     if not categories:
