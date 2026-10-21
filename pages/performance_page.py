@@ -20,13 +20,13 @@ from services.performance_returns import (
     CAPTURE_BUCKETS,
     _clean_bench,
     _clean_funds,
+    add_benchmark_rolling_returns,
     coerce_num,
     make_up_down_capture_data,
     make_multi_fund_rolling_df,
     make_rolling_df,
     prepare_capture_bucket_table,
-    rolling_absolute_return_stats,
-    rolling_outperf_stats,
+    rolling_comparison_stats,
     to_eom,
     yearly_returns_with_custom_domain,
 )
@@ -98,6 +98,22 @@ def _render_performance_fund_shortlist(category_funds, all_funds):
         args=(state,),
     )
     return funds_selected, focus_fund
+
+
+def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
+    observations, stats = rolling_comparison_stats(df, fund_names, bench_label)
+    st.subheader(f"{horizon} rolling return stats ({observations} observations)")
+    if not bench_label:
+        st.info("Select a benchmark to calculate return stats.")
+    elif stats.empty:
+        st.info("No rolling windows are shared by the selected funds and benchmark.")
+    else:
+        st.dataframe(stats.round(2), use_container_width=True)
+        st.caption(
+            "All rows use the same overlapping windows. Relative values are percentage-point "
+            "differences from the benchmark, with probability of beating it. Absolute values "
+            "are returns, with probability of a positive return."
+        )
 
 
 def performance_page(home_button):
@@ -277,15 +293,7 @@ def performance_page(home_button):
                 st.info("Insufficient data or no series selected for 3Y rolling chart.")
             else:
                 st.plotly_chart(fig3, use_container_width=True)
-                stats3 = rolling_outperf_stats(df3, focus_fund, bench_label)
-                st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-                st.dataframe(stats3.round(2) if stats3 is not None else pd.DataFrame({"info": ["Not enough overlapping 3Y windows"]}))
-                absolute3 = rolling_absolute_return_stats(df3, focus_fund, bench_label)
-                st.subheader("Absolute return stats (3Y rolling)")
-                st.dataframe(
-                    absolute3.round(2) if absolute3 is not None else pd.DataFrame({"info": ["Not enough overlapping 3Y fund and benchmark windows"]}),
-                    use_container_width=True,
-                )
+                _render_rolling_comparison_stats(df3, [focus_fund], bench_label, "3Y")
                 if st.checkbox("To print", key="print_fig3"):
                     print_items.append(("3Y Rolling - Focus/Peers/Benchmark", fig3))
 
@@ -302,15 +310,7 @@ def performance_page(home_button):
                 st.info("Insufficient data or no series selected for 1Y rolling chart.")
             else:
                 st.plotly_chart(fig1, use_container_width=True)
-                stats1 = rolling_outperf_stats(df1, focus_fund, bench_label)
-                st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
-                st.dataframe(stats1.round(2) if stats1 is not None else pd.DataFrame({"info": ["Not enough overlapping 1Y windows"]}))
-                absolute1 = rolling_absolute_return_stats(df1, focus_fund, bench_label)
-                st.subheader("Absolute return stats (1Y rolling)")
-                st.dataframe(
-                    absolute1.round(2) if absolute1 is not None else pd.DataFrame({"info": ["Not enough overlapping 1Y fund and benchmark windows"]}),
-                    use_container_width=True,
-                )
+                _render_rolling_comparison_stats(df1, [focus_fund], bench_label, "1Y")
                 if st.checkbox("To print", key="print_fig1"):
                     print_items.append(("1Y Rolling - Focus/Peers/Benchmark", fig1))
 
@@ -326,6 +326,8 @@ def performance_page(home_button):
                 st.info("Not enough data to plot selected funds (3Y).")
             else:
                 st.plotly_chart(fig3m, use_container_width=True)
+                stats3m = add_benchmark_rolling_returns(df3m, bench_label, 36)
+                _render_rolling_comparison_stats(stats3m, mf3, bench_label, "3Y")
                 if st.checkbox("To print", key="print_fig3m"):
                     print_items.append(("3Y Rolling - Multiple funds", fig3m))
 
@@ -340,6 +342,8 @@ def performance_page(home_button):
                 st.info("Not enough data to plot selected funds (1Y).")
             else:
                 st.plotly_chart(fig1m, use_container_width=True)
+                stats1m = add_benchmark_rolling_returns(df1m, bench_label, 12)
+                _render_rolling_comparison_stats(stats1m, mf1, bench_label, "1Y")
                 if st.checkbox("To print", key="print_fig1m"):
                     print_items.append(("1Y Rolling - Multiple funds", fig1m))
 

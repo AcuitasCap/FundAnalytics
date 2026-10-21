@@ -739,3 +739,67 @@ def rolling_absolute_return_stats(
             "Probability of positive return (%)": (matched > 0).mean() * 100.0,
         }
     ).rename_axis("Series")
+
+
+def add_benchmark_rolling_returns(
+    fund_returns: pd.DataFrame, benchmark_name: str | None, months: int
+) -> pd.DataFrame:
+    """Add the stored benchmark series to a multi-fund rolling return frame."""
+    if fund_returns is None or fund_returns.empty or not benchmark_name:
+        return pd.DataFrame() if fund_returns is None else fund_returns.copy()
+    bench_roll = load_bench_rolling(
+        window_months=months, bench_name=benchmark_name, start=None, end=None
+    )
+    result = fund_returns.copy()
+    if not bench_roll.empty:
+        benchmark = (
+            bench_roll.set_index("asof_date")["rolling_cagr"]
+            .sort_index()
+            .reindex(result.index)
+        )
+        result[benchmark_name] = pd.to_numeric(benchmark, errors="coerce") * 100.0
+    return result
+
+
+def rolling_comparison_stats(
+    df: pd.DataFrame, fund_names: list[str], benchmark_name: str | None
+) -> tuple[int, pd.DataFrame]:
+    """Relative and absolute stats on windows shared by selected funds and benchmark."""
+    funds = list(dict.fromkeys(fund_names))
+    if (
+        df is None
+        or df.empty
+        or not funds
+        or not benchmark_name
+        or benchmark_name in funds
+        or not set([*funds, benchmark_name]).issubset(df.columns)
+    ):
+        return 0, pd.DataFrame()
+
+    matched = df[[*funds, benchmark_name]].apply(pd.to_numeric, errors="coerce").dropna()
+    if matched.empty:
+        return 0, pd.DataFrame()
+
+    rows = []
+    labels = []
+    for section, series_names in (
+        ("Relative to benchmark (beat)", funds),
+        ("Absolute returns (positive)", [*funds, benchmark_name]),
+    ):
+        for name in series_names:
+            values = matched[name] - matched[benchmark_name] if section.startswith("Relative") else matched[name]
+            rows.append(
+                {
+                    "Median (%)": values.median(),
+                    "Mean (%)": values.mean(),
+                    "Min (%)": values.min(),
+                    "Max (%)": values.max(),
+                    "Probability (%)": (values > 0).mean() * 100.0,
+                }
+            )
+            labels.append((section, name))
+
+    result = pd.DataFrame(
+        rows, index=pd.MultiIndex.from_tuples(labels, names=["Section", "Series"])
+    )
+    return len(matched), result
