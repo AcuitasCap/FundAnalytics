@@ -711,3 +711,31 @@ def rolling_outperf_stats(df: pd.DataFrame, focus_name: str, bench_label: str | 
             "prob. of outperformance": [float((op > 0).mean() * 100.0)],
         }
     )
+
+
+def rolling_absolute_return_stats(
+    df: pd.DataFrame, focus_name: str, bench_label: str | None
+) -> pd.DataFrame | None:
+    """Summarise fund and benchmark returns on the same rolling windows."""
+    if (
+        df is None
+        or df.empty
+        or not bench_label
+        or focus_name not in df.columns
+        or bench_label not in df.columns
+    ):
+        return None
+
+    matched = df[[focus_name, bench_label]].apply(pd.to_numeric, errors="coerce").dropna()
+    if matched.empty:
+        return None
+
+    return pd.DataFrame(
+        {
+            "Median return (%)": matched.median(),
+            "Mean return (%)": matched.mean(),
+            "Min return (%)": matched.min(),
+            "Max return (%)": matched.max(),
+            "Probability of positive return (%)": (matched > 0).mean() * 100.0,
+        }
+    ).rename_axis("Series")

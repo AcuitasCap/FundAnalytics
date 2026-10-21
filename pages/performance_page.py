@@ -25,6 +25,7 @@ from services.performance_returns import (
     make_multi_fund_rolling_df,
     make_rolling_df,
     prepare_capture_bucket_table,
+    rolling_absolute_return_stats,
     rolling_outperf_stats,
     to_eom,
     yearly_returns_with_custom_domain,
@@ -279,6 +280,12 @@ def performance_page(home_button):
                 stats3 = rolling_outperf_stats(df3, focus_fund, bench_label)
                 st.subheader("3Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
                 st.dataframe(stats3.round(2) if stats3 is not None else pd.DataFrame({"info": ["Not enough overlapping 3Y windows"]}))
+                absolute3 = rolling_absolute_return_stats(df3, focus_fund, bench_label)
+                st.subheader("Absolute return stats (3Y rolling)")
+                st.dataframe(
+                    absolute3.round(2) if absolute3 is not None else pd.DataFrame({"info": ["Not enough overlapping 3Y fund and benchmark windows"]}),
+                    use_container_width=True,
+                )
                 if st.checkbox("To print", key="print_fig3"):
                     print_items.append(("3Y Rolling - Focus/Peers/Benchmark", fig3))
 
@@ -298,6 +305,12 @@ def performance_page(home_button):
                 stats1 = rolling_outperf_stats(df1, focus_fund, bench_label)
                 st.subheader("1Y Rolling Outperformance Stats (Focus fund vs Benchmark)")
                 st.dataframe(stats1.round(2) if stats1 is not None else pd.DataFrame({"info": ["Not enough overlapping 1Y windows"]}))
+                absolute1 = rolling_absolute_return_stats(df1, focus_fund, bench_label)
+                st.subheader("Absolute return stats (1Y rolling)")
+                st.dataframe(
+                    absolute1.round(2) if absolute1 is not None else pd.DataFrame({"info": ["Not enough overlapping 1Y fund and benchmark windows"]}),
+                    use_container_width=True,
+                )
                 if st.checkbox("To print", key="print_fig1"):
                     print_items.append(("1Y Rolling - Focus/Peers/Benchmark", fig1))
 
