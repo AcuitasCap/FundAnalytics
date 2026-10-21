@@ -150,8 +150,12 @@ def _with_end_to_end_stats(stats, bench_label, total_returns):
     return result
 
 
-def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon, end_to_end=None):
-    observations, stats = rolling_comparison_stats(df, fund_names, bench_label)
+def _render_rolling_comparison_stats(
+    df, fund_names, bench_label, horizon, end_to_end=None, use_percentiles=False
+):
+    observations, stats = rolling_comparison_stats(
+        df, fund_names, bench_label, use_percentiles=use_percentiles
+    )
     st.subheader(f"{horizon} rolling return stats ({observations} observations)")
     if not bench_label:
         st.info("Select a benchmark to calculate return stats.")
@@ -170,6 +174,8 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon, end_t
             "differences from the benchmark, with probability of beating it. Absolute values "
             "are returns, with probability of a positive return."
         )
+        if use_percentiles:
+            st.caption("The 10th and 90th percentiles describe the rolling return distribution; other statistics use all observations.")
         if end_to_end is not None:
             st.caption(
                 f"End-to-end is CAGR from {first_date:%b %Y} to {last_date:%b %Y}. "
@@ -393,7 +399,8 @@ def performance_page(home_button):
                     filtered, mf3, bench_ser, bench_label, start_domain, end_domain
                 )
                 _render_rolling_comparison_stats(
-                    stats3m, mf3, bench_label, "3Y", end_to_end=end_to_end3m
+                    stats3m, mf3, bench_label, "3Y", end_to_end=end_to_end3m,
+                    use_percentiles=True,
                 )
                 if st.checkbox("To print", key="print_fig3m"):
                     print_items.append(("3Y Rolling - Multiple funds", fig3m))
@@ -414,7 +421,8 @@ def performance_page(home_button):
                     filtered, mf1, bench_ser, bench_label, start_domain, end_domain
                 )
                 _render_rolling_comparison_stats(
-                    stats1m, mf1, bench_label, "1Y", end_to_end=end_to_end1m
+                    stats1m, mf1, bench_label, "1Y", end_to_end=end_to_end1m,
+                    use_percentiles=True,
                 )
                 if st.checkbox("To print", key="print_fig1m"):
                     print_items.append(("1Y Rolling - Multiple funds", fig1m))

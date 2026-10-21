@@ -762,7 +762,11 @@ def add_benchmark_rolling_returns(
 
 
 def rolling_comparison_stats(
-    df: pd.DataFrame, fund_names: list[str], benchmark_name: str | None
+    df: pd.DataFrame,
+    fund_names: list[str],
+    benchmark_name: str | None,
+    *,
+    use_percentiles: bool = False,
 ) -> tuple[int, pd.DataFrame]:
     """Relative and absolute stats on windows shared by selected funds and benchmark."""
     funds = list(dict.fromkeys(fund_names))
@@ -782,6 +786,8 @@ def rolling_comparison_stats(
 
     rows = []
     labels = []
+    lower_label = "10th percentile (%)" if use_percentiles else "Min (%)"
+    upper_label = "90th percentile (%)" if use_percentiles else "Max (%)"
     for section, series_names in (
         ("Relative to benchmark (beat)", funds),
         ("Absolute returns (positive)", [*funds, benchmark_name]),
@@ -792,8 +798,8 @@ def rolling_comparison_stats(
                 {
                     "Median (%)": values.median(),
                     "Mean (%)": values.mean(),
-                    "Min (%)": values.min(),
-                    "Max (%)": values.max(),
+                    lower_label: values.quantile(0.10) if use_percentiles else values.min(),
+                    upper_label: values.quantile(0.90) if use_percentiles else values.max(),
                     "Probability (%)": (values > 0).mean() * 100.0,
                 }
             )
