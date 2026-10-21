@@ -864,7 +864,12 @@ def compounding_profile_stats(
     names = list(dict.fromkeys(fund_names))
     if benchmark_name:
         names.append(benchmark_name)
-    columns = ["Break period (%)", "Upside / downside"]
+    columns = [
+        "Break period (%)",
+        "Average peak-to-peak return (%)",
+        "Average peak-to-trough return (%)",
+        "Upside / downside",
+    ]
     result = pd.DataFrame(np.nan, index=pd.Index(names, name="Series"), columns=columns)
     start = pd.Timestamp(start_domain).to_period("M").to_timestamp("M")
     end = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
@@ -889,17 +894,25 @@ def compounding_profile_stats(
 
         upside_factor = 1.0
         downside_factor = 1.0
+        peak_to_peak_returns = []
+        peak_to_trough_returns = []
         for first_peak, next_peak in zip(peaks, peaks[1:]):
             peak_nav = values[first_peak]
-            upside_factor *= values[next_peak] / peak_nav
+            peak_gain = values[next_peak] / peak_nav - 1.0
+            peak_to_peak_returns.append(peak_gain)
+            upside_factor *= 1.0 + peak_gain
             between = values[first_peak + 1:next_peak]
             if len(between) and between.min() < peak_nav:
-                downside_factor *= between.min() / peak_nav
+                trough_return = between.min() / peak_nav - 1.0
+                peak_to_trough_returns.append(trough_return)
+                downside_factor *= 1.0 + trough_return
 
         upside = upside_factor - 1.0
         downside = 1.0 - downside_factor
         result.loc[name] = [
             break_months / len(months) * 100.0,
+            float(np.mean(peak_to_peak_returns) * 100.0) if peak_to_peak_returns else np.nan,
+            float(np.mean(peak_to_trough_returns) * 100.0) if peak_to_trough_returns else np.nan,
             upside / downside if downside > 0 else np.nan,
         ]
 

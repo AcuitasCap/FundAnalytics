@@ -162,16 +162,16 @@ def _compounding_profile_table_html(profile):
         '<table style="border-collapse:collapse;width:100%;font-size:0.9rem">',
         "<thead><tr>",
     ]
-    for heading in ["Fund / benchmark", "Break period (%)", "Upside / downside"]:
+    for heading in ["Fund / benchmark", *profile.columns]:
         parts.append(f'<th scope="col" style="{border}text-align:left">{escape(heading)}</th>')
     parts.append("</tr></thead><tbody>")
     for series, row in profile.iterrows():
-        break_share = row["Break period (%)"]
-        ratio = row["Upside / downside"]
         parts.append("<tr>")
         parts.append(f'<th scope="row" style="{border}text-align:left;font-weight:400">{escape(str(series))}</th>')
-        parts.append(f'<td style="{border}text-align:right">{"None" if pd.isna(break_share) else f"{break_share:.1f}%"}</td>')
-        parts.append(f'<td style="{border}text-align:right">{"None" if pd.isna(ratio) else f"{ratio:.1f}×"}</td>')
+        for column, value in row.items():
+            suffix = "×" if column == "Upside / downside" else "%"
+            display = "None" if pd.isna(value) else f"{value:.1f}{suffix}"
+            parts.append(f'<td style="{border}text-align:right">{display}</td>')
         parts.append("</tr>")
     parts.append("</tbody></table></div>")
     return "".join(parts)
@@ -221,8 +221,9 @@ def _render_rolling_comparison_stats(
                 "Break period is the share of monthly NAVs below the running peak. Upside chains "
                 "returns between successive peaks, beginning with the first NAV. Downside chains "
                 "peak-to-trough losses between completed peak pairs; the ratio is upside divided by "
-                "the absolute downside. An unfinished drawdown at the end is excluded. A complete "
-                "monthly NAV series is required."
+                "the absolute downside. The two averages are arithmetic means of those individual "
+                "peak-to-peak gains and signed peak-to-trough losses. An unfinished drawdown at the "
+                "end is excluded. A complete monthly NAV series is required."
             )
 
 
