@@ -23,6 +23,7 @@ from services.performance_returns import (
     _clean_funds,
     add_benchmark_rolling_returns,
     coerce_num,
+    end_to_end_nav_returns,
     make_up_down_capture_data,
     make_multi_fund_rolling_df,
     make_rolling_df,
@@ -101,7 +102,7 @@ def _render_performance_fund_shortlist(category_funds, all_funds):
     return funds_selected, focus_fund
 
 
-def _rolling_stats_table_html(stats):
+def _rolling_stats_table_html(stats, repeat_absolute_header=False):
     """Render the two stat sections with a full-width heading for each."""
     columns = list(stats.columns)
     header_cells = ["Fund / benchmark", *columns]
@@ -111,16 +112,19 @@ def _rolling_stats_table_html(stats):
         '<table style="border-collapse:collapse;width:100%;font-size:0.9rem">',
         "<thead><tr>",
     ]
-    parts.extend(
+    column_headings = [
         f'<th scope="col" style="{border}text-align:left">{escape(label)}</th>'
         for label in header_cells
-    )
+    ]
+    parts.extend(column_headings)
     parts.append("</tr></thead><tbody>")
     for section, group in stats.groupby(level=0, sort=False):
         parts.append(
             f'<tr><th scope="colgroup" colspan="{len(header_cells)}" '
             f'style="{border}text-align:left;background:#eef2f7">{escape(str(section))}</th></tr>'
         )
+        if repeat_absolute_header and section.startswith("Absolute returns"):
+            parts.extend(["<tr>", *column_headings, "</tr>"])
         for (_, series), values in group.iterrows():
             parts.append("<tr>")
             parts.append(
@@ -128,7 +132,8 @@ def _rolling_stats_table_html(stats):
                 f'{escape(str(series))}</th>'
             )
             parts.extend(
-                f'<td style="{border}text-align:right">{float(value):,.1f}</td>'
+                f'<td style="{border}text-align:right">'
+                f'{"—" if pd.isna(value) else format(float(value), ",.1f")}</td>'
                 for value in values
             )
             parts.append("</tr>")
@@ -136,7 +141,19 @@ def _rolling_stats_table_html(stats):
     return "".join(parts)
 
 
-def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
+def _with_end_to_end_stats(stats, bench_label, total_returns):
+    result = stats.copy()
+    benchmark_return = total_returns.get(bench_label, np.nan)
+    result["End-to-end"] = [
+        total_returns.get(series, np.nan) - benchmark_return
+        if section.startswith("Relative")
+        else total_returns.get(series, np.nan)
+        for section, series in result.index
+    ]
+    return result
+
+
+def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon, end_to_end=None):
     observations, stats = rolling_comparison_stats(df, fund_names, bench_label)
     st.subheader(f"{horizon} rolling return stats ({observations} observations)")
     if not bench_label:
@@ -144,12 +161,26 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
     elif stats.empty:
         st.info("No rolling windows are shared by the selected funds and benchmark.")
     else:
-        st.markdown(_rolling_stats_table_html(stats), unsafe_allow_html=True)
+        if end_to_end is not None:
+            first_date, last_date, total_returns = end_to_end
+            stats = _with_end_to_end_stats(stats, bench_label, total_returns)
+        st.markdown(
+            _rolling_stats_table_html(stats, repeat_absolute_header=end_to_end is not None),
+            unsafe_allow_html=True,
+        )
         st.caption(
             "All rows use the same overlapping windows. Relative values are percentage-point "
             "differences from the benchmark, with probability of beating it. Absolute values "
             "are returns, with probability of a positive return."
         )
+        if end_to_end is not None and first_date is not None:
+            st.caption(
+                f"End-to-end is the cumulative NAV return from {first_date:%b %Y} to "
+                f"{last_date:%b %Y}, using dates shared by the selected funds and benchmark. "
+                "Relative end-to-end values are differences in percentage points."
+            )
+        elif end_to_end is not None:
+            st.caption("End-to-end returns need at least two shared monthly NAV dates.")
 
 
 def performance_page(home_button):
@@ -363,7 +394,12 @@ def performance_page(home_button):
             else:
                 st.plotly_chart(fig3m, use_container_width=True)
                 stats3m = add_benchmark_rolling_returns(df3m, bench_label, 36)
-                _render_rolling_comparison_stats(stats3m, mf3, bench_label, "3Y")
+                end_to_end3m = end_to_end_nav_returns(
+                    filtered, mf3, bench_ser, bench_label, start_domain, end_domain
+                )
+                _render_rolling_comparison_stats(
+                    stats3m, mf3, bench_label, "3Y", end_to_end=end_to_end3m
+                )
                 if st.checkbox("To print", key="print_fig3m"):
                     print_items.append(("3Y Rolling - Multiple funds", fig3m))
 
@@ -379,7 +415,12 @@ def performance_page(home_button):
             else:
                 st.plotly_chart(fig1m, use_container_width=True)
                 stats1m = add_benchmark_rolling_returns(df1m, bench_label, 12)
-                _render_rolling_comparison_stats(stats1m, mf1, bench_label, "1Y")
+                end_to_end1m = end_to_end_nav_returns(
+                    filtered, mf1, bench_ser, bench_label, start_domain, end_domain
+                )
+                _render_rolling_comparison_stats(
+                    stats1m, mf1, bench_label, "1Y", end_to_end=end_to_end1m
+                )
                 if st.checkbox("To print", key="print_fig1m"):
                     print_items.append(("1Y Rolling - Multiple funds", fig1m))
 
