@@ -170,12 +170,14 @@ def _with_compounding_break_stats(stats, breaks):
         if not section.startswith("Absolute") or series not in breaks.index:
             continue
         row = breaks.loc[series]
-        if row.isna().any():
+        if row[["Break months", "Months", "Break share (%)"]].isna().any():
             continue
+        gap = row["CAGR gap (ppt)"]
+        gap_text = "None" if pd.isna(gap) else f"{gap:+.1f} ppt"
         result.loc[(section, series), "Compounding break"] = (
             f'{int(row["Break months"])}/{int(row["Months"])} mo '
             f'({row["Break share (%)"]:.1f}%); '
-            f'{row["CAGR gap (ppt)"]:+.1f} ppt'
+            f'{gap_text}'
         )
     return result
 
@@ -218,10 +220,10 @@ def _render_rolling_comparison_stats(
         if compounding_breaks is not None:
             st.caption(
                 "Compounding break counts monthly NAVs below the running peak since the selected start. "
-                "The cell shows break months/total months, their share, and the hypothetical "
-                "CAGR gap if the same end NAV were reached in total months minus break months. "
-                "Total months counts NAV observations including both endpoints, as in the six-month example. "
-                "It requires a NAV for every selected month; the gap is an illustrative time compression."
+                "The cell shows break months/total NAV observations, their share, and the difference "
+                "between a hypothetical CAGR and the actual End-to-end CAGR. The hypothetical CAGR "
+                "uses elapsed calendar months minus break months. It requires a NAV for every selected "
+                "month; the gap is an illustrative time compression."
             )
 
 

@@ -880,9 +880,11 @@ def compounding_break_stats(
             return
         break_months = int((nav < nav.cummax()).sum())
         total_months = len(months)
+        elapsed_months = (end.year - start.year) * 12 + end.month - start.month
+        effective_months = elapsed_months - break_months
         ratio = nav.iloc[-1] / nav.iloc[0]
-        actual_cagr = ratio ** (12.0 / total_months) - 1.0
-        no_break_cagr = ratio ** (12.0 / (total_months - break_months)) - 1.0
+        actual_cagr = ratio ** (12.0 / elapsed_months) - 1.0
+        no_break_cagr = ratio ** (12.0 / effective_months) - 1.0 if effective_months > 0 else np.nan
         result.loc[name] = [
             break_months,
             total_months,
