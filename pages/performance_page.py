@@ -1,4 +1,5 @@
 from io import BytesIO
+from html import escape
 
 import numpy as np
 import pandas as pd
@@ -100,6 +101,41 @@ def _render_performance_fund_shortlist(category_funds, all_funds):
     return funds_selected, focus_fund
 
 
+def _rolling_stats_table_html(stats):
+    """Render the two stat sections with a full-width heading for each."""
+    columns = list(stats.columns)
+    header_cells = ["Fund / benchmark", *columns]
+    border = "border:1px solid #d8dee8;padding:7px 10px;"
+    parts = [
+        '<div style="overflow-x:auto">',
+        '<table style="border-collapse:collapse;width:100%;font-size:0.9rem">',
+        "<thead><tr>",
+    ]
+    parts.extend(
+        f'<th scope="col" style="{border}text-align:left">{escape(label)}</th>'
+        for label in header_cells
+    )
+    parts.append("</tr></thead><tbody>")
+    for section, group in stats.groupby(level=0, sort=False):
+        parts.append(
+            f'<tr><th scope="colgroup" colspan="{len(header_cells)}" '
+            f'style="{border}text-align:left;background:#eef2f7">{escape(str(section))}</th></tr>'
+        )
+        for (_, series), values in group.iterrows():
+            parts.append("<tr>")
+            parts.append(
+                f'<th scope="row" style="{border}text-align:left;font-weight:400">'
+                f'{escape(str(series))}</th>'
+            )
+            parts.extend(
+                f'<td style="{border}text-align:right">{float(value):,.1f}</td>'
+                for value in values
+            )
+            parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
+
+
 def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
     observations, stats = rolling_comparison_stats(df, fund_names, bench_label)
     st.subheader(f"{horizon} rolling return stats ({observations} observations)")
@@ -108,7 +144,7 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
     elif stats.empty:
         st.info("No rolling windows are shared by the selected funds and benchmark.")
     else:
-        st.dataframe(stats.round(1), use_container_width=True)
+        st.markdown(_rolling_stats_table_html(stats), unsafe_allow_html=True)
         st.caption(
             "All rows use the same overlapping windows. Relative values are percentage-point "
             "differences from the benchmark, with probability of beating it. Absolute values "
