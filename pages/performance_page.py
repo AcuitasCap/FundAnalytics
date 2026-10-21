@@ -108,7 +108,7 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon):
     elif stats.empty:
         st.info("No rolling windows are shared by the selected funds and benchmark.")
     else:
-        st.dataframe(stats.round(2), use_container_width=True)
+        st.dataframe(stats.round(1), use_container_width=True)
         st.caption(
             "All rows use the same overlapping windows. Relative values are percentage-point "
             "differences from the benchmark, with probability of beating it. Absolute values "
