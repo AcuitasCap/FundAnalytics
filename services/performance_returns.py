@@ -850,3 +850,50 @@ def end_to_end_nav_returns(
         benchmark = benchmark[~benchmark.index.duplicated(keep="last")]
         cagr[benchmark_name] = endpoint_cagr(benchmark)
     return start, end, cagr
+
+
+def compounding_break_stats(
+    funds_df: pd.DataFrame,
+    fund_names: list[str],
+    benchmark_nav: pd.Series | None,
+    benchmark_name: str | None,
+    start_domain,
+    end_domain,
+) -> pd.DataFrame:
+    """Count NAVs below their prior peak and annualize over fewer observed months."""
+    names = list(dict.fromkeys(fund_names))
+    if benchmark_name:
+        names.append(benchmark_name)
+    columns = ["Break months", "Months", "Break share (%)", "CAGR gap (ppt)"]
+    result = pd.DataFrame(np.nan, index=pd.Index(names, name="Series"), columns=columns)
+    start = pd.Timestamp(start_domain).to_period("M").to_timestamp("M")
+    end = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
+    months = pd.date_range(start, end, freq="ME")
+    if len(months) < 2:
+        return result
+
+    def summarize(name, nav):
+        nav = pd.to_numeric(nav, errors="coerce").copy()
+        nav.index = pd.to_datetime(nav.index, errors="coerce").to_period("M").to_timestamp("M")
+        nav = nav[~nav.index.duplicated(keep="last")].reindex(months)
+        if nav.isna().any() or not np.isfinite(nav).all() or (nav <= 0).any():
+            return
+        break_months = int((nav < nav.cummax()).sum())
+        total_months = len(months)
+        ratio = nav.iloc[-1] / nav.iloc[0]
+        actual_cagr = ratio ** (12.0 / total_months) - 1.0
+        no_break_cagr = ratio ** (12.0 / (total_months - break_months)) - 1.0
+        result.loc[name] = [
+            break_months,
+            total_months,
+            break_months / total_months * 100.0,
+            (no_break_cagr - actual_cagr) * 100.0,
+        ]
+
+    selected = funds_df.loc[funds_df["fund"].isin(fund_names), ["fund", "date", "nav"]].copy()
+    selected["date"] = pd.to_datetime(selected["date"], errors="coerce")
+    for name, group in selected.groupby("fund"):
+        summarize(name, group.set_index("date")["nav"])
+    if benchmark_name and benchmark_nav is not None and not benchmark_nav.empty:
+        summarize(benchmark_name, benchmark_nav)
+    return result
