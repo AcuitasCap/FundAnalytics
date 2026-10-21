@@ -813,31 +813,34 @@ def end_to_end_nav_returns(
     start_domain,
     end_domain,
 ) -> tuple[pd.Timestamp | None, pd.Timestamp | None, pd.Series]:
-    """Cumulative returns between the first and last shared monthly NAV dates."""
-    empty = (None, None, pd.Series(dtype=float))
+    """CAGR from the selected start and end months, requiring both endpoint NAVs."""
     funds = list(dict.fromkeys(fund_names))
-    if not funds or not benchmark_name or benchmark_nav is None or benchmark_nav.empty:
-        return empty
-
-    selected = funds_df.loc[funds_df["fund"].isin(funds), ["fund", "date", "nav"]].copy()
-    if selected.empty:
-        return empty
-    selected["date"] = pd.to_datetime(selected["date"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
-    selected["nav"] = pd.to_numeric(selected["nav"], errors="coerce")
-    wide = selected.pivot_table(index="date", columns="fund", values="nav", aggfunc="last")
-    if not set(funds).issubset(wide.columns):
-        return empty
-
-    benchmark = pd.to_numeric(benchmark_nav, errors="coerce").copy()
-    benchmark.index = pd.to_datetime(benchmark.index, errors="coerce").to_period("M").to_timestamp("M")
-    benchmark = benchmark.groupby(level=0).last()
-    wide[benchmark_name] = benchmark.reindex(wide.index)
-
     start = pd.Timestamp(start_domain).to_period("M").to_timestamp("M")
     end = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
-    matched = wide.loc[(wide.index >= start) & (wide.index <= end), [*funds, benchmark_name]].dropna()
-    matched = matched.loc[(matched > 0).all(axis=1)]
-    if len(matched) < 2:
-        return empty
+    names = [*funds, benchmark_name] if benchmark_name else funds
+    cagr = pd.Series(np.nan, index=names, dtype=float)
+    months = (end.year - start.year) * 12 + end.month - start.month
+    if not funds or not benchmark_name or months <= 0:
+        return start, end, cagr
 
-    return matched.index[0], matched.index[-1], (matched.iloc[-1] / matched.iloc[0] - 1.0) * 100.0
+    def endpoint_cagr(nav):
+        nav = pd.to_numeric(nav, errors="coerce")
+        if start not in nav.index or end not in nav.index:
+            return np.nan
+        first, last = nav.loc[start], nav.loc[end]
+        if not np.isfinite(first) or not np.isfinite(last) or first <= 0 or last <= 0:
+            return np.nan
+        return ((last / first) ** (12.0 / months) - 1.0) * 100.0
+
+    selected = funds_df.loc[funds_df["fund"].isin(funds), ["fund", "date", "nav"]].copy()
+    selected["date"] = pd.to_datetime(selected["date"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
+    for name, group in selected.groupby("fund"):
+        nav = group.dropna(subset=["date"]).drop_duplicates("date", keep="last").set_index("date")["nav"]
+        cagr[name] = endpoint_cagr(nav)
+
+    if benchmark_nav is not None and not benchmark_nav.empty:
+        benchmark = benchmark_nav.copy()
+        benchmark.index = pd.to_datetime(benchmark.index, errors="coerce").to_period("M").to_timestamp("M")
+        benchmark = benchmark[~benchmark.index.duplicated(keep="last")]
+        cagr[benchmark_name] = endpoint_cagr(benchmark)
+    return start, end, cagr

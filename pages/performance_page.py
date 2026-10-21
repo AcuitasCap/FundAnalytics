@@ -102,7 +102,7 @@ def _render_performance_fund_shortlist(category_funds, all_funds):
     return funds_selected, focus_fund
 
 
-def _rolling_stats_table_html(stats, repeat_absolute_header=False):
+def _rolling_stats_table_html(stats):
     """Render the two stat sections with a full-width heading for each."""
     columns = list(stats.columns)
     header_cells = ["Fund / benchmark", *columns]
@@ -110,21 +110,18 @@ def _rolling_stats_table_html(stats, repeat_absolute_header=False):
     parts = [
         '<div style="overflow-x:auto">',
         '<table style="border-collapse:collapse;width:100%;font-size:0.9rem">',
-        "<thead><tr>",
+        "<tbody>",
     ]
     column_headings = [
         f'<th scope="col" style="{border}text-align:left">{escape(label)}</th>'
         for label in header_cells
     ]
-    parts.extend(column_headings)
-    parts.append("</tr></thead><tbody>")
     for section, group in stats.groupby(level=0, sort=False):
         parts.append(
             f'<tr><th scope="colgroup" colspan="{len(header_cells)}" '
             f'style="{border}text-align:left;background:#eef2f7">{escape(str(section))}</th></tr>'
         )
-        if repeat_absolute_header and section.startswith("Absolute returns"):
-            parts.extend(["<tr>", *column_headings, "</tr>"])
+        parts.extend(["<tr>", *column_headings, "</tr>"])
         for (_, series), values in group.iterrows():
             parts.append("<tr>")
             parts.append(
@@ -133,8 +130,8 @@ def _rolling_stats_table_html(stats, repeat_absolute_header=False):
             )
             parts.extend(
                 f'<td style="{border}text-align:right">'
-                f'{"—" if pd.isna(value) else format(float(value), ",.1f")}</td>'
-                for value in values
+                f'{("None" if column == "End-to-end" else "—") if pd.isna(value) else format(float(value), ",.1f")}</td>'
+                for column, value in values.items()
             )
             parts.append("</tr>")
     parts.append("</tbody></table></div>")
@@ -162,10 +159,10 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon, end_t
         st.info("No rolling windows are shared by the selected funds and benchmark.")
     else:
         if end_to_end is not None:
-            first_date, last_date, total_returns = end_to_end
-            stats = _with_end_to_end_stats(stats, bench_label, total_returns)
+            first_date, last_date, cagr_returns = end_to_end
+            stats = _with_end_to_end_stats(stats, bench_label, cagr_returns)
         st.markdown(
-            _rolling_stats_table_html(stats, repeat_absolute_header=end_to_end is not None),
+            _rolling_stats_table_html(stats),
             unsafe_allow_html=True,
         )
         st.caption(
@@ -173,14 +170,12 @@ def _render_rolling_comparison_stats(df, fund_names, bench_label, horizon, end_t
             "differences from the benchmark, with probability of beating it. Absolute values "
             "are returns, with probability of a positive return."
         )
-        if end_to_end is not None and first_date is not None:
+        if end_to_end is not None:
             st.caption(
-                f"End-to-end is the cumulative NAV return from {first_date:%b %Y} to "
-                f"{last_date:%b %Y}, using dates shared by the selected funds and benchmark. "
-                "Relative end-to-end values are differences in percentage points."
+                f"End-to-end is CAGR from {first_date:%b %Y} to {last_date:%b %Y}. "
+                "Each series needs NAVs at both selected endpoints; otherwise its value is None. "
+                "Relative end-to-end values are CAGR differences in percentage points."
             )
-        elif end_to_end is not None:
-            st.caption("End-to-end returns need at least two shared monthly NAV dates.")
 
 
 def performance_page(home_button):
