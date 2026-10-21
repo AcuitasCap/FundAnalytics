@@ -852,7 +852,7 @@ def end_to_end_nav_returns(
     return start, end, cagr
 
 
-def compounding_break_stats(
+def compounding_profile_stats(
     funds_df: pd.DataFrame,
     fund_names: list[str],
     benchmark_nav: pd.Series | None,
@@ -860,11 +860,11 @@ def compounding_break_stats(
     start_domain,
     end_domain,
 ) -> pd.DataFrame:
-    """Count NAVs below their prior peak and annualize over fewer observed months."""
+    """Measure time below a peak and chained peak gains versus completed drawdowns."""
     names = list(dict.fromkeys(fund_names))
     if benchmark_name:
         names.append(benchmark_name)
-    columns = ["Break months", "Months", "Break share (%)", "CAGR gap (ppt)"]
+    columns = ["Break period (%)", "Upside / downside"]
     result = pd.DataFrame(np.nan, index=pd.Index(names, name="Series"), columns=columns)
     start = pd.Timestamp(start_domain).to_period("M").to_timestamp("M")
     end = pd.Timestamp(end_domain).to_period("M").to_timestamp("M")
@@ -879,17 +879,28 @@ def compounding_break_stats(
         if nav.isna().any() or not np.isfinite(nav).all() or (nav <= 0).any():
             return
         break_months = int((nav < nav.cummax()).sum())
-        total_months = len(months)
-        elapsed_months = (end.year - start.year) * 12 + end.month - start.month
-        effective_months = elapsed_months - break_months
-        ratio = nav.iloc[-1] / nav.iloc[0]
-        actual_cagr = ratio ** (12.0 / elapsed_months) - 1.0
-        no_break_cagr = ratio ** (12.0 / effective_months) - 1.0 if effective_months > 0 else np.nan
+        values = nav.to_numpy(dtype=float)
+        peaks = [0]
+        running_peak = values[0]
+        for position, value in enumerate(values[1:], start=1):
+            if value >= running_peak:
+                peaks.append(position)
+                running_peak = value
+
+        upside_factor = 1.0
+        downside_factor = 1.0
+        for first_peak, next_peak in zip(peaks, peaks[1:]):
+            peak_nav = values[first_peak]
+            upside_factor *= values[next_peak] / peak_nav
+            between = values[first_peak + 1:next_peak]
+            if len(between) and between.min() < peak_nav:
+                downside_factor *= between.min() / peak_nav
+
+        upside = upside_factor - 1.0
+        downside = 1.0 - downside_factor
         result.loc[name] = [
-            break_months,
-            total_months,
-            break_months / total_months * 100.0,
-            (no_break_cagr - actual_cagr) * 100.0,
+            break_months / len(months) * 100.0,
+            upside / downside if downside > 0 else np.nan,
         ]
 
     selected = funds_df.loc[funds_df["fund"].isin(fund_names), ["fund", "date", "nav"]].copy()

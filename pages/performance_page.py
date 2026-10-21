@@ -22,7 +22,7 @@ from services.performance_returns import (
     _clean_bench,
     _clean_funds,
     add_benchmark_rolling_returns,
-    compounding_break_stats,
+    compounding_profile_stats,
     coerce_num,
     end_to_end_nav_returns,
     make_up_down_capture_data,
@@ -114,20 +114,14 @@ def _rolling_stats_table_html(stats):
         "<tbody>",
     ]
     for section, group in stats.groupby(level=0, sort=False):
-        visible_columns = [
-            column for column in columns
-            if not (section.startswith("Relative") and column == "Compounding break")
-        ]
-        last_span = len(columns) - len(visible_columns) + 1
         parts.append(
             f'<tr><th scope="colgroup" colspan="{len(header_cells)}" '
             f'style="{border}text-align:left;background:#eef2f7">{escape(str(section))}</th></tr>'
         )
         parts.append("<tr>")
-        for label in ["Fund / benchmark", *visible_columns]:
-            span = f' colspan="{last_span}"' if label == visible_columns[-1] and last_span > 1 else ""
+        for label in header_cells:
             parts.append(
-                f'<th scope="col"{span} style="{border}text-align:left">{escape(label)}</th>'
+                f'<th scope="col" style="{border}text-align:left">{escape(label)}</th>'
             )
         parts.append("</tr>")
         for (_, series), values in group.iterrows():
@@ -136,16 +130,13 @@ def _rolling_stats_table_html(stats):
                 f'<th scope="row" style="{border}text-align:left;font-weight:400">'
                 f'{escape(str(series))}</th>'
             )
-            for column in visible_columns:
+            for column in columns:
                 value = values[column]
                 if pd.isna(value):
-                    display = "None" if column in {"End-to-end", "Compounding break"} else "—"
-                elif isinstance(value, str):
-                    display = escape(value)
+                    display = "None" if column == "End-to-end" else "—"
                 else:
                     display = format(float(value), ",.1f")
-                span = f' colspan="{last_span}"' if column == visible_columns[-1] and last_span > 1 else ""
-                parts.append(f'<td{span} style="{border}text-align:right">{display}</td>')
+                parts.append(f'<td style="{border}text-align:right">{display}</td>')
             parts.append("</tr>")
     parts.append("</tbody></table></div>")
     return "".join(parts)
@@ -163,28 +154,32 @@ def _with_end_to_end_stats(stats, bench_label, total_returns):
     return result
 
 
-def _with_compounding_break_stats(stats, breaks):
-    result = stats.copy()
-    result["Compounding break"] = pd.Series(None, index=result.index, dtype=object)
-    for section, series in result.index:
-        if not section.startswith("Absolute") or series not in breaks.index:
-            continue
-        row = breaks.loc[series]
-        if row[["Break months", "Months", "Break share (%)"]].isna().any():
-            continue
-        gap = row["CAGR gap (ppt)"]
-        gap_text = "None" if pd.isna(gap) else f"{gap:+.1f} ppt"
-        result.loc[(section, series), "Compounding break"] = (
-            f'{int(row["Break months"])}/{int(row["Months"])} mo '
-            f'({row["Break share (%)"]:.1f}%); '
-            f'{gap_text}'
-        )
-    return result
+def _compounding_profile_table_html(profile):
+    """Show the NAV compounding measures in their own compact table."""
+    border = "border:1px solid #d8dee8;padding:7px 10px;"
+    parts = [
+        '<div style="overflow-x:auto">',
+        '<table style="border-collapse:collapse;width:100%;font-size:0.9rem">',
+        "<thead><tr>",
+    ]
+    for heading in ["Fund / benchmark", "Break period (%)", "Upside / downside"]:
+        parts.append(f'<th scope="col" style="{border}text-align:left">{escape(heading)}</th>')
+    parts.append("</tr></thead><tbody>")
+    for series, row in profile.iterrows():
+        break_share = row["Break period (%)"]
+        ratio = row["Upside / downside"]
+        parts.append("<tr>")
+        parts.append(f'<th scope="row" style="{border}text-align:left;font-weight:400">{escape(str(series))}</th>')
+        parts.append(f'<td style="{border}text-align:right">{"None" if pd.isna(break_share) else f"{break_share:.1f}%"}</td>')
+        parts.append(f'<td style="{border}text-align:right">{"None" if pd.isna(ratio) else f"{ratio:.1f}×"}</td>')
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
 
 
 def _render_rolling_comparison_stats(
     df, fund_names, bench_label, horizon, end_to_end=None, use_percentiles=False,
-    compounding_breaks=None,
+    compounding_profile=None,
 ):
     observations, stats = rolling_comparison_stats(
         df, fund_names, bench_label, use_percentiles=use_percentiles
@@ -198,12 +193,16 @@ def _render_rolling_comparison_stats(
         if end_to_end is not None:
             first_date, last_date, cagr_returns = end_to_end
             stats = _with_end_to_end_stats(stats, bench_label, cagr_returns)
-        if compounding_breaks is not None:
-            stats = _with_compounding_break_stats(stats, compounding_breaks)
         st.markdown(
             _rolling_stats_table_html(stats),
             unsafe_allow_html=True,
         )
+        if compounding_profile is not None:
+            st.markdown("**Compounding profile**")
+            st.markdown(
+                _compounding_profile_table_html(compounding_profile),
+                unsafe_allow_html=True,
+            )
         st.caption(
             "All rows use the same overlapping windows. Relative values are percentage-point "
             "differences from the benchmark, with probability of beating it. Absolute values "
@@ -217,13 +216,13 @@ def _render_rolling_comparison_stats(
                 "Each series needs NAVs at both selected endpoints; otherwise its value is None. "
                 "Relative end-to-end values are CAGR differences in percentage points."
             )
-        if compounding_breaks is not None:
+        if compounding_profile is not None:
             st.caption(
-                "Compounding break counts monthly NAVs below the running peak since the selected start. "
-                "The cell shows break months/total NAV observations, their share, and the difference "
-                "between a hypothetical CAGR and the actual End-to-end CAGR. The hypothetical CAGR "
-                "uses elapsed calendar months minus break months. It requires a NAV for every selected "
-                "month; the gap is an illustrative time compression."
+                "Break period is the share of monthly NAVs below the running peak. Upside chains "
+                "returns between successive peaks, beginning with the first NAV. Downside chains "
+                "peak-to-trough losses between completed peak pairs; the ratio is upside divided by "
+                "the absolute downside. An unfinished drawdown at the end is excluded. A complete "
+                "monthly NAV series is required."
             )
 
 
@@ -441,12 +440,12 @@ def performance_page(home_button):
                 end_to_end3m = end_to_end_nav_returns(
                     filtered, mf3, bench_ser, bench_label, start_domain, end_domain
                 )
-                breaks3m = compounding_break_stats(
+                profile3m = compounding_profile_stats(
                     filtered, mf3, bench_ser, bench_label, start_domain, end_domain
                 )
                 _render_rolling_comparison_stats(
                     stats3m, mf3, bench_label, "3Y", end_to_end=end_to_end3m,
-                    use_percentiles=True, compounding_breaks=breaks3m,
+                    use_percentiles=True, compounding_profile=profile3m,
                 )
                 if st.checkbox("To print", key="print_fig3m"):
                     print_items.append(("3Y Rolling - Multiple funds", fig3m))
@@ -466,12 +465,12 @@ def performance_page(home_button):
                 end_to_end1m = end_to_end_nav_returns(
                     filtered, mf1, bench_ser, bench_label, start_domain, end_domain
                 )
-                breaks1m = compounding_break_stats(
+                profile1m = compounding_profile_stats(
                     filtered, mf1, bench_ser, bench_label, start_domain, end_domain
                 )
                 _render_rolling_comparison_stats(
                     stats1m, mf1, bench_label, "1Y", end_to_end=end_to_end1m,
-                    use_percentiles=True, compounding_breaks=breaks1m,
+                    use_percentiles=True, compounding_profile=profile1m,
                 )
                 if st.checkbox("To print", key="print_fig1m"):
                     print_items.append(("1Y Rolling - Multiple funds", fig1m))
