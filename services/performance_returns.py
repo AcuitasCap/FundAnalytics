@@ -860,7 +860,7 @@ def compounding_profile_stats(
     start_domain,
     end_domain,
 ) -> pd.DataFrame:
-    """Summarise completed peak cycles with drawdowns of at least 10%."""
+    """Summarise drawdowns of at least 10%, including one still open at the end."""
     names = list(dict.fromkeys(fund_names))
     if benchmark_name:
         names.append(benchmark_name)
@@ -893,9 +893,10 @@ def compounding_profile_stats(
 
         qualifying_peaks = []
         peak_to_trough_returns = []
-        for first_peak, next_peak in zip(peaks, peaks[1:]):
+        intervals = [*zip(peaks, peaks[1:]), (peaks[-1], len(values))]
+        for first_peak, stop in intervals:
             peak_nav = values[first_peak]
-            between = values[first_peak + 1:next_peak]
+            between = values[first_peak + 1:stop]
             if len(between):
                 trough_return = between.min() / peak_nav - 1.0
                 if trough_return <= -0.10 + 1e-12:

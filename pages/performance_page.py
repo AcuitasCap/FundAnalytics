@@ -218,7 +218,8 @@ def _render_rolling_comparison_stats(
             )
         if compounding_profile is not None:
             st.caption(
-                "Only completed peak-to-trough corrections of at least 10% are included. "
+                "Peak-to-trough corrections of at least 10% are included, including a final "
+                "correction still below its peak at the selected end. "
                 "The selected start NAV and the peaks before those corrections define the "
                 "peak-to-peak moves. Break period sums the months below each qualifying peak until its NAV "
                 "is exceeded, or the selected period ends, as a share of selected monthly observations. "
