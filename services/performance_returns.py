@@ -860,7 +860,7 @@ def compounding_profile_stats(
     start_domain,
     end_domain,
 ) -> pd.DataFrame:
-    """Measure time below a peak and chained peak gains versus completed drawdowns."""
+    """Summarise completed peak cycles with drawdowns of at least 10%."""
     names = list(dict.fromkeys(fund_names))
     if benchmark_name:
         names.append(benchmark_name)
@@ -883,7 +883,6 @@ def compounding_profile_stats(
         nav = nav[~nav.index.duplicated(keep="last")].reindex(months)
         if nav.isna().any() or not np.isfinite(nav).all() or (nav <= 0).any():
             return
-        break_months = int((nav < nav.cummax()).sum())
         values = nav.to_numpy(dtype=float)
         peaks = [0]
         running_peak = values[0]
@@ -892,23 +891,30 @@ def compounding_profile_stats(
                 peaks.append(position)
                 running_peak = value
 
-        upside_factor = 1.0
-        downside_factor = 1.0
-        peak_to_peak_returns = []
+        retained_peaks = set()
         peak_to_trough_returns = []
         for first_peak, next_peak in zip(peaks, peaks[1:]):
             peak_nav = values[first_peak]
-            peak_gain = values[next_peak] / peak_nav - 1.0
-            peak_to_peak_returns.append(peak_gain)
-            upside_factor *= 1.0 + peak_gain
             between = values[first_peak + 1:next_peak]
-            if len(between) and between.min() < peak_nav:
+            if len(between):
                 trough_return = between.min() / peak_nav - 1.0
-                peak_to_trough_returns.append(trough_return)
-                downside_factor *= 1.0 + trough_return
+                if trough_return <= -0.10 + 1e-12:
+                    retained_peaks.update((first_peak, next_peak))
+                    peak_to_trough_returns.append(trough_return)
 
-        upside = upside_factor - 1.0
-        downside = 1.0 - downside_factor
+        retained_peaks = sorted(retained_peaks)
+        peak_to_peak_returns = [
+            values[next_peak] / values[first_peak] - 1.0
+            for first_peak, next_peak in zip(retained_peaks, retained_peaks[1:])
+        ]
+        break_months = 0
+        for peak in retained_peaks:
+            later_crossings = np.flatnonzero(values[peak + 1:] > values[peak])
+            stop = peak + 1 + later_crossings[0] if len(later_crossings) else len(values)
+            break_months += int((values[peak + 1:stop] < values[peak]).sum())
+
+        upside = float(np.prod(1.0 + np.asarray(peak_to_peak_returns)) - 1.0)
+        downside = float(1.0 - np.prod(1.0 + np.asarray(peak_to_trough_returns)))
         result.loc[name] = [
             break_months / len(months) * 100.0,
             float(np.mean(peak_to_peak_returns) * 100.0) if peak_to_peak_returns else np.nan,

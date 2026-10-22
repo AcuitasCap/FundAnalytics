@@ -218,12 +218,13 @@ def _render_rolling_comparison_stats(
             )
         if compounding_profile is not None:
             st.caption(
-                "Break period is the share of monthly NAVs below the running peak. Upside chains "
-                "returns between successive peaks, beginning with the first NAV. Downside chains "
-                "peak-to-trough losses between completed peak pairs; the ratio is upside divided by "
-                "the absolute downside. The two averages are arithmetic means of those individual "
-                "peak-to-peak gains and signed peak-to-trough losses. An unfinished drawdown at the "
-                "end is excluded. A complete monthly NAV series is required."
+                "Only completed peak-to-trough corrections of at least 10% are included. "
+                "The peaks on both sides of those corrections define the peak-to-peak moves. "
+                "Break period sums the months below each retained peak until its NAV "
+                "is exceeded, or the selected period ends, as a share of selected monthly observations. "
+                "The averages are arithmetic means of the retained moves. Upside and downside "
+                "geometrically chain the retained peak-to-peak gains and qualifying losses; their "
+                "ratio is upside divided by absolute downside. A complete monthly NAV series is required."
             )
 
 
