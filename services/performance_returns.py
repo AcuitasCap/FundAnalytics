@@ -891,7 +891,7 @@ def compounding_profile_stats(
                 peaks.append(position)
                 running_peak = value
 
-        retained_peaks = set()
+        qualifying_peaks = []
         peak_to_trough_returns = []
         for first_peak, next_peak in zip(peaks, peaks[1:]):
             peak_nav = values[first_peak]
@@ -899,16 +899,18 @@ def compounding_profile_stats(
             if len(between):
                 trough_return = between.min() / peak_nav - 1.0
                 if trough_return <= -0.10 + 1e-12:
-                    retained_peaks.update((first_peak, next_peak))
+                    qualifying_peaks.append(first_peak)
                     peak_to_trough_returns.append(trough_return)
 
-        retained_peaks = sorted(retained_peaks)
+        # The selected start NAV anchors the upside sequence. Recovery peaks close
+        # drawdowns but do not start another qualifying correction by themselves.
+        retained_peaks = sorted(set([0, *qualifying_peaks]))
         peak_to_peak_returns = [
             values[next_peak] / values[first_peak] - 1.0
             for first_peak, next_peak in zip(retained_peaks, retained_peaks[1:])
         ]
         break_months = 0
-        for peak in retained_peaks:
+        for peak in qualifying_peaks:
             later_crossings = np.flatnonzero(values[peak + 1:] > values[peak])
             stop = peak + 1 + later_crossings[0] if len(later_crossings) else len(values)
             break_months += int((values[peak + 1:stop] < values[peak]).sum())

@@ -219,8 +219,8 @@ def _render_rolling_comparison_stats(
         if compounding_profile is not None:
             st.caption(
                 "Only completed peak-to-trough corrections of at least 10% are included. "
-                "The peaks on both sides of those corrections define the peak-to-peak moves. "
-                "Break period sums the months below each retained peak until its NAV "
+                "The selected start NAV and the peaks before those corrections define the "
+                "peak-to-peak moves. Break period sums the months below each qualifying peak until its NAV "
                 "is exceeded, or the selected period ends, as a share of selected monthly observations. "
                 "The averages are arithmetic means of the retained moves. Upside and downside "
                 "geometrically chain the retained peak-to-peak gains and qualifying losses; their "
