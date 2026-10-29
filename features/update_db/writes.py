@@ -5,7 +5,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from core.db import get_engine
 from .corporate_actions import upload_stock_corporate_actions
-from .data import find_conflicts_annual
+from .data import (
+    CompanyNameAceConflictError, MissingPortfolioAceCodesError,
+    find_company_name_ace_conflicts, find_conflicts_annual,
+    find_missing_portfolio_ace_codes, load_ace_industry_flags,
+)
 
 # Comment to refresh Streamlit 
 
@@ -80,19 +84,29 @@ def upload_bench_navs(df: pd.DataFrame):
 
 def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
     """
-    Upload cleaned fund portfolio data into fundlab.fund_portfolio in batches.
+    Upload cleaned fund portfolio data into fundlab.fund_portfolio_ace in batches.
 
     Expected canonical columns in df:
       - scheme_name
       - month_end      (python date)
       - holding_pct    (0–100)
       - asset_type
-      - isin
+      - ace_code      (required for domestic equities, null otherwise)
       - instrument     (used for instrument_name in DB)
     """
+    if df.empty:
+        return
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
     engine = get_engine()
     with engine.begin() as conn:
-        # 1) Ensure funds exist
+        # Check every domestic ACE code before inserting funds or holdings.
+        missing = find_missing_portfolio_ace_codes(df, conn)
+        if not missing.empty:
+            raise MissingPortfolioAceCodesError(missing)
+
+        # Ensure funds exist only after the complete ACE master check passes.
         schemes = sorted(set(df["scheme_name"]))
         if schemes:
             conn.execute(
@@ -104,19 +118,17 @@ def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
                 {"names": schemes},
             )
 
-        # 2) Batched insert into fund_portfolio
+        # Batched insert into the ACE-keyed portfolio table.
         n = len(df)
-        if n == 0:
-            return
 
         insert_sql = text("""
-            INSERT INTO fundlab.fund_portfolio (
+            INSERT INTO fundlab.fund_portfolio_ace (
                 fund_id,
                 month_end,
                 instrument_name,
                 holding_weight,
                 asset_type,
-                isin
+                ace_code
             )
             SELECT
                 f.fund_id,
@@ -124,18 +136,15 @@ def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
                 t.instrument_name,
                 t.holding_weight,
                 t.asset_type,
-                t.isin
+                t.ace_code
             FROM (
                 SELECT
-                    -- Explicit array casts prevent PostgreSQL from inferring a
-                    -- numeric type for the ISIN array when this statement is
-                    -- prepared through the DB driver.
                     unnest(CAST(:scheme_names AS text[]))            AS scheme_name,
                     unnest(CAST(:month_ends AS date[]))              AS month_end,
                     unnest(CAST(:instrument_names AS text[]))        AS instrument_name,
                     unnest(CAST(:weights AS double precision[]))     AS holding_weight,
                     unnest(CAST(:asset_types AS text[]))             AS asset_type,
-                    unnest(CAST(:isins AS text[]))                   AS isin
+                    unnest(CAST(:ace_codes AS varchar[]))           AS ace_code
             ) t
             JOIN fundlab.fund f
               ON f.fund_name = t.scheme_name
@@ -154,7 +163,7 @@ def upload_fund_portfolios(df: pd.DataFrame, batch_size: int = 10000):
                 "instrument_names": list(chunk["instrument"].astype(str)),
                 "weights":        [float(x) for x in chunk["holding_pct"]],
                 "asset_types":    list(chunk["asset_type"].astype(str)),
-                "isins":          list(chunk["isin"].astype(str)),
+                "ace_codes":      [None if pd.isna(code) else str(code) for code in chunk["ace_code"]],
             }
 
             conn.execute(insert_sql, params)
@@ -181,6 +190,64 @@ def upload_stock_master(df: pd.DataFrame):
                     "fin": bool(r["is_financial"]),
                 },
             )
+
+
+def upload_ace_stock_master(
+    df_clean: pd.DataFrame, new_industry_flags: dict[str, bool]
+) -> None:
+    """Atomically update ACE stock master and company-name mapping."""
+    if df_clean.empty:
+        raise ValueError("The stock-master workbook has no rows to upload.")
+
+    with get_engine().begin() as conn:
+        existing_flags = load_ace_industry_flags(conn)
+        needed = set(df_clean["industry_key"]) - set(existing_flags)
+        unresolved = sorted(needed - set(new_industry_flags))
+        if unresolved:
+            raise ValueError(f"Classify these new industries before upload: {unresolved}")
+        for key, flag in new_industry_flags.items():
+            if type(flag) is not bool:
+                raise ValueError(f"Industry classification must be confirmed as a boolean: {key}")
+            if key in existing_flags and existing_flags[key] != flag:
+                raise ValueError(f"Classification for '{key}' conflicts with existing stock master.")
+
+        name_conflicts = find_company_name_ace_conflicts(df_clean, conn)
+        if not name_conflicts.empty:
+            raise CompanyNameAceConflictError(name_conflicts)
+
+        master_sql = text("""
+            INSERT INTO fundlab.stock_master_ace (ace_code, industry, is_financial)
+            VALUES (:ace_code, :industry, :is_financial)
+            ON CONFLICT (ace_code) DO UPDATE
+            SET industry = EXCLUDED.industry,
+                is_financial = EXCLUDED.is_financial
+        """)
+        for row in df_clean.drop_duplicates("ace_code").itertuples(index=False):
+            conn.execute(master_sql, {
+                "ace_code": row.ace_code,
+                "industry": row.industry,
+                "is_financial": existing_flags.get(
+                    row.industry_key, new_industry_flags.get(row.industry_key)
+                ),
+            })
+
+        name_sql = text("""
+            INSERT INTO fundlab.company_name_acecode_map AS m (company_name, ace_code)
+            VALUES (:company_name, :ace_code)
+            ON CONFLICT (company_name) DO UPDATE
+            SET ace_code = EXCLUDED.ace_code
+            WHERE m.ace_code IS NULL OR m.ace_code = EXCLUDED.ace_code
+        """)
+        for row in df_clean.itertuples(index=False):
+            result = conn.execute(name_sql, {
+                "company_name": row.company_name,
+                "ace_code": row.ace_code,
+            })
+            if result.rowcount != 1:
+                raise ValueError(
+                    f"Company name '{row.company_name}' was mapped to another ACE code "
+                    "during upload. Transaction rolled back."
+                )
 
 
 def upload_roe_roce(df: pd.DataFrame):

@@ -26,7 +26,7 @@ PORT_COLS = {
     "instrument": ["instrument", "security", "stock name"],
     "holding_pct": ["holding (%)", "holding %", "weight (%)", "weight"],
     "asset_type": ["asset type", "asset_type"],
-    "isin": ["isin"],
+    "ace_code": ["ace code", "ace_code", "ace-code"],
 }
 
 ALLOWED_EQUITY_ASSET_TYPES = {
@@ -42,6 +42,12 @@ STOCK_MASTER_COLS = {
     "company_name": ["company name", "company_name", "name"],
     "industry": ["industry", "sector"],
     "financial_flag": ["financial?", "financial", "is_financial"],
+}
+
+ACE_STOCK_MASTER_COLS = {
+    "ace_code": ["ace_code", "ace code", "ace-code"],
+    "company_name": ["company_name", "company name"],
+    "industry": ["industry"],
 }
 
 FINANCIAL_INDUSTRIES = {
@@ -165,7 +171,7 @@ def validate_bench_navs(df_raw: pd.DataFrame):
 
 
 def validate_fund_portfolios(df_raw: pd.DataFrame):
-    required = {"scheme_name", "month_end", "instrument", "holding_pct", "asset_type", "isin"}
+    required = {"scheme_name", "month_end", "instrument", "holding_pct", "asset_type", "ace_code"}
     df = map_headers(df_raw.copy(), PORT_COLS, required)
 
     # Month-end as YYYYMM → last day of month
@@ -193,17 +199,29 @@ def validate_fund_portfolios(df_raw: pd.DataFrame):
             + ". Only Domestic Equities, Overseas Equities, Others Equities and ADRs & GDRs are allowed; others must be tagged as cash in the source file."
         )
 
+    domestic = df["asset_type"].astype("string").str.strip().str.casefold().eq("domestic equities").fillna(False)
+    supplied_non_domestic = int(
+        (df.loc[~domestic, "ace_code"].astype("string").str.strip().fillna("") != "").sum()
+    )
+    df.loc[domestic, "ace_code"] = _normalize_ace_codes(df.loc[domestic, "ace_code"])
+    df.loc[~domestic, "ace_code"] = pd.NA
+
     # In-file duplicate check
-    dup_keys = df.groupby(["scheme_name", "month_end", "holding_pct", "isin"]).size()
+    dup_keys = df.groupby(
+        ["scheme_name", "month_end", "instrument", "asset_type", "holding_pct"],
+        dropna=False,
+    ).size()
     dups = dup_keys[dup_keys > 1]
     if not dups.empty:
         raise ValueError(
-            f"Duplicate (scheme_name, month_end, holding %, isin) rows found in file: {len(dups)} duplicates."
+            f"Duplicate portfolio holding rows found in file: {len(dups)} duplicates."
         )
 
     summary = {
         "rows": int(len(df)),
-        "unique_scheme_month_isin": int(len(dup_keys)),
+        "unique_holding_rows": int(len(dup_keys)),
+        "domestic_equity_rows": int(domestic.sum()),
+        "non_domestic_ace_codes_ignored": supplied_non_domestic,
     }
     return df, summary
 
@@ -228,6 +246,42 @@ def validate_stock_master(df_raw: pd.DataFrame):
         "rows": int(len(df)),
         "unique_isins": int(len(dup_keys)),
         "financial_true": int(df["is_financial"].sum()),
+    }
+    return df, summary
+
+
+def validate_ace_stock_master(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Validate ACE code, company name and industry without database access."""
+    df = map_headers(
+        df_raw.copy(), ACE_STOCK_MASTER_COLS,
+        {"ace_code", "company_name", "industry"},
+    )[["ace_code", "company_name", "industry"]].copy()
+    if df.empty:
+        raise ValueError("The stock-master workbook has no data rows.")
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
+    for column in ("company_name", "industry"):
+        df[column] = df[column].astype("string").str.strip()
+        if (df[column].isna() | df[column].eq("")).any():
+            raise ValueError(f"{column} must be nonblank on every row.")
+
+    df["industry_key"] = df["industry"].str.casefold()
+    df["company_name_key"] = df["company_name"].str.casefold()
+    conflicting_industries = df.groupby("ace_code")["industry_key"].nunique()
+    if (conflicting_industries > 1).any():
+        codes = conflicting_industries[conflicting_industries > 1].index.tolist()[:20]
+        raise ValueError(f"The same ACE code has conflicting industries: {codes}")
+    conflicting_names = df.groupby("company_name_key")["ace_code"].nunique()
+    if (conflicting_names > 1).any():
+        names = conflicting_names[conflicting_names > 1].index.tolist()[:20]
+        raise ValueError(f"The same company name maps to different ACE codes: {names}")
+
+    rows_raw = len(df)
+    df = df.drop_duplicates(subset=["ace_code", "company_name_key", "industry_key"]).reset_index(drop=True)
+    summary = {
+        "rows_raw": rows_raw,
+        "rows_clean": len(df),
+        "unique_ace_codes": int(df["ace_code"].nunique()),
+        "unique_industries": int(df["industry_key"].nunique()),
     }
     return df, summary
 

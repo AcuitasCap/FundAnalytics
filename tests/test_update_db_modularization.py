@@ -40,6 +40,210 @@ def test_fund_nav_validation_is_pure_dataframe_work():
     assert clean.loc[0, "fund_name"] == "Example Fund"
 
 
+def test_fund_portfolio_validation_uses_ace_for_domestic_only():
+    import pytest
+    from features.update_db.validation import validate_fund_portfolios
+
+    upload = pd.DataFrame({
+        "Scheme Name": ["Example Fund", "Example Fund"],
+        "Month-end (yyyymm)": [202501, 202501],
+        "Instrument": ["Example Stock", "Cash"],
+        "Holding (%)": [8.5, 1.5],
+        "Asset type": ["Domestic Equities", "Cash"],
+        "ACE code": [100325.0, ""],
+    })
+    clean, summary = validate_fund_portfolios(upload)
+    assert clean["ace_code"].iloc[0] == "100325"
+    assert pd.isna(clean["ace_code"].iloc[1])
+    assert summary["domestic_equity_rows"] == 1
+    assert clean["month_end"].iloc[0].isoformat() == "2025-01-31"
+    assert clean["holding_pct"].tolist() == [8.5, 1.5]
+
+    upload.loc[0, "ACE code"] = ""
+    with pytest.raises(ValueError, match="ACE codes"):
+        validate_fund_portfolios(upload)
+
+
+def test_missing_portfolio_ace_report_and_writer_abort_before_any_insert(monkeypatch):
+    import pytest
+    from features.update_db import data, writes
+
+    statements = []
+
+    class Result:
+        def scalars(self):
+            return ["100325"]
+
+    class Conn:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+            return Result()
+
+    class Engine:
+        def begin(self):
+            class Context:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Context()
+
+    monkeypatch.setattr(writes, "get_engine", lambda: Engine())
+    portfolio = pd.DataFrame([
+        {"scheme_name": "New Fund", "month_end": pd.Timestamp("2025-01-31").date(),
+         "instrument": "Known", "holding_pct": 5.0, "asset_type": "Domestic Equities", "ace_code": "100325"},
+        {"scheme_name": "New Fund", "month_end": pd.Timestamp("2025-01-31").date(),
+         "instrument": "Missing", "holding_pct": 6.0, "asset_type": "Domestic Equities", "ace_code": "999999"},
+    ])
+    with pytest.raises(data.MissingPortfolioAceCodesError) as caught:
+        writes.upload_fund_portfolios(portfolio)
+    assert caught.value.report["ace_code"].tolist() == ["999999"]
+    assert caught.value.report["rows_in_upload"].tolist() == [1]
+    assert len(statements) == 1
+    assert "FROM fundlab.stock_master_ace" in statements[0][0]
+
+    statements.clear()
+    portfolio.loc[portfolio.index[1], "ace_code"] = pd.NA
+    with pytest.raises(data.MissingPortfolioAceCodesError) as blank_code:
+        writes.upload_fund_portfolios(portfolio)
+    assert blank_code.value.report["ace_code"].tolist() == ["(blank)"]
+    assert len(statements) == 1
+    assert "FROM fundlab.stock_master_ace" in statements[0][0]
+
+
+def test_valid_portfolio_writer_targets_ace_table_and_nulls_cash_code(monkeypatch):
+    from features.update_db import writes
+
+    statements = []
+
+    class Result:
+        def scalars(self):
+            return ["100325"]
+
+    class Conn:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+            return Result()
+
+    class Engine:
+        def begin(self):
+            class Context:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Context()
+
+    monkeypatch.setattr(writes, "get_engine", lambda: Engine())
+    writes.upload_fund_portfolios(pd.DataFrame([
+        {"scheme_name": "Example Fund", "month_end": pd.Timestamp("2025-01-31").date(),
+         "instrument": "Stock", "holding_pct": 8.5, "asset_type": "Domestic Equities", "ace_code": "100325"},
+        {"scheme_name": "Example Fund", "month_end": pd.Timestamp("2025-01-31").date(),
+         "instrument": "Cash", "holding_pct": 1.5, "asset_type": "Cash", "ace_code": pd.NA},
+    ]))
+    assert len(statements) == 3
+    assert "INSERT INTO fundlab.fund_portfolio_ace" in statements[2][0]
+    assert statements[2][1]["ace_codes"] == ["100325", None]
+
+
+def test_missing_portfolio_ace_codes_display_as_a_table(monkeypatch):
+    from features.update_db import display
+
+    messages = []
+    tables = []
+    monkeypatch.setattr(display.st, "error", messages.append)
+    monkeypatch.setattr(display.st, "dataframe", lambda frame, **kwargs: tables.append(frame))
+    monkeypatch.setattr(display.st, "caption", lambda *args: None)
+    display.display_missing_portfolio_ace_codes(pd.DataFrame([{
+        "ace_code": "999999", "rows_in_upload": 3, "example_instrument": "Example Stock"
+    }]))
+    assert "stock_master_ace" in messages[0]
+    assert tables[0].columns.tolist() == [
+        "Missing ACE code", "Holding rows", "Example instrument"
+    ]
+
+
+def test_ace_stock_master_validation_accepts_alias_names_and_rejects_conflicts():
+    import pytest
+    from features.update_db.validation import validate_ace_stock_master
+
+    upload = pd.DataFrame({
+        "ace_code": [100325.0, "100325"],
+        "company_name": ["Reliance Industries Ltd.", "Reliance Industries"],
+        "industry": ["Petroleum", " petroleum "],
+    })
+    clean, summary = validate_ace_stock_master(upload)
+    assert clean.ace_code.tolist() == ["100325", "100325"]
+    assert clean.industry_key.tolist() == ["petroleum", "petroleum"]
+    assert summary["unique_ace_codes"] == 1
+    assert summary["rows_clean"] == 2
+
+    conflicting_industries = upload.copy()
+    conflicting_industries.loc[1, "industry"] = "Banking"
+    with pytest.raises(ValueError, match="conflicting industries"):
+        validate_ace_stock_master(conflicting_industries)
+
+    conflicting_names = upload.copy()
+    conflicting_names.loc[1, "ace_code"] = "100326"
+    conflicting_names.loc[1, "company_name"] = "reliance industries ltd."
+    with pytest.raises(ValueError, match="different ACE codes"):
+        validate_ace_stock_master(conflicting_names)
+
+
+def test_ace_stock_master_writer_requires_new_industry_confirmation(monkeypatch):
+    import pytest
+    from features.update_db import writes
+    from features.update_db.validation import validate_ace_stock_master
+
+    clean, _ = validate_ace_stock_master(pd.DataFrame({
+        "ace_code": ["9999999998"],
+        "company_name": ["Codex Test Company"],
+        "industry": ["Codex New Industry"],
+    }))
+    statements = []
+
+    class Result:
+        rowcount = 1
+
+        def __iter__(self):
+            return iter([("Petroleum", False)])
+
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def execute(self, statement, params=None):
+            statements.append((str(statement), params))
+            return Result()
+
+    class Engine:
+        def begin(self):
+            class Context:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Context()
+
+    monkeypatch.setattr(writes, "get_engine", lambda: Engine())
+    with pytest.raises(ValueError, match="Classify these new industries"):
+        writes.upload_ace_stock_master(clean, {})
+    assert len(statements) == 1
+
+    statements.clear()
+    writes.upload_ace_stock_master(clean, {"codex new industry": True})
+    assert len(statements) == 4
+    assert "INSERT INTO fundlab.stock_master_ace" in statements[2][0]
+    assert statements[2][1]["is_financial"] is True
+    assert "INSERT INTO fundlab.company_name_acecode_map" in statements[3][0]
+
+
 def test_company_financial_validators_parse_uploaded_periods_without_database_access():
     from features.update_db.validation import (
         validate_annual_book_value,

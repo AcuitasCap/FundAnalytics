@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
@@ -7,16 +8,25 @@ from sqlalchemy.exc import SQLAlchemyError
 from core.fund_catalog import fetch_categories
 from core.navigation import home_button
 from .corporate_actions import validate_stock_corporate_actions
-from .data import _read_any, load_existing_fund_names, load_stock_master_isins
-from .display import display_upload_success, display_validation_success, show_expected_format
+from .data import (
+    CompanyNameAceConflictError, MissingPortfolioAceCodesError, _read_any,
+    find_company_name_ace_conflicts, find_missing_portfolio_ace_codes,
+    load_ace_industry_flags, load_existing_fund_names, load_stock_master_isins,
+)
+from .display import (
+    display_company_name_ace_conflicts, display_missing_portfolio_ace_codes,
+    display_upload_success, display_validation_success, show_expected_format,
+)
 from .validation import (
-    validate_annual_book_value, validate_bench_navs, validate_fund_manager_tenure,
+    validate_ace_stock_master, validate_annual_book_value, validate_bench_navs,
+    validate_fund_manager_tenure,
     validate_fund_navs, validate_fund_portfolios, validate_quarterly_pat,
     validate_quarterly_sales, validate_roe_roce, validate_stock_dividends,
     validate_stock_master, validate_stock_prices_mc,
 )
 from .writes import (
-    upload_annual_book_value, upload_bench_navs, upload_corporate_actions,
+    upload_ace_stock_master, upload_annual_book_value, upload_bench_navs,
+    upload_corporate_actions,
     upload_fund_manager_tenure, upload_fund_navs, upload_fund_portfolios,
     upload_quarterly_pat, upload_quarterly_sales, upload_roe_roce,
     upload_stock_dividends, upload_stock_master, upload_stock_prices_mc,
@@ -34,6 +44,7 @@ def update_db_page():
             "Fund portfolios",
             "Fund manager tenure",
             "Stock ISIN, industry, financial/non-financial",
+            "Update stock master",
             "Company RoE / RoCE",
             "Stock prices and market cap",
             "Stock dividends (DPS + Ex-date)",
@@ -80,6 +91,14 @@ def update_db_page():
 
     state_key_df = f"validated_df_{upload_type}"
     state_key_ok = f"validated_ok_{upload_type}"
+    validated_file_hash = None
+    hash_key = f"validated_file_hash_{upload_type}"
+    if upload_type in {"Fund portfolios", "Update stock master"}:
+        validated_file_hash = hashlib.sha256(uploaded.getvalue()).hexdigest()
+        if st.session_state.get(hash_key) != validated_file_hash:
+            st.session_state[state_key_ok] = False
+            if upload_type == "Update stock master":
+                st.session_state.pop("confirm_ace_industry_classifications", None)
 
     if st.button("Validate (dry run)"):
         try:
@@ -89,8 +108,26 @@ def update_db_page():
                 df_clean, summary = validate_bench_navs(df_raw)
             elif upload_type == "Fund portfolios":
                 df_clean, summary = validate_fund_portfolios(df_raw)
+                missing = find_missing_portfolio_ace_codes(df_clean)
+                if not missing.empty:
+                    raise MissingPortfolioAceCodesError(missing)
             elif upload_type == "Stock ISIN, industry, financial/non-financial":
                 df_clean, summary = validate_stock_master(df_raw)
+            elif upload_type == "Update stock master":
+                df_clean, summary = validate_ace_stock_master(df_raw)
+                name_conflicts = find_company_name_ace_conflicts(df_clean)
+                if not name_conflicts.empty:
+                    raise CompanyNameAceConflictError(name_conflicts)
+                known_industries = load_ace_industry_flags()
+                summary["new_industries"] = (
+                    df_clean.loc[
+                        ~df_clean["industry_key"].isin(set(known_industries)),
+                        ["industry_key", "industry"],
+                    ]
+                    .drop_duplicates("industry_key")
+                    .sort_values("industry")
+                    .to_dict("records")
+                )
             elif upload_type == "Company RoE / RoCE":
                 df_clean, summary = validate_roe_roce(df_raw)
             elif upload_type == "Stock prices and market cap":
@@ -120,9 +157,19 @@ def update_db_page():
             st.session_state[state_key_df] = df_clean
             st.session_state[state_key_ok] = True
             st.session_state[f"validated_summary_{upload_type}"] = summary
+            if validated_file_hash is not None:
+                st.session_state[hash_key] = validated_file_hash
 
             display_validation_success(summary)
 
+        except MissingPortfolioAceCodesError as exc:
+            display_missing_portfolio_ace_codes(exc.report)
+            st.session_state[state_key_ok] = False
+            return
+        except CompanyNameAceConflictError as exc:
+            display_company_name_ace_conflicts(exc.report)
+            st.session_state[state_key_ok] = False
+            return
         except ValueError as ve:
             st.error(f"Validation error: {ve}")
             st.session_state[state_key_ok] = False
@@ -137,6 +184,7 @@ def update_db_page():
         summary = st.session_state.get(f"validated_summary_{upload_type}", {}) or {}
 
         resolutions = {}
+        industry_classifications = {}
         can_proceed = True
         block_reason = ""
 
@@ -191,6 +239,34 @@ def update_db_page():
 
                         resolutions[new_name] = {"old_name": old_name, "category_name": category_name}
 
+        if upload_type == "Update stock master":
+            new_industries = summary.get("new_industries", [])
+            if new_industries:
+                st.warning("Classify each new industry before updating the ACE stock master.")
+                for item in new_industries:
+                    industry_key = item["industry_key"]
+                    radio_key = "ace_industry_" + hashlib.sha256(
+                        industry_key.encode("utf-8")
+                    ).hexdigest()[:16]
+                    choice = st.radio(
+                        f"Is '{item['industry']}' financial or non-financial?",
+                        ["-- Select --", "Financial", "Non-financial"],
+                        key=radio_key,
+                        horizontal=True,
+                    )
+                    if choice == "-- Select --":
+                        can_proceed = False
+                        block_reason = "Choose a classification for every new industry."
+                    else:
+                        industry_classifications[industry_key] = choice == "Financial"
+                if not st.checkbox(
+                    "I confirm these new industry classifications",
+                    key="confirm_ace_industry_classifications",
+                ):
+                    can_proceed = False
+                    if not block_reason:
+                        block_reason = "Confirm the new industry classifications before upload."
+
         if not can_proceed:
             st.error(block_reason)
             return
@@ -209,6 +285,8 @@ def update_db_page():
                     upload_fund_portfolios(df_clean)
                 elif upload_type == "Stock ISIN, industry, financial/non-financial":
                     upload_stock_master(df_clean)
+                elif upload_type == "Update stock master":
+                    upload_ace_stock_master(df_clean, industry_classifications)
                 elif upload_type == "Company RoE / RoCE":
                     upload_roe_roce(df_clean)
                 elif upload_type == "Stock prices and market cap":
@@ -233,6 +311,12 @@ def update_db_page():
 
                 display_upload_success()
 
+            except MissingPortfolioAceCodesError as exc:
+                display_missing_portfolio_ace_codes(exc.report)
+            except CompanyNameAceConflictError as exc:
+                display_company_name_ace_conflicts(exc.report)
+            except ValueError as exc:
+                st.error(f"Upload blocked: {exc}")
             except SQLAlchemyError as e:
                 msg = str(getattr(e, "orig", e))
                 lower_msg = msg.lower()

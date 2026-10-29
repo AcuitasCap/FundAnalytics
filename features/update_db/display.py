@@ -32,19 +32,21 @@ def show_expected_format(upload_type: str):
         st.markdown("**Expected format (Fund portfolios.xlsx):**")
         sample = pd.DataFrame(
             {
-                "Scheme Name": ["ABC Flexi Cap Fund"],
-                "Month-end (yyyymm)": [202401],
-                "Instrument": ["Reliance Industries"],
-                "Holding (%)": [8.12],
-                "Asset type": ["Domestic Equities"],
-                "ISIN": ["INE002A01018"],
+                "Scheme Name": ["ABC Flexi Cap Fund", "ABC Flexi Cap Fund"],
+                "Month-end (yyyymm)": [202401, 202401],
+                "Instrument": ["Reliance Industries", "Cash"],
+                "Holding (%)": [8.12, 1.25],
+                "Asset type": ["Domestic Equities", "Cash"],
+                "ACE code": ["100325", ""],
             }
         )
         st.dataframe(sample)
         st.info(
-            "Note: In 'Asset type', anything other than "
-            "'Domestic Equities', 'Overseas Equities', 'Others Equities', "
-            "and 'ADRs & GDRs' will be treated as cash and uploads with other values will be aborted."
+            "ACE code is required for Domestic Equities and must exist in "
+            "fundlab.stock_master_ace. Leave it blank for other asset types. "
+            "Allowed asset types are Domestic Equities, Overseas Equities, "
+            "Others Equities, ADRs & GDRs, and Cash. Tag other instruments as Cash "
+            "in the source file."
         )
     elif upload_type == "Stock ISIN, industry, financial/non-financial":
         st.markdown("**Expected format (Stock industry.xlsx):**")
@@ -57,6 +59,17 @@ def show_expected_format(upload_type: str):
             }
         )
         st.dataframe(sample)
+    elif upload_type == "Update stock master":
+        st.markdown("**Expected format (ACE stock master.xlsx):**")
+        st.dataframe(pd.DataFrame({
+            "ace_code": ["100325"],
+            "company_name": ["Reliance Industries Ltd."],
+            "industry": ["Petroleum"],
+        }))
+        st.info(
+            "ACE codes should be stored as text in Excel. Existing industries inherit "
+            "their financial classification; each new industry requires your confirmation."
+        )
     elif upload_type == "Company RoE / RoCE":
         st.markdown("**Expected format (Stock RoE.xlsx):**")
         sample = pd.DataFrame(
@@ -112,6 +125,40 @@ def show_expected_format(upload_type: str):
         )
         st.dataframe(sample)
         st.info("From/To must be in Mmm-YYYY (e.g., Jan-2024). 'To date' can be blank for the current manager.")
+
+def display_missing_portfolio_ace_codes(report: pd.DataFrame) -> None:
+    st.error(
+        "Portfolio upload blocked. The ACE codes below are missing from "
+        "fundlab.stock_master_ace. Update the ACE stock master before retrying; "
+        "no portfolio rows were uploaded."
+    )
+    st.dataframe(
+        report.rename(columns={
+            "ace_code": "Missing ACE code",
+            "rows_in_upload": "Holding rows",
+            "example_instrument": "Example instrument",
+        }),
+        hide_index=True,
+    )
+    st.caption(
+        "Use Update DB → Update stock master to add the missing ACE codes. "
+        "The older 'Stock ISIN, industry, financial/non-financial' option still "
+        "updates the legacy ISIN stock master."
+    )
+
+
+def display_company_name_ace_conflicts(report: pd.DataFrame) -> None:
+    st.error(
+        "Stock-master upload blocked. Resolve these company names that already map "
+        "to different ACE codes; neither table was changed."
+    )
+    st.dataframe(report.rename(columns={
+        "company_name": "Uploaded company name",
+        "uploaded_ace_code": "Uploaded ACE code",
+        "existing_name": "Existing company name",
+        "existing_ace_code": "Existing ACE code",
+    }), hide_index=True)
+
 
 def display_validation_success(summary: dict) -> None:
     st.success("Dry run successful. No critical format errors detected.")
