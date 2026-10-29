@@ -14,8 +14,9 @@ from .data import (
     load_ace_industry_flags, load_existing_fund_names, load_stock_master_isins,
 )
 from .display import (
-    display_company_name_ace_conflicts, display_missing_portfolio_ace_codes,
-    display_upload_success, display_validation_success, show_expected_format,
+    display_ace_stock_master_next_steps, display_company_name_ace_conflicts,
+    display_missing_portfolio_ace_codes, display_upload_success,
+    display_validation_success, show_expected_format,
 )
 from .validation import (
     validate_ace_stock_master, validate_annual_book_value, validate_bench_navs,
@@ -310,6 +311,8 @@ def update_db_page():
                     upload_fund_manager_tenure(df_clean, resolutions)
 
                 display_upload_success()
+                if upload_type == "Update stock master":
+                    display_ace_stock_master_next_steps()
 
             except MissingPortfolioAceCodesError as exc:
                 display_missing_portfolio_ace_codes(exc.report)

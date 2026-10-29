@@ -244,6 +244,19 @@ def test_ace_stock_master_writer_requires_new_industry_confirmation(monkeypatch)
     assert "INSERT INTO fundlab.company_name_acecode_map" in statements[3][0]
 
 
+def test_ace_stock_master_next_step_reminder_is_prominent(monkeypatch):
+    from features.update_db import display
+
+    warnings = []
+    monkeypatch.setattr(display.st, "warning", warnings.append)
+    display.display_ace_stock_master_next_steps()
+    assert len(warnings) == 1
+    assert "**IMPORTANT NEXT STEP" in warnings[0]
+    assert "stock_price_ace" in warnings[0]
+    assert "stock_quarterly_financials_ace" in warnings[0]
+    assert "stock_annual_bv_ace" in warnings[0]
+
+
 def test_company_financial_validators_parse_uploaded_periods_without_database_access():
     from features.update_db.validation import (
         validate_annual_book_value,

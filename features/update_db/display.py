@@ -170,3 +170,13 @@ def display_upload_success(summary: dict | None = None) -> None:
     if summary is not None:
         st.write("Summary:")
         st.json(summary)
+
+
+def display_ace_stock_master_next_steps() -> None:
+    st.warning(
+        "**IMPORTANT NEXT STEP: Update price, market-cap, and fundamental data "
+        "for any newly added stocks.**\n\n"
+        "Populate `stock_price_ace`, quarterly sales/PAT in "
+        "`stock_quarterly_financials_ace`, and annual book value in "
+        "`stock_annual_bv_ace` before relying on their valuation results."
+    )
