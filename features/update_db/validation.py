@@ -265,38 +265,45 @@ def validate_roe_roce(df_raw: pd.DataFrame):
     return df, summary
 
 
+def _normalize_ace_codes(series: pd.Series) -> pd.Series:
+    """Keep ACE identifiers as strings, including any leading zeros."""
+    codes = series.astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
+    invalid_codes = ~codes.str.fullmatch(r"[0-9]{1,10}").fillna(False)
+    if invalid_codes.any():
+        raise ValueError(
+            "ACE codes must be nonblank numeric identifiers of at most 10 digits. "
+            f"Invalid rows: {(series.index[invalid_codes] + 2).tolist()[:20]}"
+        )
+    return codes
+
+
 def validate_quarterly_pat(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
-    Expect: Col A = ISIN, Col B = quarter end (YYYYMM), Col C = adjusted PAT (absolute).
+    Expect: Col A = ACE code, Col B = quarter end (YYYYMM), Col C = adjusted PAT (absolute).
     """
     if df_raw.shape[1] < 3:
-        raise ValueError("Expected at least 3 columns: ISIN, quarter_end_YYYYMM, PAT.")
+        raise ValueError("Expected at least 3 columns: ACE code, quarter_end_YYYYMM, PAT.")
 
     df = df_raw.iloc[:, :3].copy()
-    df.columns = ["isin", "yyyymm", "pat"]
+    df.columns = ["ace_code", "yyyymm", "pat"]
 
-    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
-    df = df[df["isin"] != ""].copy()
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
 
     df["period_end"] = parse_period_to_month_end(df["yyyymm"])
-
-    # Calendar year & quarter (good enough for TTM calcs)
-    df["fiscal_year"] = df["period_end"].dt.year.astype(int)
-    df["fiscal_quarter"] = ((df["period_end"].dt.month - 1) // 3 + 1).astype(int)
 
     df["pat"] = pd.to_numeric(df["pat"], errors="coerce")
     df = df.dropna(subset=["pat"])
 
     # Check for duplicates within the upload file
-    dup_mask = df.duplicated(subset=["isin", "period_end"], keep=False)
+    dup_mask = df.duplicated(subset=["ace_code", "period_end"], keep=False)
     if dup_mask.any():
-        dup_rows = df.loc[dup_mask, ["isin", "period_end"]].drop_duplicates().head(20)
+        dup_rows = df.loc[dup_mask, ["ace_code", "period_end"]].drop_duplicates().head(20)
         raise ValueError(
-            "Duplicate rows found for the same ISIN + period_end in the PAT file. "
+            "Duplicate rows found for the same ACE code + period_end in the PAT file. "
             f"Examples:\n{dup_rows}"
         )
 
-    df_clean = df[["isin", "period_end", "fiscal_year", "fiscal_quarter", "pat"]].copy()
+    df_clean = df[["ace_code", "period_end", "pat"]].copy()
 
     summary = {
         "rows_raw": int(len(df_raw)),
@@ -313,34 +320,30 @@ def validate_quarterly_pat(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
 def validate_quarterly_sales(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
-    Expect: Col A = ISIN, Col B = quarter end (YYYYMM), Col C = sales (absolute).
+    Expect: Col A = ACE code, Col B = quarter end (YYYYMM), Col C = sales (absolute).
     """
     if df_raw.shape[1] < 3:
-        raise ValueError("Expected at least 3 columns: ISIN, quarter_end_YYYYMM, sales.")
+        raise ValueError("Expected at least 3 columns: ACE code, quarter_end_YYYYMM, sales.")
 
     df = df_raw.iloc[:, :3].copy()
-    df.columns = ["isin", "yyyymm", "sales"]
+    df.columns = ["ace_code", "yyyymm", "sales"]
 
-    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
-    df = df[df["isin"] != ""].copy()
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
 
     df["period_end"] = parse_period_to_month_end(df["yyyymm"])
-
-    df["fiscal_year"] = df["period_end"].dt.year.astype(int)
-    df["fiscal_quarter"] = ((df["period_end"].dt.month - 1) // 3 + 1).astype(int)
 
     df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
     df = df.dropna(subset=["sales"])
 
-    dup_mask = df.duplicated(subset=["isin", "period_end"], keep=False)
+    dup_mask = df.duplicated(subset=["ace_code", "period_end"], keep=False)
     if dup_mask.any():
-        dup_rows = df.loc[dup_mask, ["isin", "period_end"]].drop_duplicates().head(20)
+        dup_rows = df.loc[dup_mask, ["ace_code", "period_end"]].drop_duplicates().head(20)
         raise ValueError(
-            "Duplicate rows found for the same ISIN + period_end in the sales file. "
+            "Duplicate rows found for the same ACE code + period_end in the sales file. "
             f"Examples:\n{dup_rows}"
         )
 
-    df_clean = df[["isin", "period_end", "fiscal_year", "fiscal_quarter", "sales"]].copy()
+    df_clean = df[["ace_code", "period_end", "sales"]].copy()
 
     summary = {
         "rows_raw": int(len(df_raw)),
@@ -365,16 +368,7 @@ def validate_annual_book_value(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict
     df = df_raw.iloc[:, :3].copy()
     df.columns = ["ace_code", "yyyymm", "book_value"]
 
-    df["ace_code"] = (
-        df["ace_code"].astype("string").str.strip()
-        .str.replace(r"\.0+$", "", regex=True)
-    )
-    invalid_codes = ~df["ace_code"].str.fullmatch(r"[0-9]{1,10}").fillna(False)
-    if invalid_codes.any():
-        raise ValueError(
-            "ACE codes must be nonblank numeric identifiers of at most 10 digits. "
-            f"Invalid rows: {(df.index[invalid_codes] + 2).tolist()[:20]}"
-        )
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
 
     df["year_end"] = parse_period_to_month_end(df["yyyymm"])
 

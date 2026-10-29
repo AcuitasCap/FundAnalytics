@@ -258,275 +258,54 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
             conn.execute(insert_sql, params)
 
 
-def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
-    """
-    Bulk upload quarterly PAT into fundlab.stock_quarterly_financials.
-
-    Behaviour:
-    - If (isin, period_end) does NOT exist → INSERT a new row with PAT.
-    - If (isin, period_end) already exists → UPDATE PAT (and fiscal_year/quarter)
-      for that row, leaving sales untouched.
-    - Uses set-based INSERT/UPDATE via unnest for speed.
-    """
-
+def _upload_quarterly_metric(df_clean: pd.DataFrame, metric: str) -> None:
+    """Upsert one ACE-keyed quarterly metric without changing the other."""
+    if metric not in {"pat", "sales"}:
+        raise ValueError(f"Unsupported quarterly metric: {metric}")
     if df_clean.empty:
         return
+    if df_clean.duplicated(subset=["ace_code", "period_end"]).any():
+        raise ValueError("Duplicate ACE code + period_end rows in quarterly upload.")
 
-    # Remove duplicates within the file
-    df_clean = df_clean.drop_duplicates(subset=["isin", "period_end"]).copy()
+    insert_sql = text(
+        f"""
+        INSERT INTO fundlab.stock_quarterly_financials_ace AS q
+            (ace_code, period_end, {metric})
+        SELECT t.ace_code, t.period_end, t.metric_value
+        FROM unnest(
+            CAST(:ace_codes AS varchar[]),
+            CAST(:period_ends AS date[]),
+            CAST(:values AS numeric[])
+        ) AS t(ace_code, period_end, metric_value)
+        ON CONFLICT (ace_code, period_end) DO UPDATE
+        SET {metric} = EXCLUDED.{metric}
+        WHERE q.{metric} IS DISTINCT FROM EXCLUDED.{metric}
+        """
+    )
 
     n = len(df_clean)
-    if n == 0:
-        return
-
-    BATCH_SIZE = 10_000
-
-    engine = get_engine()
     progress_bar, progress_text = _batch_progress()
+    with get_engine().begin() as conn:
+        for start in range(0, n, 10_000):
+            end = min(start + 10_000, n)
+            chunk = df_clean.iloc[start:end]
+            conn.execute(insert_sql, {
+                "ace_codes": chunk["ace_code"].astype(str).tolist(),
+                "period_ends": [pd.Timestamp(value).date() for value in chunk["period_end"]],
+                "values": [float(value) for value in chunk[metric]],
+            })
+            progress_bar.progress(end / n)
+            progress_text.text(f"Uploading {metric.upper()}… {end} / {n} rows processed")
 
-    with engine.begin() as conn:
-        for start in range(0, n, BATCH_SIZE):
-            end = min(start + BATCH_SIZE, n)
-            chunk = df_clean.iloc[start:end].copy()
+    progress_text.text(f"{metric.upper()} upload complete: {n} rows processed.")
 
-            # 1) Find which (isin, period_end) already exist in DB
-            keys = chunk[["isin", "period_end"]].drop_duplicates()
-            existing_sql = text(
-                """
-                SELECT v.isin, v.period_end
-                FROM (
-                    SELECT
-                        unnest(:isins)       AS isin,
-                        unnest(:period_ends) AS period_end
-                ) v
-                JOIN fundlab.stock_quarterly_financials q
-                  ON q.isin = v.isin
-                 AND q.period_end = v.period_end
-                 AND q.is_consolidated = TRUE
-                """
-            )
-            key_params = {
-                "isins":       list(keys["isin"].astype(str)),
-                "period_ends": list(keys["period_end"]),
-            }
-            existing_rows = conn.execute(existing_sql, key_params).fetchall()
-            existing_set = {(r.isin, r.period_end) for r in existing_rows}
 
-            # 2) Split into new vs existing rows
-            chunk["key"] = list(zip(chunk["isin"], chunk["period_end"]))
-            mask_existing = chunk["key"].isin(existing_set)
-
-            new_rows = chunk[~mask_existing].copy()
-            upd_rows = chunk[mask_existing].copy()
-
-            # 3) Insert new rows
-            if not new_rows.empty:
-                insert_sql = text(
-                    """
-                    INSERT INTO fundlab.stock_quarterly_financials (
-                        isin,
-                        period_end,
-                        fiscal_year,
-                        fiscal_quarter,
-                        pat
-                    )
-                    SELECT
-                        t.isin,
-                        t.period_end,
-                        t.fiscal_year,
-                        t.fiscal_quarter,
-                        t.pat
-                    FROM (
-                        SELECT
-                            unnest(:isins)           AS isin,
-                            unnest(:period_ends)     AS period_end,
-                            unnest(:fiscal_years)    AS fiscal_year,
-                            unnest(:fiscal_quarters) AS fiscal_quarter,
-                            unnest(:pats)            AS pat
-                    ) t
-                    """
-                )
-                params_ins = {
-                    "isins":           list(new_rows["isin"].astype(str)),
-                    "period_ends":     list(new_rows["period_end"]),
-                    "fiscal_years":    list(new_rows["fiscal_year"].astype(int)),
-                    "fiscal_quarters": list(new_rows["fiscal_quarter"].astype(int)),
-                    "pats":            [float(x) for x in new_rows["pat"]],
-                }
-                conn.execute(insert_sql, params_ins)
-
-            # 4) Update existing rows (PAT only)
-            if not upd_rows.empty:
-                update_sql = text(
-                    """
-                    UPDATE fundlab.stock_quarterly_financials q
-                    SET
-                        pat          = v.pat,
-                        fiscal_year  = v.fiscal_year,
-                        fiscal_quarter = v.fiscal_quarter,
-                        updated_at   = NOW()
-                    FROM (
-                        SELECT
-                            unnest(:isins)           AS isin,
-                            unnest(:period_ends)     AS period_end,
-                            unnest(:fiscal_years)    AS fiscal_year,
-                            unnest(:fiscal_quarters) AS fiscal_quarter,
-                            unnest(:pats)            AS pat
-                    ) v
-                    WHERE q.isin = v.isin
-                      AND q.period_end = v.period_end
-                      AND q.is_consolidated = TRUE
-                    """
-                )
-                params_upd = {
-                    "isins":           list(upd_rows["isin"].astype(str)),
-                    "period_ends":     list(upd_rows["period_end"]),
-                    "fiscal_years":    list(upd_rows["fiscal_year"].astype(int)),
-                    "fiscal_quarters": list(upd_rows["fiscal_quarter"].astype(int)),
-                    "pats":            [float(x) for x in upd_rows["pat"]],
-                }
-                conn.execute(update_sql, params_upd)
-
-            # Progress
-            frac = end / n
-            progress_bar.progress(frac)
-            progress_text.text(f"Uploading PAT… {end} / {n} rows processed")
-
-    progress_text.text(f"PAT upload complete: {n} rows processed (inserts + updates).")
+def upload_quarterly_pat(df_clean: pd.DataFrame) -> None:
+    _upload_quarterly_metric(df_clean, "pat")
 
 
 def upload_quarterly_sales(df_clean: pd.DataFrame) -> None:
-    """
-    Bulk upload quarterly sales into fundlab.stock_quarterly_financials.
-
-    Behaviour:
-    - If (isin, period_end) does NOT exist → INSERT a new row with sales.
-    - If (isin, period_end) already exists → UPDATE sales for that row,
-      leaving PAT untouched.
-    """
-
-    if df_clean.empty:
-        return
-
-    df_clean = df_clean.drop_duplicates(subset=["isin", "period_end"]).copy()
-
-    n = len(df_clean)
-    if n == 0:
-        return
-
-    BATCH_SIZE = 10_000
-
-    engine = get_engine()
-    progress_bar, progress_text = _batch_progress()
-
-    with engine.begin() as conn:
-        for start in range(0, n, BATCH_SIZE):
-            end = min(start + BATCH_SIZE, n)
-            chunk = df_clean.iloc[start:end].copy()
-
-            # 1) Which keys already exist?
-            keys = chunk[["isin", "period_end"]].drop_duplicates()
-            existing_sql = text(
-                """
-                SELECT v.isin, v.period_end
-                FROM (
-                    SELECT
-                        unnest(:isins)       AS isin,
-                        unnest(:period_ends) AS period_end
-                ) v
-                JOIN fundlab.stock_quarterly_financials q
-                  ON q.isin = v.isin
-                 AND q.period_end = v.period_end
-                 AND q.is_consolidated = TRUE
-                """
-            )
-            key_params = {
-                "isins":       list(keys["isin"].astype(str)),
-                "period_ends": list(keys["period_end"]),
-            }
-            existing_rows = conn.execute(existing_sql, key_params).fetchall()
-            existing_set = {(r.isin, r.period_end) for r in existing_rows}
-
-            # 2) Split into new vs existing
-            chunk["key"] = list(zip(chunk["isin"], chunk["period_end"]))
-            mask_existing = chunk["key"].isin(existing_set)
-
-            new_rows = chunk[~mask_existing].copy()
-            upd_rows = chunk[mask_existing].copy()
-
-            # 3) Insert new rows
-            if not new_rows.empty:
-                insert_sql = text(
-                    """
-                    INSERT INTO fundlab.stock_quarterly_financials (
-                        isin,
-                        period_end,
-                        fiscal_year,
-                        fiscal_quarter,
-                        sales
-                    )
-                    SELECT
-                        t.isin,
-                        t.period_end,
-                        t.fiscal_year,
-                        t.fiscal_quarter,
-                        t.sales
-                    FROM (
-                        SELECT
-                            unnest(:isins)           AS isin,
-                            unnest(:period_ends)     AS period_end,
-                            unnest(:fiscal_years)    AS fiscal_year,
-                            unnest(:fiscal_quarters) AS fiscal_quarter,
-                            unnest(:sales_vals)      AS sales
-                    ) t
-                    """
-                )
-                params_ins = {
-                    "isins":           list(new_rows["isin"].astype(str)),
-                    "period_ends":     list(new_rows["period_end"]),
-                    "fiscal_years":    list(new_rows["fiscal_year"].astype(int)),
-                    "fiscal_quarters": list(new_rows["fiscal_quarter"].astype(int)),
-                    "sales_vals":      [float(x) for x in new_rows["sales"]],
-                }
-                conn.execute(insert_sql, params_ins)
-
-            # 4) Update existing rows (sales only)
-            if not upd_rows.empty:
-                update_sql = text(
-                    """
-                    UPDATE fundlab.stock_quarterly_financials q
-                    SET
-                        sales        = v.sales,
-                        fiscal_year  = v.fiscal_year,
-                        fiscal_quarter = v.fiscal_quarter,
-                        updated_at   = NOW()
-                    FROM (
-                        SELECT
-                            unnest(:isins)           AS isin,
-                            unnest(:period_ends)     AS period_end,
-                            unnest(:fiscal_years)    AS fiscal_year,
-                            unnest(:fiscal_quarters) AS fiscal_quarter,
-                            unnest(:sales_vals)      AS sales
-                    ) v
-                    WHERE q.isin = v.isin
-                      AND q.period_end = v.period_end
-                      AND q.is_consolidated = TRUE
-                    """
-                )
-                params_upd = {
-                    "isins":           list(upd_rows["isin"].astype(str)),
-                    "period_ends":     list(upd_rows["period_end"]),
-                    "fiscal_years":    list(upd_rows["fiscal_year"].astype(int)),
-                    "fiscal_quarters": list(upd_rows["fiscal_quarter"].astype(int)),
-                    "sales_vals":      [float(x) for x in upd_rows["sales"]],
-                }
-                conn.execute(update_sql, params_upd)
-
-            frac = end / n
-            progress_bar.progress(frac)
-            progress_text.text(f"Uploading sales… {end} / {n} rows processed")
-
-    progress_text.text(f"Sales upload complete: {n} rows processed (inserts + updates).")
+    _upload_quarterly_metric(df_clean, "sales")
 
 
 def upload_annual_book_value(df_clean: pd.DataFrame) -> None:

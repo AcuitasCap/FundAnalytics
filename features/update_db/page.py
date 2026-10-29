@@ -237,16 +237,24 @@ def update_db_page():
                 msg = str(getattr(e, "orig", e))
                 lower_msg = msg.lower()
 
-                if upload_type == "Company book value (annual)" and "foreign key constraint" in lower_msg:
+                ace_upload = upload_type in {
+                    "Company book value (annual)",
+                    "Company PAT (quarterly)",
+                    "Company sales (quarterly)",
+                }
+                if ace_upload and "foreign key constraint" in lower_msg:
                     st.error(
                         "Some ACE codes in this file do not exist in ACE Stock Master. "
                         f"Database message: {msg}"
                     )
-                elif upload_type == "Company book value (annual)" and (
+                elif ace_upload and (
                     "duplicate key value" in lower_msg or "unique constraint" in lower_msg
                 ):
+                    period_label = (
+                        "year-end" if upload_type == "Company book value (annual)" else "quarter-end"
+                    )
                     st.error(
-                        "These ACE code + year-end combinations already exist. "
+                        f"These ACE code + {period_label} combinations already exist. "
                         f"Database message: {msg}"
                     )
                 elif "foreign key constraint" in lower_msg:

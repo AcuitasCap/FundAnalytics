@@ -83,13 +83,15 @@ def show_expected_format(upload_type: str):
         st.info("Dates must be in dd-mm-yyyy format. Market cap and stock price must be numeric.")
     elif upload_type == "Company PAT (quarterly)":
         st.markdown(
-            "- **3 columns**: ISIN, quarter-end in `YYYYMM`, adjusted PAT (absolute)\n"
-            "- Example row: `INE123A01016 | 202403 | 125000000`"
+            "- **3 columns**: ACE code, quarter-end in `YYYYMM`, adjusted PAT (absolute)\n"
+            "- Example row: `288853 | 202403 | 125000000`\n"
+            "- Keep ACE codes as text in Excel so any leading zeros are preserved."
             )
     elif upload_type == "Company sales (quarterly)":
             st.markdown(
-                "- **3 columns**: ISIN, quarter-end in `YYYYMM`, sales (absolute)\n"
-                "- Example row: `INE123A01016 | 202403 | 875000000`"
+                "- **3 columns**: ACE code, quarter-end in `YYYYMM`, sales (absolute)\n"
+                "- Example row: `288853 | 202403 | 875000000`\n"
+                "- Keep ACE codes as text in Excel so any leading zeros are preserved."
             )
     elif upload_type == "Company book value (annual)":
             st.markdown(

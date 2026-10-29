@@ -787,28 +787,33 @@ def rebuild_stock_monthly_valuations(
     end_date: dt.date | None = None,
     write_to_db: bool = True,
     chunk_size: int = 50_000,
-    debug_anchor_isin: str | None = None,
+    debug_anchor_ace_code: str | None = None,
+    refresh_mode: str = "full",
 ):
     """
-    Rebuild stock_monthly_valuations as stock-level valuation multiples.
+    Rebuild stock_monthly_valuations_ace as stock-level valuation multiples.
 
-    1) Reads monthly market cap from fundlab.stock_price
-    2) Attaches TTM sales / PAT (from fundlab.stock_quarterly_financials, consolidated)
-    3) Attaches latest annual book value (from fundlab.stock_annual_book_value, consolidated)
+    1) Reads monthly market cap from fundlab.stock_price_ace
+    2) Attaches TTM sales / PAT (from fundlab.stock_quarterly_financials_ace, ACE keyed)
+    3) Attaches latest annual book value (from fundlab.stock_annual_bv_ace, ACE keyed)
     4) Uses only fundamentals strictly before each valuation month (no look-ahead),
        rejects missing, non-positive or stale inputs, then clips valid multiples.
-    5) Writes directly to fundlab.stock_monthly_valuations:
+    5) Full refresh replaces the selected date range; incremental refresh
+       appends only price months after each ACE code's latest stored row.
+       Both write to fundlab.stock_monthly_valuations_ace:
           - ps stores P/S = market_cap / TTM sales, clipped to [0.5, 30]
           - pe stores P/E = market_cap / TTM PAT, clipped to [5, 200]
           - pb stores P/B = market_cap / book value, clipped to [0.5, 40]
 
-    Output columns (aligned to fundlab.stock_monthly_valuations):
-      isin, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
+    Output columns (aligned to fundlab.stock_monthly_valuations_ace):
+      ace_code, month_end, ttm_sales, ttm_pat, book_value, ps, pe, pb
     """
+    if refresh_mode not in {"full", "incremental"}:
+        raise ValueError("refresh_mode must be 'full' or 'incremental'.")
     engine = get_engine()
 
     # --------------------------------------------------------------
-    # 0) Auto-derive start/end if not given, from stock_price
+    # 0) Auto-derive start/end if not given, from stock_price_ace
     # --------------------------------------------------------------
     if start_date is None or end_date is None:
         with engine.begin() as conn:
@@ -818,13 +823,13 @@ def rebuild_stock_monthly_valuations(
                     SELECT
                         MIN(price_date)::date AS min_d,
                         MAX(price_date)::date AS max_d
-                    FROM fundlab.stock_price;
+                    FROM fundlab.stock_price_ace;
                     """
                 )
             ).fetchone()
 
         if not rng or rng.min_d is None or rng.max_d is None:
-            st.warning("No data in fundlab.stock_price to infer date range.")
+            st.warning("No data in fundlab.stock_price_ace to infer date range.")
             return
 
         if start_date is None:
@@ -837,38 +842,76 @@ def rebuild_stock_monthly_valuations(
     # --------------------------------------------------------------
     # 1) Fetch monthly market cap
     # --------------------------------------------------------------
-    with engine.begin() as conn:
+    if refresh_mode == "incremental":
+        with engine.begin() as conn:
+            latest_dates = pd.read_sql(
+                text("""
+                    SELECT ace_code, MAX(month_end) AS latest_month_end
+                    FROM fundlab.stock_monthly_valuations_ace
+                    GROUP BY ace_code
+                    ORDER BY ace_code
+                """),
+                conn,
+            )
+        st.write(f"Latest stored valuation dates loaded for {len(latest_dates):,} ACE codes.")
+        price_sql = text("""
+            WITH latest AS (
+                SELECT * FROM unnest(
+                    CAST(:latest_ace_codes AS varchar[]),
+                    CAST(:latest_months AS date[])
+                ) AS l(ace_code, latest_month_end)
+            )
+            SELECT p.ace_code, p.price_date::date AS month_end, p.market_cap
+            FROM fundlab.stock_price_ace p
+            LEFT JOIN latest l USING (ace_code)
+            WHERE p.price_date BETWEEN :start_date AND :end_date
+              AND p.market_cap IS NOT NULL
+              AND (l.latest_month_end IS NULL OR p.price_date > l.latest_month_end)
+        """)
+        price_params = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "latest_ace_codes": latest_dates["ace_code"].astype(str).tolist(),
+            "latest_months": pd.to_datetime(latest_dates["latest_month_end"]).dt.date.tolist(),
+        }
+    else:
         price_sql = text(
             """
             SELECT
-                isin,
+                ace_code,
                 price_date::date AS month_end,
                 market_cap
-            FROM fundlab.stock_price
+            FROM fundlab.stock_price_ace
             WHERE price_date BETWEEN :start_date AND :end_date
               AND market_cap IS NOT NULL;
             """
         )
+        price_params = {"start_date": start_date, "end_date": end_date}
+
+    with engine.begin() as conn:
         prices = pd.read_sql(
             price_sql,
             conn,
-            params={"start_date": start_date, "end_date": end_date},
+            params=price_params,
         )
 
     if prices.empty:
-        st.info("No stock_price data found in the given period for stock valuations.")
+        if refresh_mode == "incremental":
+            st.info("No new ACE-code price months require valuation refresh.")
+        else:
+            st.info("No stock_price_ace data found in the given period for stock valuations.")
         return
 
-    prices["isin"] = prices["isin"].astype(str).str.strip()
+    prices["ace_code"] = prices["ace_code"].astype(str).str.strip()
     prices["month_end"] = pd.to_datetime(prices["month_end"], errors="coerce").dt.normalize()
     prices["market_cap"] = pd.to_numeric(prices["market_cap"], errors="coerce")
 
-    prices = prices.dropna(subset=["isin", "month_end", "market_cap"])
+    prices = prices.dropna(subset=["ace_code", "month_end", "market_cap"])
     prices = ensure_unique_monthly_rows(
         prices,
-        key_cols=["isin", "month_end"],
+        key_cols=["ace_code", "month_end"],
         value_cols=["market_cap"],
-        context="fundlab.stock_price",
+        context="fundlab.stock_price_ace",
     )
     if prices.empty:
         st.info("After cleaning, no usable price/market_cap rows remain.")
@@ -876,89 +919,140 @@ def rebuild_stock_monthly_valuations(
 
     base = prices.copy()
 
-    all_isins = sorted(base["isin"].unique().tolist())
+    all_ace_codes = sorted(base["ace_code"].unique().tolist())
     min_month = base["month_end"].min()
     max_month = base["month_end"].max()
 
-    st.write(f"Distinct ISINs in price data: {len(all_isins)}")
+    st.write(f"Distinct ACE codes in price data: {len(all_ace_codes)}")
     st.write(f"Month_end range in price data: {min_month.date()} → {max_month.date()}")
 
     # --------------------------------------------------------------
     # 2) Fetch quarterly & annual fundamentals once
     # --------------------------------------------------------------
-    with engine.begin() as conn:
-        q_sql = text(
-            """
-            SELECT isin, period_end, sales, pat
-            FROM fundlab.stock_quarterly_financials
-            WHERE isin = ANY(:isins)
-              AND is_consolidated = TRUE
+    if refresh_mode == "incremental":
+        first_month_by_ace = base.groupby("ace_code")["month_end"].min()
+        fundamental_params = {
+            "ace_codes": all_ace_codes,
+            "first_months": [first_month_by_ace[code].date() for code in all_ace_codes],
+            "end_date": max_month.date(),
+        }
+        # Four prior quarters seed the first TTM; one prior annual value seeds P/B.
+        # Later fundamentals are fetched only through the latest new price month.
+        q_sql = text("""
+            WITH earliest AS (
+                SELECT * FROM unnest(
+                    CAST(:ace_codes AS varchar[]), CAST(:first_months AS date[])
+                ) AS e(ace_code, first_month)
+            ), prior AS (
+                SELECT q.ace_code, q.period_end, q.sales, q.pat,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY q.ace_code ORDER BY q.period_end DESC
+                       ) AS rn
+                FROM fundlab.stock_quarterly_financials_ace q
+                JOIN earliest e USING (ace_code)
+                WHERE q.period_end < e.first_month
+            )
+            SELECT ace_code, period_end, sales, pat
+            FROM prior WHERE rn <= 4
+            UNION ALL
+            SELECT q.ace_code, q.period_end, q.sales, q.pat
+            FROM fundlab.stock_quarterly_financials_ace q
+            JOIN earliest e USING (ace_code)
+            WHERE q.period_end >= e.first_month AND q.period_end <= :end_date
+            ORDER BY ace_code, period_end
+        """)
+        bv_sql = text("""
+            WITH earliest AS (
+                SELECT * FROM unnest(
+                    CAST(:ace_codes AS varchar[]), CAST(:first_months AS date[])
+                ) AS e(ace_code, first_month)
+            ), prior AS (
+                SELECT b.ace_code, b.year_end, b.book_value,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY b.ace_code ORDER BY b.year_end DESC
+                       ) AS rn
+                FROM fundlab.stock_annual_bv_ace b
+                JOIN earliest e USING (ace_code)
+                WHERE b.year_end < e.first_month
+            )
+            SELECT ace_code, year_end, book_value
+            FROM prior WHERE rn = 1
+            UNION ALL
+            SELECT b.ace_code, b.year_end, b.book_value
+            FROM fundlab.stock_annual_bv_ace b
+            JOIN earliest e USING (ace_code)
+            WHERE b.year_end >= e.first_month AND b.year_end <= :end_date
+            ORDER BY ace_code, year_end
+        """)
+    else:
+        fundamental_params = {"ace_codes": all_ace_codes, "end_date": max_month}
+        q_sql = text("""
+            SELECT ace_code, period_end, sales, pat
+            FROM fundlab.stock_quarterly_financials_ace
+            WHERE ace_code = ANY(:ace_codes)
               AND period_end <= :end_date
-            ORDER BY isin, period_end;
-            """
-        )
+            ORDER BY ace_code, period_end
+        """)
+        bv_sql = text("""
+            SELECT ace_code, year_end, book_value
+            FROM fundlab.stock_annual_bv_ace
+            WHERE ace_code = ANY(:ace_codes)
+              AND year_end <= :end_date
+            ORDER BY ace_code, year_end
+        """)
+
+    with engine.begin() as conn:
         qdf = pd.read_sql(
             q_sql,
             conn,
-            params={"isins": all_isins, "end_date": max_month},
-        )
-
-        bv_sql = text(
-            """
-            SELECT isin, year_end, book_value
-            FROM fundlab.stock_annual_book_value
-            WHERE isin = ANY(:isins)
-              AND is_consolidated = TRUE
-              AND year_end <= :end_date
-            ORDER BY isin, year_end;
-            """
+            params=fundamental_params,
         )
         bvdf = pd.read_sql(
             bv_sql,
             conn,
-            params={"isins": all_isins, "end_date": max_month},
+            params=fundamental_params,
         )
 
     # ---- Quarterly data / TTM ----
     if not qdf.empty:
-        qdf["isin"] = qdf["isin"].astype(str).str.strip()
+        qdf["ace_code"] = qdf["ace_code"].astype(str).str.strip()
         qdf["period_end"] = pd.to_datetime(qdf["period_end"], errors="coerce").dt.normalize()
         qdf["sales"] = pd.to_numeric(qdf["sales"], errors="coerce")
         qdf["pat"] = pd.to_numeric(qdf["pat"], errors="coerce")
 
-        qdf = qdf.dropna(subset=["isin", "period_end"]).sort_values(["isin", "period_end"])
+        qdf = qdf.dropna(subset=["ace_code", "period_end"]).sort_values(["ace_code", "period_end"])
 
         qdf["ttm_sales"] = (
-            qdf.groupby("isin")["sales"]
+            qdf.groupby("ace_code")["sales"]
             .rolling(window=4, min_periods=4)
             .sum()
             .reset_index(level=0, drop=True)
         )
         qdf["ttm_pat"] = (
-            qdf.groupby("isin")["pat"]
+            qdf.groupby("ace_code")["pat"]
             .rolling(window=4, min_periods=4)
             .sum()
             .reset_index(level=0, drop=True)
         )
 
-        qdf_ttm = qdf[["isin", "period_end", "ttm_sales", "ttm_pat"]].dropna(
+        qdf_ttm = qdf[["ace_code", "period_end", "ttm_sales", "ttm_pat"]].dropna(
             how="all", subset=["ttm_sales", "ttm_pat"]
         )
-        qdf_ttm = qdf_ttm.sort_values(["isin", "period_end"]).reset_index(drop=True)
+        qdf_ttm = qdf_ttm.sort_values(["ace_code", "period_end"]).reset_index(drop=True)
     else:
-        qdf_ttm = pd.DataFrame(columns=["isin", "period_end", "ttm_sales", "ttm_pat"])
+        qdf_ttm = pd.DataFrame(columns=["ace_code", "period_end", "ttm_sales", "ttm_pat"])
 
     # ---- Annual BV ----
     if not bvdf.empty:
-        bvdf["isin"] = bvdf["isin"].astype(str).str.strip()
+        bvdf["ace_code"] = bvdf["ace_code"].astype(str).str.strip()
         bvdf["year_end"] = pd.to_datetime(bvdf["year_end"], errors="coerce").dt.normalize()
         bvdf["book_value"] = pd.to_numeric(bvdf["book_value"], errors="coerce")
-        bvdf = bvdf.dropna(subset=["isin", "year_end"]).sort_values(["isin", "year_end"]).reset_index(drop=True)
+        bvdf = bvdf.dropna(subset=["ace_code", "year_end"]).sort_values(["ace_code", "year_end"]).reset_index(drop=True)
     else:
-        bvdf = pd.DataFrame(columns=["isin", "year_end", "book_value"])
+        bvdf = pd.DataFrame(columns=["ace_code", "year_end", "book_value"])
 
     # --------------------------------------------------------------
-    # 3) Attach TTM sales / PAT and BV to (isin, month_end)
+    # 3) Attach TTM sales / PAT and BV to (ace_code, month_end)
     # --------------------------------------------------------------
     base = base.reset_index(drop=True)
     base["ttm_sales"] = np.nan
@@ -967,10 +1061,10 @@ def rebuild_stock_monthly_valuations(
     base["quarter_anchor"] = pd.NaT
     base["book_anchor"] = pd.NaT
 
-    # ---- TTM sales/PAT via "as-of" alignment (vectorized per ISIN) ----
+    # ---- TTM sales/PAT via "as-of" alignment (vectorized per ACE code) ----
     if not qdf_ttm.empty:
-        for isin, sub_ttm in qdf_ttm.groupby("isin", sort=False):
-            mask = base["isin"] == isin
+        for ace_code, sub_ttm in qdf_ttm.groupby("ace_code", sort=False):
+            mask = base["ace_code"] == ace_code
             if not mask.any():
                 continue
 
@@ -998,8 +1092,8 @@ def rebuild_stock_monthly_valuations(
 
     # ---- Book value via "as-of" alignment ----
     if not bvdf.empty:
-        for isin, sub_bv in bvdf.groupby("isin", sort=False):
-            mask = base["isin"] == isin
+        for ace_code, sub_bv in bvdf.groupby("ace_code", sort=False):
+            mask = base["ace_code"] == ace_code
             if not mask.any():
                 continue
 
@@ -1020,14 +1114,14 @@ def rebuild_stock_monthly_valuations(
             base.loc[idx, "book_value"] = aligned_bv
             base.loc[idx, "book_anchor"] = aligned_anchors
 
-    if debug_anchor_isin:
-        _isin = str(debug_anchor_isin).strip()
+    if debug_anchor_ace_code:
+        _ace_code = str(debug_anchor_ace_code).strip()
         q_anchor_dates = [pd.Timestamp("2024-09-30"), pd.Timestamp("2024-10-31")]
         b_anchor_dates = [pd.Timestamp("2023-03-31"), pd.Timestamp("2023-04-30")]
 
-        sub_ttm_dbg = qdf_ttm[qdf_ttm["isin"] == _isin] if not qdf_ttm.empty else pd.DataFrame()
+        sub_ttm_dbg = qdf_ttm[qdf_ttm["ace_code"] == _ace_code] if not qdf_ttm.empty else pd.DataFrame()
         if sub_ttm_dbg.empty:
-            st.warning(f"[Anchor debug] No quarterly TTM rows found for ISIN={_isin}")
+            st.warning(f"[Anchor debug] No quarterly TTM rows found for ACE code={_ace_code}")
         else:
             q_dates_dbg = sub_ttm_dbg["period_end"].values.astype("datetime64[ns]")
             for month_end_dbg in q_anchor_dates:
@@ -1038,13 +1132,13 @@ def rebuild_stock_monthly_valuations(
                     pd.Timestamp(q_dates_dbg[q_pos_dbg]).date() if q_pos_dbg >= 0 else None
                 )
                 st.write(
-                    f"[Anchor debug] ISIN={_isin} month_end={month_end_dbg.date()} "
+                    f"[Anchor debug] ACE code={_ace_code} month_end={month_end_dbg.date()} "
                     f"quarter_end_anchor={q_anchor_dbg}"
                 )
 
-        sub_bv_dbg = bvdf[bvdf["isin"] == _isin] if not bvdf.empty else pd.DataFrame()
+        sub_bv_dbg = bvdf[bvdf["ace_code"] == _ace_code] if not bvdf.empty else pd.DataFrame()
         if sub_bv_dbg.empty:
-            st.warning(f"[Anchor debug] No annual BV rows found for ISIN={_isin}")
+            st.warning(f"[Anchor debug] No annual BV rows found for ACE code={_ace_code}")
         else:
             b_dates_dbg = sub_bv_dbg["year_end"].values.astype("datetime64[ns]")
             for month_end_dbg in b_anchor_dates:
@@ -1055,7 +1149,7 @@ def rebuild_stock_monthly_valuations(
                     pd.Timestamp(b_dates_dbg[b_pos_dbg]).date() if b_pos_dbg >= 0 else None
                 )
                 st.write(
-                    f"[Anchor debug] ISIN={_isin} month_end={month_end_dbg.date()} "
+                    f"[Anchor debug] ACE code={_ace_code} month_end={month_end_dbg.date()} "
                     f"annual_end_anchor={b_anchor_dbg}"
                 )
 
@@ -1064,11 +1158,6 @@ def rebuild_stock_monthly_valuations(
     # calendar months old; annual book value may be at most twelve.
     # --------------------------------------------------------------
     df = base.copy()
-
-    mc = pd.to_numeric(df["market_cap"], errors="coerce")
-    ttm_sales = pd.to_numeric(df["ttm_sales"], errors="coerce")
-    ttm_pat = pd.to_numeric(df["ttm_pat"], errors="coerce")
-    bv = pd.to_numeric(df["book_value"], errors="coerce")
 
     df, diagnostics = _calculate_stock_valuation_multiples(df)
     for label, detail in diagnostics.items():
@@ -1080,14 +1169,14 @@ def rebuild_stock_monthly_valuations(
         if missing or non_positive or stale or bad_market_cap or capped:
             st.warning(f"{label}: nulls from missing fundamentals={missing:,}, non-positive fundamentals={non_positive:,}, stale fundamentals={stale:,}, invalid market cap={bad_market_cap:,}; capped={capped:,}.")
 
-    valuations_df = df[["isin", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]].copy()
+    valuations_df = df[["ace_code", "month_end", "ttm_sales", "ttm_pat", "book_value", "ps", "pe", "pb"]].copy()
 
-    valuations_df["isin"] = valuations_df["isin"].astype(str).str.strip()
+    valuations_df["ace_code"] = valuations_df["ace_code"].astype(str).str.strip()
     valuations_df["month_end"] = pd.to_datetime(valuations_df["month_end"], errors="coerce").dt.date
 
-    valuations_df = valuations_df.dropna(subset=["isin", "month_end"])
+    valuations_df = valuations_df.dropna(subset=["ace_code", "month_end"])
     valuations_df = valuations_df.replace({np.inf: np.nan, -np.inf: np.nan})
-    valuations_df = valuations_df.sort_values(["month_end", "isin"]).reset_index(drop=True)
+    valuations_df = valuations_df.sort_values(["month_end", "ace_code"]).reset_index(drop=True)
 
     n_total = len(valuations_df)
     st.write(f"Total valuation rows prepared: {n_total:,}")
@@ -1096,38 +1185,33 @@ def rebuild_stock_monthly_valuations(
         return
 
     # --------------------------------------------------------------
-    # 5) Write to Supabase (delete-range + insert chunks)
-    #     Because stock_monthly_valuations has NO UNIQUE/PK constraint.
+    # 5) Full mode atomically replaces the range; incremental mode appends only
+    #    ACE/date rows newer than each stock's latest stored valuation.
     # --------------------------------------------------------------
     if not write_to_db:
         st.info("write_to_db=False; skipping DB write.")
         return valuations_df
 
     with engine.begin() as conn:
-        st.write("Deleting existing rows in target range from fundlab.stock_monthly_valuations...")
-        conn.execute(
-            text(
-                """
-                DELETE FROM fundlab.stock_monthly_valuations
+        if refresh_mode == "full":
+            st.write("Deleting existing rows in target range from fundlab.stock_monthly_valuations_ace...")
+            conn.execute(text("""
+                DELETE FROM fundlab.stock_monthly_valuations_ace
                 WHERE month_end BETWEEN :start_date AND :end_date;
-                """
-            ),
-            {"start_date": start_date, "end_date": end_date},
+            """), {"start_date": start_date, "end_date": end_date})
+
+        st.write("Inserting new rows into fundlab.stock_monthly_valuations_ace...")
+        # Eight columns per row; cap multi-row batches to keep SQL parameter counts safe.
+        valuations_df.to_sql(
+            "stock_monthly_valuations_ace",
+            con=conn,
+            schema="fundlab",
+            if_exists="append",
+            index=False,
+            chunksize=min(chunk_size, 5_000),
+            method="multi",
         )
 
-    st.write("Inserting new rows into fundlab.stock_monthly_valuations...")
-    # Use pandas to_sql for bulk insert
-    # Note: method="multi" batches INSERT VALUES lists; adjust chunk_size as needed.
-    valuations_df.to_sql(
-        "stock_monthly_valuations",
-        con=engine,
-        schema="fundlab",
-        if_exists="append",
-        index=False,
-        chunksize=chunk_size,
-        method="multi",
-    )
-
-    st.success("stock_monthly_valuations rebuilt (multiples) and written to Supabase successfully.")
+    st.success(f"{refresh_mode.title()} stock valuations written to fundlab.stock_monthly_valuations_ace.")
     return None
 

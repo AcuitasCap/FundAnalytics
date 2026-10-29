@@ -16,12 +16,27 @@ def housekeeping_page():
         ("1. Recompute size bands (Large/Mid/Small/Micro)", jobs.recompute_size_bands, "ACE-level size bands updated."),
         ("2. Recompute 5-year median RoE/RoCE", jobs.recompute_quality_medians, "5-year medians updated."),
         ("3. Recompute quality quartiles (Q1\u2013Q4)", jobs.recompute_quality_quartiles, "Quality quartiles updated."),
-        ("4. Refresh stock valuations", jobs.rebuild_stock_monthly_valuations, "Stock valuations updated."),
     ]
     for label, job, success in simple_jobs:
         if st.button(label):
             job()
             st.success(success)
+
+    stock_valuation_mode = st.radio(
+        "Stock valuation refresh mode",
+        ["Full refresh", "Incremental refresh"],
+        horizontal=True,
+        key="stock_valuation_refresh_mode",
+    )
+    st.caption(
+        "Incremental refresh adds price months newer than each ACE code's latest stored "
+        "valuation month. With an empty target table, it processes all available months. "
+        "Use Full refresh after correcting or backfilling earlier data."
+    )
+    if st.button("4. Refresh stock valuations"):
+        jobs.rebuild_stock_monthly_valuations(
+            refresh_mode="incremental" if stock_valuation_mode == "Incremental refresh" else "full"
+        )
 
     st.markdown("---")
     st.subheader("Precompute rolling returns")
