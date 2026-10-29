@@ -237,7 +237,19 @@ def update_db_page():
                 msg = str(getattr(e, "orig", e))
                 lower_msg = msg.lower()
 
-                if "foreign key constraint" in lower_msg:
+                if upload_type == "Company book value (annual)" and "foreign key constraint" in lower_msg:
+                    st.error(
+                        "Some ACE codes in this file do not exist in ACE Stock Master. "
+                        f"Database message: {msg}"
+                    )
+                elif upload_type == "Company book value (annual)" and (
+                    "duplicate key value" in lower_msg or "unique constraint" in lower_msg
+                ):
+                    st.error(
+                        "These ACE code + year-end combinations already exist. "
+                        f"Database message: {msg}"
+                    )
+                elif "foreign key constraint" in lower_msg:
                     st.error(
                         "❌ Some ISINs in this file do not exist in Stock Master.\n"
                         "Please update Stock Master before uploading this data.\n\n"

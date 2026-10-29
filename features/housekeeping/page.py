@@ -13,7 +13,7 @@ def housekeeping_page():
     st.write("Run these steps after uploading new raw data (NAVs, portfolios, RoE/RoCE, prices) to refresh derived tables.")
 
     simple_jobs = [
-        ("1. Recompute size bands (Large/Mid/Small)", jobs.recompute_size_bands, "Size bands updated."),
+        ("1. Recompute size bands (Large/Mid/Small/Micro)", jobs.recompute_size_bands, "ACE-level size bands updated."),
         ("2. Recompute 5-year median RoE/RoCE", jobs.recompute_quality_medians, "5-year medians updated."),
         ("3. Recompute quality quartiles (Q1\u2013Q4)", jobs.recompute_quality_quartiles, "Quality quartiles updated."),
         ("4. Refresh stock valuations", jobs.rebuild_stock_monthly_valuations, "Stock valuations updated."),

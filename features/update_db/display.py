@@ -93,8 +93,9 @@ def show_expected_format(upload_type: str):
             )
     elif upload_type == "Company book value (annual)":
             st.markdown(
-                "- **3 columns**: ISIN, year-end in `YYYYMM`, book value (absolute net worth)\n"
-                "- Example row: `INE123A01016 | 202403 | 2150000000`"
+                "- **3 columns**: ACE code, year-end in `YYYYMM`, book value (absolute net worth)\n"
+                "- Example row: `288853 | 202403 | 2150000000`\n"
+                "- Keep ACE codes as text in Excel so any leading zeros are preserved."
             )
     elif upload_type == "Fund manager tenure":
         st.markdown("**Expected format (Fund manager tenure.xlsx):**")

@@ -449,81 +449,51 @@ def upload_stock_monthly_valuations_from_excel(uploaded_file, batch_size: int = 
     st.success(f"✅ Uploaded {inserted:,} rows into fundlab.stock_monthly_valuations.")
 
 
-def recompute_size_bands(batch_size: int = 10000):
+def recompute_size_bands() -> int:
+    """Upsert ACE-level June/December size bands from stock_price_ace.
+
+    Rank each company's market cap once per date. Ties are broken by ACE code
+    so repeated runs produce the same ranks. Existing rows are updated only if
+    their market cap, rank, or band has changed; newly uploaded dates are added.
     """
-    For each end-June and end-December in stock_price, rank by market_cap
-    and assign size bands: top 100 Large, next 150 Mid, rest Small.
-    Upserts into fundlab.stock_size_band.
-    """
-    engine = get_engine()
-    with engine.begin() as conn:
-        prices = pd.read_sql(
-            """
-            SELECT isin, price_date, market_cap
-            FROM fundlab.stock_price
+    upsert_sql = text("""
+        WITH ranked AS (
+            SELECT ace_code,
+                   price_date AS band_date,
+                   market_cap,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY price_date
+                       ORDER BY market_cap DESC, ace_code
+                   ) AS rank_by_mcap
+            FROM fundlab.stock_price_ace
             WHERE EXTRACT(MONTH FROM price_date) IN (6, 12)
-            ORDER BY price_date, market_cap DESC
-            """,
-            conn,
+        ), classified AS (
+            SELECT ace_code, band_date, market_cap, rank_by_mcap,
+                   CASE
+                       WHEN rank_by_mcap <= 100 THEN 'Large'
+                       WHEN rank_by_mcap <= 250 THEN 'Mid'
+                       WHEN rank_by_mcap <= 500 THEN 'Small'
+                       ELSE 'Micro'
+                   END AS size_band
+            FROM ranked
         )
-
-    if prices.empty:
-        st.warning("No stock_price data for June/December month-ends.")
-        return
-
-    # Rank by market cap within each date
-    prices["rank_by_mcap"] = (
-        prices.groupby("price_date")["market_cap"]
-        .rank(method="first", ascending=False)
-        .astype(int)
-    )
-
-    def band_for_rank(r):
-        if r <= 100:
-            return "Large"
-        elif r <= 250:
-            return "Mid"
-        else:
-            return "Small"
-
-    prices["size_band"] = prices["rank_by_mcap"].apply(band_for_rank)
-    prices = prices.rename(columns={"price_date": "band_date"})
-
-    # Batched upsert
-    insert_sql = text("""
-        INSERT INTO fundlab.stock_size_band (
-            isin,
-            band_date,
-            size_band,
-            rank_by_mcap,
-            market_cap
-        )
-        SELECT
-            unnest(:isins),
-            unnest(:band_dates),
-            unnest(:bands),
-            unnest(:ranks),
-            unnest(:mcaps)
-        ON CONFLICT (isin, band_date)
-        DO UPDATE
-        SET size_band    = EXCLUDED.size_band,
+        INSERT INTO fundlab.stock_size_band_ace
+            (ace_code, band_date, size_band, rank_by_mcap, market_cap)
+        SELECT ace_code, band_date, size_band, rank_by_mcap, market_cap
+        FROM classified
+        WHERE TRUE
+        ON CONFLICT (ace_code, band_date) DO UPDATE
+        SET size_band = EXCLUDED.size_band,
             rank_by_mcap = EXCLUDED.rank_by_mcap,
-            market_cap   = EXCLUDED.market_cap
+            market_cap = EXCLUDED.market_cap
+        WHERE (stock_size_band_ace.size_band,
+               stock_size_band_ace.rank_by_mcap,
+               stock_size_band_ace.market_cap)
+              IS DISTINCT FROM
+              (EXCLUDED.size_band, EXCLUDED.rank_by_mcap, EXCLUDED.market_cap)
     """)
-
-    with engine.begin() as conn:
-        n = len(prices)
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            chunk = prices.iloc[start:end]
-            params = {
-                "isins":      list(chunk["isin"].astype(str)),
-                "band_dates": list(chunk["band_date"]),
-                "bands":      list(chunk["size_band"].astype(str)),
-                "ranks":      list(chunk["rank_by_mcap"].astype(int)),
-                "mcaps":      [float(x) for x in chunk["market_cap"]],
-            }
-            conn.execute(insert_sql, params)
+    with get_engine().begin() as conn:
+        return int(conn.execute(upsert_sql).rowcount or 0)
 
 
 def recompute_quality_medians(batch_size: int = 10000):

@@ -357,32 +357,39 @@ def validate_quarterly_sales(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
 def validate_annual_book_value(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
-    Expect: Col A = ISIN, Col B = year-end (YYYYMM), Col C = book value (absolute net worth).
+    Expect: Col A = ACE code, Col B = year-end (YYYYMM), Col C = book value.
     """
     if df_raw.shape[1] < 3:
-        raise ValueError("Expected at least 3 columns: ISIN, year_end_YYYYMM, book_value.")
+        raise ValueError("Expected at least 3 columns: ace_code, year_end_YYYYMM, book_value.")
 
     df = df_raw.iloc[:, :3].copy()
-    df.columns = ["isin", "yyyymm", "book_value"]
+    df.columns = ["ace_code", "yyyymm", "book_value"]
 
-    df["isin"] = df["isin"].astype(str).str.strip().str.upper()
-    df = df[df["isin"] != ""].copy()
+    df["ace_code"] = (
+        df["ace_code"].astype("string").str.strip()
+        .str.replace(r"\.0+$", "", regex=True)
+    )
+    invalid_codes = ~df["ace_code"].str.fullmatch(r"[0-9]{1,10}").fillna(False)
+    if invalid_codes.any():
+        raise ValueError(
+            "ACE codes must be nonblank numeric identifiers of at most 10 digits. "
+            f"Invalid rows: {(df.index[invalid_codes] + 2).tolist()[:20]}"
+        )
 
     df["year_end"] = parse_period_to_month_end(df["yyyymm"])
-    df["fiscal_year"] = df["year_end"].dt.year.astype(int)
 
     df["book_value"] = pd.to_numeric(df["book_value"], errors="coerce")
     df = df.dropna(subset=["book_value"])
 
-    dup_mask = df.duplicated(subset=["isin", "year_end"], keep=False)
+    dup_mask = df.duplicated(subset=["ace_code", "year_end"], keep=False)
     if dup_mask.any():
-        dup_rows = df.loc[dup_mask, ["isin", "year_end"]].drop_duplicates().head(20)
+        dup_rows = df.loc[dup_mask, ["ace_code", "year_end"]].drop_duplicates().head(20)
         raise ValueError(
-            "Duplicate rows found for the same ISIN + year_end in the book value file. "
+            "Duplicate rows found for the same ACE code + year_end in the book value file. "
             f"Examples:\n{dup_rows}"
         )
 
-    df_clean = df[["isin", "year_end", "fiscal_year", "book_value"]].copy()
+    df_clean = df[["ace_code", "year_end", "book_value"]].copy()
 
     summary = {
         "rows_raw": int(len(df_raw)),

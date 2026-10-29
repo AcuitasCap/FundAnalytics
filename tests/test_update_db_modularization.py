@@ -68,12 +68,28 @@ def test_company_financial_validators_parse_uploaded_periods_without_database_ac
         assert clean[value_column].tolist() == [100.0, 125.0]
 
     annual_upload = pd.DataFrame(
-        {"ISIN": ["INE000000001"], "Year end": [202503], "Book value": [500.0]}
+        {"ACE code": ["288853"], "Year end": [202503], "Book value": [500.0]}
     )
     clean, summary = validate_annual_book_value(annual_upload)
     assert summary["rows_clean"] == 1
+    assert clean.loc[0, "ace_code"] == "288853"
     assert clean.loc[0, "year_end"] == pd.Timestamp("2025-03-31")
     assert clean.loc[0, "book_value"] == 500.0
+    assert clean.columns.tolist() == ["ace_code", "year_end", "book_value"]
+
+
+def test_annual_book_value_rejects_bad_ace_codes_and_duplicate_keys():
+    import pytest
+    from features.update_db.validation import validate_annual_book_value
+
+    with pytest.raises(ValueError, match="ACE codes"):
+        validate_annual_book_value(
+            pd.DataFrame({"ACE": ["INE000000001"], "Period": [202503], "BV": [500]})
+        )
+    with pytest.raises(ValueError, match="Duplicate rows.*ACE code"):
+        validate_annual_book_value(
+            pd.DataFrame({"ACE": [288853, "288853"], "Period": [202503, 202503], "BV": [500, 600]})
+        )
 
 
 def test_writer_only_mutates_when_explicitly_called(monkeypatch):
@@ -137,14 +153,16 @@ def test_annual_book_value_upload_checks_conflicts_before_inserting(monkeypatch)
 
     writes.upload_annual_book_value(
         pd.DataFrame(
-            [{"isin": "INE000000001", "year_end": pd.Timestamp("2025-03-31"),
-              "fiscal_year": 2025, "book_value": 500.0}]
+            [{"ace_code": "288853", "year_end": pd.Timestamp("2025-03-31"),
+              "book_value": 500.0}]
         )
     )
 
     assert len(statements) == 2
-    assert "stock_annual_book_value" in statements[0][0]
-    assert "INSERT INTO fundlab.stock_annual_book_value" in statements[1][0]
+    assert "stock_annual_bv_ace" in statements[0][0]
+    assert "INSERT INTO fundlab.stock_annual_bv_ace" in statements[1][0]
+    assert statements[1][1]["ace_codes"] == ["288853"]
+    assert statements[1][1]["year_ends"] == [pd.Timestamp("2025-03-31").date()]
 
 
 def test_app_routes_only_to_extracted_update_db_page():

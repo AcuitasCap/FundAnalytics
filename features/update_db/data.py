@@ -49,33 +49,33 @@ def find_conflicts_quarterly(df_clean: pd.DataFrame, table: str):
 
 
 def find_conflicts_annual(df_clean: pd.DataFrame):
-    """Check (isin, year_end) conflicts for annual book value."""
+    """Check (ace_code, year_end) conflicts for annual book value."""
     if df_clean.empty:
         return []
 
     engine = get_engine()
 
-    pairs = df_clean[["isin", "year_end"]].drop_duplicates()
+    pairs = df_clean[["ace_code", "year_end"]].drop_duplicates()
     max_rows = min(len(pairs), 5000)
     pairs = pairs.iloc[:max_rows]
 
     values_clause = ", ".join(
-        f"(:isin{i}, :year_end{i})" for i in range(len(pairs))
+        f"(:ace_code{i}, :year_end{i})" for i in range(len(pairs))
     )
 
     params = {}
     for i, (_, row) in enumerate(pairs.iterrows()):
-        params[f"isin{i}"] = row["isin"]
+        params[f"ace_code{i}"] = row["ace_code"]
         params[f"year_end{i}"] = row["year_end"]
 
     query = text(
         f"""
-        SELECT v.isin, v.year_end
+        SELECT v.ace_code, v.year_end
         FROM (VALUES
             {values_clause}
-        ) AS v(isin, year_end)
-        JOIN fundlab.stock_annual_book_value b
-        USING (isin, year_end)
+        ) AS v(ace_code, year_end)
+        JOIN fundlab.stock_annual_bv_ace b
+        USING (ace_code, year_end)
         LIMIT 20;
         """
     )

@@ -534,13 +534,13 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
         return
 
     engine = get_engine()
-    df_clean = df_clean.drop_duplicates(subset=["isin", "year_end"])
+    df_clean = df_clean.drop_duplicates(subset=["ace_code", "year_end"])
 
     conflicts = find_conflicts_annual(df_clean)
     if conflicts:
-        sample = "; ".join([f"{r.isin} @ {r.year_end.date()}" for r in conflicts])
+        sample = "; ".join([f"{r.ace_code} @ {r.year_end}" for r in conflicts])
         raise ValueError(
-            "Duplicate book value data detected: These ISIN + year-end rows already exist.\n"
+            "Duplicate book value data detected: These ACE code + year-end rows already exist.\n"
             f"Examples: {sample}\n\n"
             "Upload aborted. No rows inserted."
         )
@@ -552,23 +552,20 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
 
     insert_sql = text(
         """
-        INSERT INTO fundlab.stock_annual_book_value (
-            isin,
+        INSERT INTO fundlab.stock_annual_bv_ace (
+            ace_code,
             year_end,
-            fiscal_year,
             book_value
         )
         SELECT
-            t.isin,
+            t.ace_code,
             t.year_end,
-            t.fiscal_year,
             t.book_value
         FROM (
             SELECT
-                unnest(:isins)        AS isin,
-                unnest(:year_ends)    AS year_end,
-                unnest(:fiscal_years) AS fiscal_year,
-                unnest(:bvals)        AS book_value
+                unnest(CAST(:ace_codes AS varchar[])) AS ace_code,
+                unnest(CAST(:year_ends AS date[])) AS year_end,
+                unnest(CAST(:bvals AS numeric[])) AS book_value
         ) t
         """
     )
@@ -581,9 +578,8 @@ def upload_annual_book_value(df_clean: pd.DataFrame) -> None:
             chunk = df_clean.iloc[start:end]
 
             params = {
-                "isins":        list(chunk["isin"].astype(str)),
-                "year_ends":    list(chunk["year_end"]),
-                "fiscal_years": list(chunk["fiscal_year"].astype(int)),
+                "ace_codes":    list(chunk["ace_code"].astype(str)),
+                "year_ends":    [value.date() for value in chunk["year_end"]],
                 "bvals":        [float(x) for x in chunk["book_value"]],
             }
 
