@@ -12,7 +12,7 @@ from features.housekeeping.dividend_yields import compute_dividend_yield_updates
 def _mapped_df(rows):
     return pd.DataFrame(rows)[
         [
-            "isin",
+            "ace_code",
             "ex_month_start",
             "month_dps",
             "min_ex_date",
@@ -28,7 +28,7 @@ def test_standard_mapping_updates_prior_month_end():
     mapped = _mapped_df(
         [
             {
-                "isin": "INE000A01001",
+                "ace_code": "100001",
                 "ex_month_start": dt.date(2025, 2, 1),
                 "month_dps": 5.0,
                 "min_ex_date": dt.date(2025, 2, 10),
@@ -44,7 +44,7 @@ def test_standard_mapping_updates_prior_month_end():
 
     assert len(exceptions_df) == 0
     assert len(updates_df) == 1
-    assert updates_df.iloc[0]["isin"] == "INE000A01001"
+    assert updates_df.iloc[0]["ace_code"] == "100001"
     assert updates_df.iloc[0]["price_date"] == dt.date(2025, 1, 31)
     assert updates_df.iloc[0]["dividend_yield"] == 0.025
 
@@ -53,7 +53,7 @@ def test_missing_prior_month_price_row_goes_to_exceptions():
     mapped = _mapped_df(
         [
             {
-                "isin": "INE000A01002",
+                "ace_code": "100002",
                 "ex_month_start": dt.date(2025, 2, 1),
                 "month_dps": 5.0,
                 "min_ex_date": dt.date(2025, 2, 12),
@@ -76,7 +76,7 @@ def test_bad_base_price_goes_to_exceptions():
     mapped = _mapped_df(
         [
             {
-                "isin": "INE000A01003",
+                "ace_code": "100003",
                 "ex_month_start": dt.date(2025, 2, 1),
                 "month_dps": 5.0,
                 "min_ex_date": dt.date(2025, 2, 5),
@@ -86,7 +86,7 @@ def test_bad_base_price_goes_to_exceptions():
                 "base_price": 0.0,
             },
             {
-                "isin": "INE000A01004",
+                "ace_code": "100004",
                 "ex_month_start": dt.date(2025, 2, 1),
                 "month_dps": 5.0,
                 "min_ex_date": dt.date(2025, 2, 6),
@@ -109,7 +109,7 @@ def test_multiple_dividends_same_month_uses_aggregated_month_dps():
     mapped = _mapped_df(
         [
             {
-                "isin": "INE000A01005",
+                "ace_code": "100005",
                 "ex_month_start": dt.date(2025, 2, 1),
                 "month_dps": 5.0,  # 2 + 3 already aggregated by SQL step
                 "min_ex_date": dt.date(2025, 2, 4),

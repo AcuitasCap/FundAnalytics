@@ -90,14 +90,30 @@ def show_expected_format(upload_type: str):
         st.markdown("**Expected format (example):**")
         sample = pd.DataFrame(
             {
-                "ISIN": ["INE002A01018", "INE002A01018"],
+                "ACE code": ["100325", "100325"],
                 "Date": ["31-01-2024", "29-02-2024"],  # dd-mm-yyyy
                 "Market cap": [190000.0, 195000.0],
                 "Stock price": [2450.5, 2501.0],
             }
         )
         st.dataframe(sample)
-        st.info("Dates must be in dd-mm-yyyy format. Market cap and stock price must be numeric.")
+        st.info(
+            "ACE code must exist in fundlab.stock_master_ace. Keep ACE codes as text "
+            "in Excel to preserve leading zeros. Dates must be in dd-mm-yyyy format. "
+            "Market cap and stock price must be numeric."
+        )
+    elif upload_type == "Stock dividends (DPS + Ex-date)":
+        st.markdown("**Expected format (Stock dividends.xlsx):**")
+        st.dataframe(pd.DataFrame({
+            "ACE code": ["100325"],
+            "Ex Date": ["2025-08-15"],
+            "DPS": [5.0],
+        }))
+        st.info(
+            "ACE code must exist in fundlab.stock_master_ace. Keep ACE codes as text "
+            "in Excel to preserve any leading zeros. Ex Date must be a valid date; "
+            "DPS must be non-negative."
+        )
     elif upload_type == "Company PAT (quarterly)":
         st.markdown(
             "- **3 columns**: ACE code, quarter-end in `YYYYMM`, adjusted PAT (absolute)\n"

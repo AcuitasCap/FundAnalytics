@@ -81,7 +81,7 @@ FM_TENURE_COLS = {
 }
 
 STOCK_PRICE_COLS = {
-    "isin":       ["isin"],
+    "ace_code":   ["ace code", "ace_code", "ace-code"],
     "price_date": ["date", "nav date", "price date", "month_end", "month-end"],
     "market_cap": ["market cap", "mcap", "market_cap", "market capitalisation", "market capitalization"],
     "price":      ["stock price", "price", "close", "close price", "last price"],
@@ -565,12 +565,12 @@ def validate_stock_dividends(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     Validates and cleans dividend upload.
 
     Accepts flexible column naming:
-      - ISIN / isin
+      - ACE code / ace_code
       - Ex Date / ex_date
       - DPS / dps / Dividend Per Share
 
     Returns:
-      df_clean with columns: isin, ex_date, dps
+      df_clean with columns: ace_code, ex_date, dps
       summary dict
     """
     if df_raw is None or df_raw.empty:
@@ -587,9 +587,11 @@ def validate_stock_dividends(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     # Allow common variants
     rename = {}
-    if "isin" not in df.columns:
-        # nothing else reasonable to map to
-        pass
+    if "ace_code" not in df.columns:
+        for cand in ["ace code", "ace-code"]:
+            if cand in df.columns:
+                rename[cand] = "ace_code"
+                break
     if "ex_date" not in df.columns:
         for cand in ["ex date", "ex-date", "exdate", "ex_dividend_date", "exdividenddate"]:
             if cand in df.columns:
@@ -602,59 +604,58 @@ def validate_stock_dividends(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                 break
     df = df.rename(columns=rename)
 
-    required = ["isin", "ex_date", "dps"]
+    required = ["ace_code", "ex_date", "dps"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}. Expected: {required}")
 
     out = df[required].copy()
-    out["isin"] = out["isin"].astype(str).str.strip()
+    out["ace_code"] = _normalize_ace_codes(out["ace_code"])
     out["ex_date"] = pd.to_datetime(out["ex_date"], errors="coerce").dt.date
     out["dps"] = pd.to_numeric(out["dps"], errors="coerce")
 
     # Basic validations
-    bad_isin = out["isin"].isna() | (out["isin"] == "") | (out["isin"].str.lower() == "nan")
     bad_date = out["ex_date"].isna()
     bad_dps = out["dps"].isna() | (out["dps"] < 0)
 
-    invalid = bad_isin | bad_date | bad_dps
+    invalid = bad_date | bad_dps
     if invalid.any():
         examples = out.loc[invalid].head(15)
         raise ValueError(
-            f"{int(invalid.sum())} invalid rows found (blank ISIN / invalid ex_date / invalid dps).\n"
+            f"{int(invalid.sum())} invalid rows found (invalid ex_date / invalid dps).\n"
             f"Examples:\n{examples.to_string(index=False)}"
         )
 
     # De-dupe within file
     before = len(out)
-    out = out.drop_duplicates(subset=["isin", "ex_date"], keep="last").reset_index(drop=True)
+    out = out.drop_duplicates(subset=["ace_code", "ex_date"], keep="last").reset_index(drop=True)
     after = len(out)
 
     summary = {
         "rows_in_file": int(before),
         "rows_after_dedup": int(after),
-        "unique_isins": int(out["isin"].nunique()),
+        "unique_ace_codes": int(out["ace_code"].nunique()),
         "min_ex_date": str(min(out["ex_date"])),
         "max_ex_date": str(max(out["ex_date"])),
     }
     return out, summary
 
 
-def validate_stock_prices_mc(df_raw: pd.DataFrame, valid_isins: set[str] | None = None):
+def validate_stock_prices_mc(df_raw: pd.DataFrame, valid_ace_codes: set[str] | None = None):
     """
     Validate stock prices + market cap upload.
 
     Expected logical roles:
-      - isin
+      - ace_code
       - price_date (dd-mm-yyyy)
       - market_cap
       - price
     """
-    required = {"isin", "price_date", "market_cap", "price"}
+    required = {"ace_code", "price_date", "market_cap", "price"}
     df = map_headers(df_raw.copy(), STOCK_PRICE_COLS, required)
 
     # Clean types
-    df["isin"] = df["isin"].astype(str).str.strip()
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
 
     # Parse dd-mm-yyyy
     try:
@@ -670,32 +671,30 @@ def validate_stock_prices_mc(df_raw: pd.DataFrame, valid_isins: set[str] | None 
     if df["price"].isna().any():
         raise ValueError("Some stock price values could not be parsed as numbers.")
 
-    # ------------------------------
-    # 🔥 FOREIGN KEY VALIDATION
-    # ------------------------------
-    if valid_isins is None:
-        raise ValueError("Stock Master ISINs must be supplied for validation.")
-    isins_in_file = set(df["isin"])
-    missing_isins = sorted(isins_in_file - valid_isins)
+    # Check that every ACE code has a stock-master row before upload.
+    if valid_ace_codes is None:
+        raise ValueError("ACE Stock Master codes must be supplied for validation.")
+    codes_in_file = set(df["ace_code"])
+    missing_codes = sorted(codes_in_file - valid_ace_codes)
 
-    if missing_isins:
+    if missing_codes:
         raise ValueError(
-            "The following ISINs do not exist in Stock Master:\n"
-            + "\n".join(missing_isins)
-            + "\n\n→ Please upload/update Stock Master first."
+            "The following ACE codes do not exist in ACE Stock Master:\n"
+            + "\n".join(missing_codes)
+            + "\n\nPlease update ACE Stock Master first."
         )
 
-    # In-file duplicate check: one logical stock-price row per ISIN/date.
-    dup_keys = df.groupby(["isin", "price_date"]).size()
+    # In-file duplicate check: one logical stock-price row per ACE code/date.
+    dup_keys = df.groupby(["ace_code", "price_date"]).size()
     dups = dup_keys[dup_keys > 1]
     if not dups.empty:
         raise ValueError(
-            f"Duplicate (isin, date) rows found in file: {len(dups)} duplicates. "
-            "Price and market cap must be unique per ISIN/date."
+            f"Duplicate (ace_code, date) rows found in file: {len(dups)} duplicates. "
+            "Price and market cap must be unique per ACE code/date."
         )
 
     summary = {
         "rows": int(len(df)),
-        "unique_isin_date": int(len(dup_keys)),
+        "unique_ace_date": int(len(dup_keys)),
     }
     return df, summary

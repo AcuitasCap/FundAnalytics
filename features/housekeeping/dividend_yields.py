@@ -7,7 +7,7 @@ import pandas as pd
 
 
 EXCEPTION_COLUMNS = [
-    "isin",
+    "ace_code",
     "ex_month_start",
     "month_dps",
     "min_ex_date",
@@ -31,21 +31,21 @@ def subtract_years_safe(d: dt.date, years: int) -> dt.date:
 def compute_dividend_yield_updates(mapped_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Input columns expected in mapped_df:
-      isin, ex_month_start, month_dps, min_ex_date, max_ex_date, n_events,
+      ace_code, ex_month_start, month_dps, min_ex_date, max_ex_date, n_events,
       prev_month_end_date, base_price
 
     Returns:
-      updates_df columns: isin, price_date, dividend_yield
+      updates_df columns: ace_code, price_date, dividend_yield
       exceptions_df columns: EXCEPTION_COLUMNS
     """
     if mapped_df is None or mapped_df.empty:
         return (
-            pd.DataFrame(columns=["isin", "price_date", "dividend_yield"]),
+            pd.DataFrame(columns=["ace_code", "price_date", "dividend_yield"]),
             pd.DataFrame(columns=EXCEPTION_COLUMNS),
         )
 
     d = mapped_df.copy()
-    d["isin"] = d["isin"].astype(str).str.strip()
+    d["ace_code"] = d["ace_code"].astype(str).str.strip()
     d["month_dps"] = pd.to_numeric(d["month_dps"], errors="coerce")
     d["base_price"] = pd.to_numeric(d["base_price"], errors="coerce")
     d["computed_yield"] = np.where(
@@ -62,7 +62,7 @@ def compute_dividend_yield_updates(mapped_df: pd.DataFrame) -> tuple[pd.DataFram
     d["reason"] = np.where(missing_prev, "missing_prev_month_price_row", None)
     d.loc[d["reason"].isna() & (bad_base | bad_month_dps), "reason"] = "missing_or_bad_base_price"
 
-    updates_df = d.loc[~invalid, ["isin", "prev_month_end_date", "computed_yield"]].copy()
+    updates_df = d.loc[~invalid, ["ace_code", "prev_month_end_date", "computed_yield"]].copy()
     updates_df = updates_df.rename(
         columns={"prev_month_end_date": "price_date", "computed_yield": "dividend_yield"}
     )

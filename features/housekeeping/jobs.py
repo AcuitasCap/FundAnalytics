@@ -194,7 +194,7 @@ def refresh_stock_dividend_yields(scope: str = "All") -> tuple[dict, pd.DataFram
     mapped_sql = sa.text(
         """
         select
-          d.isin,
+          d.ace_code,
           d.ex_month_start,
           d.month_dps,
           d.min_ex_date,
@@ -204,25 +204,25 @@ def refresh_stock_dividend_yields(scope: str = "All") -> tuple[dict, pd.DataFram
           sp.price as base_price
         from (
           select
-            isin,
+            ace_code,
             date_trunc('month', ex_date)::date as ex_month_start,
             sum(dps)::numeric as month_dps,
             min(ex_date)::date as min_ex_date,
             max(ex_date)::date as max_ex_date,
             count(*)::int as n_events
-          from fundlab.stock_dividend
+          from fundlab.stock_dividend_ace
           where (:date_from is null or ex_date >= :date_from)
           group by 1,2
         ) d
         left join lateral (
           select max(price_date)::date as prev_month_end_date
-          from fundlab.stock_price
-          where isin = d.isin
+          from fundlab.stock_price_ace
+          where ace_code = d.ace_code
             and price_date >= (d.ex_month_start - interval '1 month')
             and price_date < d.ex_month_start
         ) pm on true
-        left join fundlab.stock_price sp
-          on sp.isin = d.isin
+        left join fundlab.stock_price_ace sp
+          on sp.ace_code = d.ace_code
          and sp.price_date = pm.prev_month_end_date
         """
     )
@@ -253,17 +253,17 @@ def refresh_stock_dividend_yields(scope: str = "All") -> tuple[dict, pd.DataFram
                 values_sql_parts = []
                 params = {}
                 for i, row in enumerate(chunk.itertuples(index=False), start=1):
-                    values_sql_parts.append(f"(:isin{i}, :price_date{i}, :yield{i})")
-                    params[f"isin{i}"] = row.isin
+                    values_sql_parts.append(f"(:ace_code{i}, :price_date{i}, :yield{i})")
+                    params[f"ace_code{i}"] = row.ace_code
                     params[f"price_date{i}"] = row.price_date
                     params[f"yield{i}"] = float(row.dividend_yield)
 
                 update_sql = sa.text(
                     f"""
-                    update fundlab.stock_price sp
+                    update fundlab.stock_price_ace sp
                     set dividend_yield = v.dividend_yield
-                    from (values {", ".join(values_sql_parts)}) as v(isin, price_date, dividend_yield)
-                    where sp.isin = v.isin
+                    from (values {", ".join(values_sql_parts)}) as v(ace_code, price_date, dividend_yield)
+                    where sp.ace_code = v.ace_code
                       and sp.price_date = v.price_date
                     """
                 )

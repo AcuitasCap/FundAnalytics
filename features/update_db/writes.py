@@ -10,6 +10,7 @@ from .data import (
     find_company_name_ace_conflicts, find_conflicts_annual,
     find_missing_portfolio_ace_codes, load_ace_industry_flags,
 )
+from .validation import _normalize_ace_codes
 
 # Comment to refresh Streamlit 
 
@@ -277,16 +278,16 @@ def upload_roe_roce(df: pd.DataFrame):
 
 def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
     """
-    Upload stock prices + market cap into fundlab.stock_price in batches.
+    Upload stock prices + market cap into fundlab.stock_price_ace in batches.
 
     Expected canonical columns in df:
-      - isin
+      - ace_code
       - price_date  (python date)
       - market_cap
       - price
 
-    Logical key should be (isin, price_date). If the table currently allows multiple
-    rows for the same ISIN/date, valuation rebuilds can be distorted downstream.
+    Logical key should be (ace_code, price_date). If the table currently allows
+    multiple rows for the same ACE code/date, valuation rebuilds can be distorted.
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -294,20 +295,21 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
         if n == 0:
             return
 
-        # IMPORTANT: the database should enforce a single row per (isin, price_date).
+        # Match the table's exact-row uniqueness rule; reject duplicate ACE/date
+        # combinations within each upload during validation.
         insert_sql = text("""
-            INSERT INTO fundlab.stock_price (
-                isin,
+            INSERT INTO fundlab.stock_price_ace (
+                ace_code,
                 price_date,
                 market_cap,
                 price
             )
             SELECT
-                unnest(:isins)       AS isin,
+                unnest(:ace_codes)   AS ace_code,
                 unnest(:dates)       AS price_date,
                 unnest(:mcaps)       AS market_cap,
                 unnest(:prices)      AS price
-            ON CONFLICT (isin, price_date, market_cap, price)
+            ON CONFLICT (ace_code, price_date, market_cap, price)
             DO NOTHING
         """)
 
@@ -317,7 +319,7 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
             chunk = df.iloc[start:end]
 
             params = {
-                "isins":  list(chunk["isin"].astype(str)),
+                "ace_codes": list(chunk["ace_code"].astype(str)),
                 "dates":  list(chunk["price_date"]),                     # python date → date[]
                 "mcaps":  [float(x) for x in chunk["market_cap"]],
                 "prices": [float(x) for x in chunk["price"]],
@@ -558,18 +560,18 @@ def upload_fund_manager_tenure(df_clean: pd.DataFrame, resolutions: dict) -> Non
 
 def upload_stock_dividends(df: pd.DataFrame) -> None:
     """
-    Upload dividend events into fundlab.stock_dividend.
+    Upload dividend events into fundlab.stock_dividend_ace.
 
     Expected columns in df:
-      - isin (text)
+      - ace_code (varchar 10)
       - ex_date (date or datetime)
       - dps (numeric)
 
     Table:
-      fundlab.stock_dividend(isin text, ex_date date, dps numeric, PK(isin, ex_date))
+      fundlab.stock_dividend_ace(ace_code, ex_date, dps, PK(ace_code, ex_date))
 
     Behavior:
-      - Upsert on (isin, ex_date): updates dps if already exists
+      - Upsert on (ace_code, ex_date): updates dps if already exists
       - Chunked inserts
     """
     import sqlalchemy as sa
@@ -578,46 +580,45 @@ def upload_stock_dividends(df: pd.DataFrame) -> None:
     if df is None or df.empty:
         raise ValueError("No dividend rows to upload.")
 
-    required = {"isin", "ex_date", "dps"}
+    required = {"ace_code", "ex_date", "dps"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"Dividend upload missing required columns: {sorted(missing)}")
 
     # Clean / normalize
     d = df.copy()
-    d["isin"] = d["isin"].astype(str).str.strip()
+    d["ace_code"] = _normalize_ace_codes(d["ace_code"])
     d["ex_date"] = pd.to_datetime(d["ex_date"], errors="coerce").dt.date
     d["dps"] = pd.to_numeric(d["dps"], errors="coerce")
 
-    bad_isin = d["isin"].isna() | (d["isin"] == "") | (d["isin"].str.lower() == "nan")
     bad_date = d["ex_date"].isna()
     bad_dps = d["dps"].isna() | (d["dps"] < 0)
 
-    if bad_isin.any() or bad_date.any() or bad_dps.any():
-        n_bad = int((bad_isin | bad_date | bad_dps).sum())
-        examples = d.loc[bad_isin | bad_date | bad_dps, ["isin", "ex_date", "dps"]].head(10)
+    if bad_date.any() or bad_dps.any():
+        n_bad = int((bad_date | bad_dps).sum())
+        examples = d.loc[bad_date | bad_dps, ["ace_code", "ex_date", "dps"]].head(10)
         raise ValueError(
-            f"Invalid dividend rows: {n_bad} rows have blank ISIN / invalid ex_date / invalid dps.\n"
+            f"Invalid dividend rows: {n_bad} rows have invalid ex_date / invalid dps.\n"
             f"Examples:\n{examples.to_string(index=False)}"
         )
 
     # Drop exact duplicates within file (keep last)
-    d = d.drop_duplicates(subset=["isin", "ex_date"], keep="last").reset_index(drop=True)
+    d = d.drop_duplicates(subset=["ace_code", "ex_date"], keep="last").reset_index(drop=True)
 
     engine = get_engine()
 
     upsert_sql = sa.text(
         """
-        insert into fundlab.stock_dividend (isin, ex_date, dps)
-        values (:isin, :ex_date, :dps)
-        on conflict (isin, ex_date) do update
+        insert into fundlab.stock_dividend_ace (ace_code, ex_date, dps)
+        values (:ace_code, :ex_date, :dps)
+        on conflict (ace_code, ex_date) do update
         set dps = excluded.dps
         """
     )
 
     # Chunked execute
     chunk_size = 5000
-    rows = d[["isin", "ex_date", "dps"]].to_dict(orient="records")
+    rows = d[["ace_code", "ex_date", "dps"]].to_dict(orient="records")
 
     try:
         with engine.begin() as conn:

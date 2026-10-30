@@ -11,7 +11,7 @@ from .corporate_actions import validate_stock_corporate_actions
 from .data import (
     CompanyNameAceConflictError, MissingPortfolioAceCodesError, _read_any,
     find_company_name_ace_conflicts, find_missing_portfolio_ace_codes,
-    load_ace_industry_flags, load_existing_fund_names, load_stock_master_isins,
+    load_ace_industry_flags, load_existing_fund_names, load_stock_master_ace_codes,
 )
 from .display import (
     display_ace_stock_master_next_steps, display_company_name_ace_conflicts,
@@ -94,7 +94,7 @@ def update_db_page():
     state_key_ok = f"validated_ok_{upload_type}"
     validated_file_hash = None
     hash_key = f"validated_file_hash_{upload_type}"
-    if upload_type in {"Fund portfolios", "Update stock master", "Company RoE / RoCE"}:
+    if upload_type in {"Fund portfolios", "Update stock master", "Company RoE / RoCE", "Stock dividends (DPS + Ex-date)", "Stock prices and market cap"}:
         validated_file_hash = hashlib.sha256(uploaded.getvalue()).hexdigest()
         if st.session_state.get(hash_key) != validated_file_hash:
             st.session_state[state_key_ok] = False
@@ -132,9 +132,9 @@ def update_db_page():
             elif upload_type == "Company RoE / RoCE":
                 df_clean, summary = validate_roe_roce(df_raw)
             elif upload_type == "Stock prices and market cap":
-                df_clean, summary = validate_stock_prices_mc(df_raw, valid_isins=load_stock_master_isins())
+                df_clean, summary = validate_stock_prices_mc(df_raw, valid_ace_codes=load_stock_master_ace_codes())
             elif upload_type == "Stock dividends (DPS + Ex-date)":
-                # EXPECTED output columns: ['isin','ex_date','dps']
+                # Expected output columns: ace_code, ex_date, dps.
                 df_clean, summary = validate_stock_dividends(df_raw)
             elif upload_type == "Stock corporate actions (Bonus/Split)":
                 df_clean, summary = validate_stock_corporate_actions(
@@ -329,6 +329,8 @@ def update_db_page():
                     "Company PAT (quarterly)",
                     "Company sales (quarterly)",
                     "Company RoE / RoCE",
+                    "Stock dividends (DPS + Ex-date)",
+                    "Stock prices and market cap",
                 }
                 if ace_upload and "foreign key constraint" in lower_msg:
                     st.error(
@@ -341,6 +343,8 @@ def update_db_page():
                     period_label = (
                         "year-end"
                         if upload_type in {"Company book value (annual)", "Company RoE / RoCE"}
+                        else "ex-date" if upload_type == "Stock dividends (DPS + Ex-date)"
+                        else "price date" if upload_type == "Stock prices and market cap"
                         else "quarter-end"
                     )
                     st.error(

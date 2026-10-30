@@ -153,11 +153,11 @@ def find_conflicts_annual(df_clean: pd.DataFrame):
     return rows
 
 
-def load_stock_master_isins():
+def load_stock_master_ace_codes():
     engine = get_engine()
     with engine.connect() as conn:
-        df = pd.read_sql("SELECT isin FROM fundlab.stock_master", conn)
-    return set(df["isin"].astype(str))
+        df = pd.read_sql("SELECT ace_code FROM fundlab.stock_master_ace", conn)
+    return set(df["ace_code"].astype(str))
 
 
 def _read_any(uploaded_file):
