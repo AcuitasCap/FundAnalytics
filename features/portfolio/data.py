@@ -58,9 +58,28 @@ def fetch_portfolio_view_data(fund_id: int, start_date: date, end_date: date) ->
     """)
     holdings = pd.read_sql(holdings_query, get_engine(), params={"fund_id": fund_id, "start_date": start_date, "end_date": end_date})
     size_band_query = text("""
-        SELECT ace_code, band_date AS month_end, size_band
-        FROM fundlab.stock_size_band_ace
-        WHERE band_date >= :start_date AND band_date <= :end_date
+        WITH relevant_codes AS (
+            SELECT DISTINCT ace_code
+            FROM fundlab.fund_portfolio_ace
+            WHERE fund_id = :fund_id
+              AND month_end BETWEEN :start_date AND :end_date
+              AND ace_code IS NOT NULL
+        )
+        SELECT sb.ace_code, sb.band_date AS month_end, sb.size_band
+        FROM fundlab.stock_size_band_ace sb
+        JOIN relevant_codes c ON c.ace_code = sb.ace_code
+        WHERE sb.band_date BETWEEN :start_date AND :end_date
+        UNION ALL
+        SELECT c.ace_code, prior.band_date AS month_end, prior.size_band
+        FROM relevant_codes c
+        CROSS JOIN LATERAL (
+            SELECT band_date, size_band
+            FROM fundlab.stock_size_band_ace
+            WHERE ace_code = c.ace_code AND band_date < :start_date
+            ORDER BY band_date DESC
+            LIMIT 1
+        ) prior
+        ORDER BY ace_code, month_end
     """)
-    size_bands = pd.read_sql(size_band_query, get_engine(), params={"start_date": start_date, "end_date": end_date})
+    size_bands = pd.read_sql(size_band_query, get_engine(), params={"fund_id": fund_id, "start_date": start_date, "end_date": end_date})
     return holdings, size_bands

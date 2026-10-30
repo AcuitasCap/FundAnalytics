@@ -54,7 +54,7 @@ def _build_size_asset_allocation_pivot(holdings: pd.DataFrame, size_band: pd.Dat
     order = data[["period", "month_end"]].drop_duplicates().sort_values("month_end")["period"].tolist()
     pivot = data.groupby(["Allocation", "period"], as_index=False)["weight_pct"].sum().pivot(index="Allocation", columns="period", values="weight_pct").fillna(0.0).reindex(columns=order)
     preferred = ["Large", "Mid", "Small", "Micro", "Overseas Equities", "Cash", "Unclassified", "Others"]
-    return pivot.reindex(preferred + sorted(row for row in pivot.index if row not in preferred)).reset_index()
+    return pivot.reindex(preferred + sorted(row for row in pivot.index if row not in preferred), fill_value=0.0).reset_index()
 
 
 def _render_portfolio_view(result: tuple[pd.DataFrame, pd.DataFrame], context: dict) -> None:
@@ -87,7 +87,10 @@ def _render_portfolio_view(result: tuple[pd.DataFrame, pd.DataFrame], context: d
             display[column] = display[column].apply(_format_number)
     st.subheader("5. Portfolio holdings")
     st.caption(f"Rows: instruments · Columns: {frequency.lower()} snapshots from {period_order[0]} to {period_order[-1]}")
-    st.dataframe(display, use_container_width=True, hide_index=True, height=520, column_config={"Sr. No": st.column_config.TextColumn("Sr. No", width="small"), "Instrument": st.column_config.TextColumn("Instrument", width="large")})
+    column_config = {"Sr. No": st.column_config.TextColumn("Sr. No", width="small"), "Instrument": st.column_config.TextColumn("Instrument", width="large")}
+    # Keep the total outside the sortable grid so column sorting cannot move it.
+    st.dataframe(display.iloc[:-1], use_container_width=True, hide_index=True, height=480, column_config=column_config)
+    st.dataframe(display.iloc[[-1]], use_container_width=True, hide_index=True, height=100, column_config=column_config)
     csv = holdings_numeric.copy()
     for column in csv.columns:
         if column not in ["Sr. No", "Instrument"]:
