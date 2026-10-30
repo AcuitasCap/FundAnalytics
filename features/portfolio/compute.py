@@ -10,7 +10,7 @@ def _build_composite_portfolio(df_all: pd.DataFrame, fund_proportions: dict[int,
         return None
     subset["fund_prop"] = subset["fund_id"].map(fund_proportions).astype(float)
     subset["allocation"] = subset["weight_pct"].astype(float) * subset["fund_prop"]
-    weights = subset.groupby("isin")["allocation"].sum()
+    weights = subset.groupby("ace_code")["allocation"].sum()
     total = weights.sum()
     return None if total == 0 else weights / total
 
@@ -27,8 +27,8 @@ def compute_active_share(df_all: pd.DataFrame, fund_proportions_a: dict[int, flo
         if weights_a is None or weights_b is None:
             active_share_pct = np.nan
         else:
-            shared_isins = weights_a.index.union(weights_b.index)
-            overlap = sum(min(float(weights_a.get(isin, 0)), float(weights_b.get(isin, 0))) for isin in shared_isins)
+            shared_ace_codes = weights_a.index.union(weights_b.index)
+            overlap = sum(min(float(weights_a.get(ace_code, 0)), float(weights_b.get(ace_code, 0))) for ace_code in shared_ace_codes)
             active_share_pct = (1.0 - overlap) * 100.0
         timestamp = pd.to_datetime(period)
         records.append({"period_date": timestamp, "period_label": timestamp.strftime("%b %Y"), "active_share_pct": active_share_pct})

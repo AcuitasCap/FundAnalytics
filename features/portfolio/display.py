@@ -27,20 +27,20 @@ def _build_size_asset_allocation_pivot(holdings: pd.DataFrame, size_band: pd.Dat
         return pd.DataFrame()
     data = _apply_frequency_snapshots(holdings, frequency)
     data["asset_type"] = data.get("asset_type", "").fillna("").astype(str)
-    data["isin"] = data.get("isin", "").fillna("").astype(str)
+    data["ace_code"] = data["ace_code"].fillna("").astype(str)
     data["weight_pct"] = pd.to_numeric(data["weight_pct"], errors="coerce").fillna(0.0)
     bands = size_band.copy() if size_band is not None else pd.DataFrame()
     if not bands.empty:
         bands["month_end"] = pd.to_datetime(bands["month_end"]).dt.to_period("M").dt.to_timestamp("M")
-        bands["isin"] = bands["isin"].fillna("").astype(str)
-        bands = bands[bands["size_band"].isin(["Large", "Mid", "Small"])].sort_values(["isin", "month_end"])
+        bands["ace_code"] = bands["ace_code"].fillna("").astype(str)
+        bands = bands[bands["size_band"].isin(["Large", "Mid", "Small", "Micro"])].sort_values(["ace_code", "month_end"])
         def merge_band(group):
-            matching = bands[bands["isin"] == group.name][["month_end", "size_band"]]
+            matching = bands[bands["ace_code"] == group.name][["month_end", "size_band"]]
             if matching.empty:
                 group["size_band"] = ""
                 return group
             return pd.merge_asof(group.sort_values("month_end"), matching, on="month_end", direction="backward")
-        data = data.sort_values(["isin", "month_end"]).groupby("isin", group_keys=False).apply(merge_band)
+        data = data.sort_values(["ace_code", "month_end"]).groupby("ace_code", group_keys=False).apply(merge_band)
     else:
         data["size_band"] = ""
     asset_type = data["asset_type"].str.strip()
@@ -49,11 +49,11 @@ def _build_size_asset_allocation_pivot(holdings: pd.DataFrame, size_band: pd.Dat
     data.loc[asset_type.isin(["Overseas Equities", "ADRs & GDRs"]), "Allocation"] = "Overseas Equities"
     domestic = asset_type.eq("Domestic Equities")
     bands = data.loc[domestic, "size_band"].astype(str).str.strip()
-    data.loc[domestic, "Allocation"] = bands.where(bands.isin(["Large", "Mid", "Small"]), other="Unclassified")
+    data.loc[domestic, "Allocation"] = bands.where(bands.isin(["Large", "Mid", "Small", "Micro"]), other="Unclassified")
     data["period"] = data["month_end"].dt.strftime("%b %Y")
     order = data[["period", "month_end"]].drop_duplicates().sort_values("month_end")["period"].tolist()
     pivot = data.groupby(["Allocation", "period"], as_index=False)["weight_pct"].sum().pivot(index="Allocation", columns="period", values="weight_pct").fillna(0.0).reindex(columns=order)
-    preferred = ["Large", "Mid", "Small", "Overseas Equities", "Cash", "Unclassified", "Others"]
+    preferred = ["Large", "Mid", "Small", "Micro", "Overseas Equities", "Cash", "Unclassified", "Others"]
     return pivot.reindex(preferred + sorted(row for row in pivot.index if row not in preferred)).reset_index()
 
 
