@@ -500,22 +500,23 @@ def recompute_quality_medians(batch_size: int = 10000):
     """
     For each stock and each month_end, compute median of last 5 RoE/RoCE
     observations (by year_end_date <= month_end) and store in
-    fundlab.stock_quality_median.
+    fundlab.stock_quality_median_ace.
     """
     engine = get_engine()
     with engine.begin() as conn:
         roe = pd.read_sql(
             """
-            SELECT isin, year_end_date, roe, roce
-            FROM fundlab.stock_roe_roce
-            ORDER BY isin, year_end_date
+            SELECT ace_code, year_end_date, roe, roce
+            FROM fundlab.stock_roe_roce_ace
+            WHERE ace_code IS NOT NULL
+            ORDER BY ace_code, year_end_date
             """,
             conn,
         )
         months = pd.read_sql(
             """
             SELECT DISTINCT month_end
-            FROM fundlab.fund_portfolio
+            FROM fundlab.fund_portfolio_ace
             ORDER BY month_end
             """,
             conn,
@@ -528,8 +529,8 @@ def recompute_quality_medians(batch_size: int = 10000):
     months_list = list(months["month_end"])
     rows = []
 
-    grouped = roe.groupby("isin", sort=False)
-    for isin, g in grouped:
+    grouped = roe.groupby("ace_code", sort=False)
+    for ace_code, g in grouped:
         g = g.sort_values("year_end_date")
         for m in months_list:
             hist = g[g["year_end_date"] <= m].tail(5)
@@ -537,7 +538,7 @@ def recompute_quality_medians(batch_size: int = 10000):
                 continue
             rows.append(
                 {
-                    "isin": isin,
+                    "ace_code": ace_code,
                     "month_end": m,
                     "median_roe_5y": hist["roe"].median(skipna=True),
                     "median_roce_5y": hist["roce"].median(skipna=True),
@@ -551,18 +552,18 @@ def recompute_quality_medians(batch_size: int = 10000):
     med_df = pd.DataFrame(rows)
 
     insert_sql = text("""
-        INSERT INTO fundlab.stock_quality_median (
-            isin,
+        INSERT INTO fundlab.stock_quality_median_ace (
+            ace_code,
             month_end,
             median_roe_5y,
             median_roce_5y
         )
         SELECT
-            unnest(:isins),
+            unnest(:ace_codes),
             unnest(:month_ends),
             unnest(:med_roe),
             unnest(:med_roce)
-        ON CONFLICT (isin, month_end)
+        ON CONFLICT (ace_code, month_end)
         DO UPDATE
         SET median_roe_5y  = EXCLUDED.median_roe_5y,
             median_roce_5y = EXCLUDED.median_roce_5y
@@ -575,7 +576,7 @@ def recompute_quality_medians(batch_size: int = 10000):
             end = min(start + batch_size, n)
             chunk = med_df.iloc[start:end]
             params = {
-                "isins":      list(chunk["isin"].astype(str)),
+                "ace_codes":  list(chunk["ace_code"].astype(str)),
                 "month_ends": list(chunk["month_end"]),
                 "med_roe":    [None if pd.isna(x) else float(x) for x in chunk["median_roe_5y"]],
                 "med_roce":   [None if pd.isna(x) else float(x) for x in chunk["median_roce_5y"]],
@@ -592,24 +593,24 @@ def recompute_quality_quartiles(batch_size: int = 10000):
     with engine.begin() as conn:
         med = pd.read_sql(
             """
-            SELECT isin, month_end, median_roe_5y, median_roce_5y
-            FROM fundlab.stock_quality_median
-            ORDER BY isin, month_end
+            SELECT ace_code, month_end, median_roe_5y, median_roce_5y
+            FROM fundlab.stock_quality_median_ace
+            ORDER BY ace_code, month_end
             """,
             conn,
         )
         size = pd.read_sql(
             """
-            SELECT isin, band_date, size_band
-            FROM fundlab.stock_size_band
-            ORDER BY isin, band_date
+            SELECT ace_code, band_date, size_band
+            FROM fundlab.stock_size_band_ace
+            ORDER BY ace_code, band_date
             """,
             conn,
         )
         master = pd.read_sql(
             """
-            SELECT isin, is_financial
-            FROM fundlab.stock_master
+            SELECT ace_code, is_financial
+            FROM fundlab.stock_master_ace
             """,
             conn,
         )
@@ -618,11 +619,11 @@ def recompute_quality_quartiles(batch_size: int = 10000):
         st.warning("Quality medians or size bands are empty.")
         return
 
-    # Map size_band to each (isin, month_end) using last band_date <= month_end
+    # Map size_band to each (ace_code, month_end) using last band_date <= month_end.
     months = med["month_end"].sort_values().unique()
     size_records = []
 
-    for isin, g in size.groupby("isin", sort=False):
+    for ace_code, g in size.groupby("ace_code", sort=False):
         g = g.sort_values("band_date")
         for m in months:
             sub = g[g["band_date"] <= m]
@@ -630,14 +631,14 @@ def recompute_quality_quartiles(batch_size: int = 10000):
                 continue
             band = sub.iloc[-1]["size_band"]
             size_records.append(
-                {"isin": isin, "month_end": m, "size_band": band}
+                {"ace_code": ace_code, "month_end": m, "size_band": band}
             )
 
     size_for_month = pd.DataFrame(size_records)
 
     full = (
-        med.merge(size_for_month, on=["isin", "month_end"], how="inner")
-           .merge(master, on="isin", how="left")
+        med.merge(size_for_month, on=["ace_code", "month_end"], how="inner")
+           .merge(master, on="ace_code", how="left")
     )
     full["is_financial"] = full["is_financial"].fillna(False)
 
@@ -646,7 +647,7 @@ def recompute_quality_quartiles(batch_size: int = 10000):
     for m, g_m in full.groupby("month_end", sort=False):
         for fin_flag in (True, False):
             g_f = g_m[g_m["is_financial"] == fin_flag]
-            for band in ("Large", "Mid", "Small"):
+            for band in ("Large", "Mid", "Small", "Micro"):
                 g_b = g_f[g_f["size_band"] == band]
                 if g_b.empty:
                     continue
@@ -690,12 +691,12 @@ def recompute_quality_quartiles(batch_size: int = 10000):
 
                     q_labels = ranks.apply(q_of_rank)
 
-                for isin_val, qm, qlab in zip(
-                    g_b["isin"], g_b["quality_metric"], q_labels
+                for ace_code_val, qm, qlab in zip(
+                    g_b["ace_code"], g_b["quality_metric"], q_labels
                 ):
                     rows.append(
                         {
-                            "isin": isin_val,
+                            "ace_code": ace_code_val,
                             "month_end": m,
                             "size_band": band,
                             "is_financial": fin_flag,
@@ -711,8 +712,8 @@ def recompute_quality_quartiles(batch_size: int = 10000):
     quart_df = pd.DataFrame(rows)
 
     insert_sql = text("""
-        INSERT INTO fundlab.stock_quality_quartile (
-            isin,
+        INSERT INTO fundlab.stock_quality_quartile_ace (
+            ace_code,
             month_end,
             size_band,
             is_financial,
@@ -720,13 +721,13 @@ def recompute_quality_quartiles(batch_size: int = 10000):
             quality_quartile
         )
         SELECT
-            unnest(:isins),
+            unnest(:ace_codes),
             unnest(:month_ends),
             unnest(:bands),
             unnest(:fin_flags),
             unnest(:metrics),
             unnest(:quartiles)
-        ON CONFLICT (isin, month_end)
+        ON CONFLICT (ace_code, month_end)
         DO UPDATE
         SET size_band        = EXCLUDED.size_band,
             is_financial     = EXCLUDED.is_financial,
@@ -740,7 +741,7 @@ def recompute_quality_quartiles(batch_size: int = 10000):
             end = min(start + batch_size, n)
             chunk = quart_df.iloc[start:end]
             params = {
-                "isins":      list(chunk["isin"].astype(str)),
+                "ace_codes":  list(chunk["ace_code"].astype(str)),
                 "month_ends": list(chunk["month_end"]),
                 "bands":      list(chunk["size_band"].astype(str)),
                 "fin_flags":  list(chunk["is_financial"].astype(bool)),

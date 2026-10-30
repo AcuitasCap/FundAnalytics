@@ -94,7 +94,7 @@ def update_db_page():
     state_key_ok = f"validated_ok_{upload_type}"
     validated_file_hash = None
     hash_key = f"validated_file_hash_{upload_type}"
-    if upload_type in {"Fund portfolios", "Update stock master"}:
+    if upload_type in {"Fund portfolios", "Update stock master", "Company RoE / RoCE"}:
         validated_file_hash = hashlib.sha256(uploaded.getvalue()).hexdigest()
         if st.session_state.get(hash_key) != validated_file_hash:
             st.session_state[state_key_ok] = False
@@ -328,6 +328,7 @@ def update_db_page():
                     "Company book value (annual)",
                     "Company PAT (quarterly)",
                     "Company sales (quarterly)",
+                    "Company RoE / RoCE",
                 }
                 if ace_upload and "foreign key constraint" in lower_msg:
                     st.error(
@@ -338,7 +339,9 @@ def update_db_page():
                     "duplicate key value" in lower_msg or "unique constraint" in lower_msg
                 ):
                     period_label = (
-                        "year-end" if upload_type == "Company book value (annual)" else "quarter-end"
+                        "year-end"
+                        if upload_type in {"Company book value (annual)", "Company RoE / RoCE"}
+                        else "quarter-end"
                     )
                     st.error(
                         f"These ACE code + {period_label} combinations already exist. "

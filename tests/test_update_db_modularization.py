@@ -257,6 +257,61 @@ def test_ace_stock_master_next_step_reminder_is_prominent(monkeypatch):
     assert "stock_annual_bv_ace" in warnings[0]
 
 
+def test_roe_roce_validation_uses_ace_code_and_numeric_year_end():
+    import pytest
+    from features.update_db.validation import validate_roe_roce
+
+    upload = pd.DataFrame({
+        "ACE code": [100325.0],
+        "Company name": ["Reliance Industries"],
+        "Year-end (YYYYMM)": [202503],
+        "RoE": [10.2],
+        "RoCE": [12.8],
+    })
+    clean, summary = validate_roe_roce(upload)
+    assert clean.loc[0, "ace_code"] == "100325"
+    assert clean.loc[0, "year_end"] == 202503
+    assert clean.loc[0, "year_end_date"].isoformat() == "2025-03-31"
+    assert summary["unique_ace_year"] == 1
+
+    duplicate = pd.concat([upload, upload], ignore_index=True)
+    with pytest.raises(ValueError, match="Duplicate.*ace_code"):
+        validate_roe_roce(duplicate)
+
+
+def test_roe_roce_writer_preserves_unprovided_metric_in_ace_table(monkeypatch):
+    from features.update_db import writes
+
+    statements = []
+
+    class Conn:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+
+    class Engine:
+        def begin(self):
+            class Context:
+                def __enter__(self):
+                    return Conn()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Context()
+
+    monkeypatch.setattr(writes, "get_engine", lambda: Engine())
+    writes.upload_roe_roce(pd.DataFrame([{
+        "ace_code": "100325", "year_end_date": pd.Timestamp("2025-03-31").date(),
+        "year_end": 202503, "roe": 11.5, "roce": pd.NA,
+    }]))
+    sql, params = statements[0]
+    assert "INSERT INTO fundlab.stock_roe_roce_ace" in sql
+    assert "COALESCE(EXCLUDED.roce, stock_roe_roce_ace.roce)" in sql
+    assert params["ace_code"] == "100325"
+    assert params["year_end"] == 202503
+    assert params["roce"] is None
+
+
 def test_company_financial_validators_parse_uploaded_periods_without_database_access():
     from features.update_db.validation import (
         validate_annual_book_value,

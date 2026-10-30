@@ -74,7 +74,7 @@ def show_expected_format(upload_type: str):
         st.markdown("**Expected format (Stock RoE.xlsx):**")
         sample = pd.DataFrame(
             {
-                "ISIN": ["INE002A01018"],
+                "ACE code": ["100325"],
                 "Company name": ["Reliance Industries"],
                 "Year-end (YYYYMM)": [202303],
                 "RoE": [10.2],
@@ -82,6 +82,10 @@ def show_expected_format(upload_type: str):
             }
         )
         st.dataframe(sample)
+        st.info(
+            "ACE code must exist in fundlab.stock_master_ace. Company name is optional "
+            "for reference and is not stored in stock_roe_roce_ace."
+        )
     elif upload_type == "Stock prices and market cap":
         st.markdown("**Expected format (example):**")
         sample = pd.DataFrame(

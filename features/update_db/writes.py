@@ -254,22 +254,23 @@ def upload_roe_roce(df: pd.DataFrame):
     engine = get_engine()
     with engine.begin() as conn:
         ins = text("""
-            INSERT INTO fundlab.stock_roe_roce (isin, year_end_date, roe, roce, company_name)
-            VALUES (:isin, :d, :roe, :roce, :name)
-            ON CONFLICT (isin, year_end_date) DO UPDATE
-            SET roe = COALESCE(EXCLUDED.roe, stock_roe_roce.roe),
-                roce = COALESCE(EXCLUDED.roce, stock_roe_roce.roce),
-                company_name = COALESCE(EXCLUDED.company_name, stock_roe_roce.company_name)
+            INSERT INTO fundlab.stock_roe_roce_ace
+                (ace_code, year_end_date, year_end, roe, roce)
+            VALUES (:ace_code, :d, :year_end, :roe, :roce)
+            ON CONFLICT (ace_code, year_end_date) DO UPDATE
+            SET year_end = EXCLUDED.year_end,
+                roe = COALESCE(EXCLUDED.roe, stock_roe_roce_ace.roe),
+                roce = COALESCE(EXCLUDED.roce, stock_roe_roce_ace.roce)
         """)
         for _, r in df.iterrows():
             conn.execute(
                 ins,
                 {
-                    "isin": r["isin"],
+                    "ace_code": r["ace_code"],
                     "d": r["year_end_date"],
+                    "year_end": int(r["year_end"]),
                     "roe": None if pd.isna(r.get("roe")) else float(r["roe"]),
                     "roce": None if pd.isna(r.get("roce")) else float(r["roce"]),
-                    "name": r.get("company_name"),
                 },
             )
 

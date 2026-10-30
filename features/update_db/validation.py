@@ -65,7 +65,7 @@ FINANCIAL_INDUSTRIES = {
 }
 
 ROE_ROCE_COLS = {
-    "isin": ["isin"],
+    "ace_code": ["ace code", "ace_code", "ace-code"],
     "company_name": ["company name", "company_name", "name"],
     "year_end": ["year-end (yyyymm)", "year end (yyyymm)", "year_end", "yearend", "yyyymm"],
     "roe": ["roe"],
@@ -287,18 +287,20 @@ def validate_ace_stock_master(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]
 
 
 def validate_roe_roce(df_raw: pd.DataFrame):
-    required = {"isin", "year_end"}
+    required = {"ace_code", "year_end"}
     df = map_headers(df_raw.copy(), ROE_ROCE_COLS, required)
 
-    df["isin"] = df["isin"].astype(str).str.strip()
+    df["ace_code"] = _normalize_ace_codes(df["ace_code"])
 
     df["year_end"] = pd.to_numeric(df["year_end"], errors="coerce").astype("Int64")
     if df["year_end"].isna().any():
         raise ValueError("Some year-end values could not be parsed as YYYYMM.")
 
     # Convert YYYYMM to date (last day of month)
-    df["year_end"] = df["year_end"].astype(int).astype(str)
-    df["year_end_date"] = pd.to_datetime(df["year_end"] + "01", format="%Y%m%d") + pd.offsets.MonthEnd(0)
+    df["year_end"] = df["year_end"].astype(int)
+    df["year_end_date"] = pd.to_datetime(
+        df["year_end"].astype(str) + "01", format="%Y%m%d"
+    ) + pd.offsets.MonthEnd(0)
     df["year_end_date"] = df["year_end_date"].dt.date
 
     for col in ("roe", "roce"):
@@ -307,14 +309,14 @@ def validate_roe_roce(df_raw: pd.DataFrame):
         else:
             df[col] = pd.NA
 
-    dup_keys = df.groupby(["isin", "year_end_date"]).size()
+    dup_keys = df.groupby(["ace_code", "year_end_date"]).size()
     dups = dup_keys[dup_keys > 1]
     if not dups.empty:
-        raise ValueError(f"Duplicate (isin, year_end_date) rows found in file: {len(dups)} duplicates.")
+        raise ValueError(f"Duplicate (ace_code, year_end_date) rows found in file: {len(dups)} duplicates.")
 
     summary = {
         "rows": int(len(df)),
-        "unique_isin_year": int(len(dup_keys)),
+        "unique_ace_year": int(len(dup_keys)),
     }
     return df, summary
 
