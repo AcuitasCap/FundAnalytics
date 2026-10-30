@@ -14,11 +14,11 @@ HOLDING_COLUMNS = [
     "fund_id",
     "holding_month_end",
     "anchor_month_end",
-    "isin",
+    "ace_code",
     "weight_pct",
     "is_financial",
 ]
-MULTIPLE_COLUMNS = ["isin", "month_end", "ps", "pe", "pb"]
+MULTIPLE_COLUMNS = ["ace_code", "month_end", "ps", "pe", "pb"]
 
 
 def _empty_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -49,15 +49,15 @@ def load_portfolio_valuation_inputs(
                 fp.fund_id,
                 fp.month_end::date AS holding_month_end,
                 fp.month_end::date AS anchor_month_end,
-                fp.isin,
+                fp.ace_code,
                 fp.holding_weight AS weight_pct,
                 sm.is_financial
-            FROM fundlab.fund_portfolio fp
-            JOIN fundlab.stock_master sm ON sm.isin = fp.isin
+            FROM fundlab.fund_portfolio_ace fp
+            JOIN fundlab.stock_master_ace sm ON sm.ace_code = fp.ace_code
             WHERE fp.fund_id = ANY(:fund_ids)
               AND fp.asset_type = 'Domestic Equities'
               AND fp.month_end BETWEEN :start_date AND :end_date
-            ORDER BY fp.fund_id, fp.month_end, fp.holding_weight DESC, fp.isin
+            ORDER BY fp.fund_id, fp.month_end, fp.holding_weight DESC, fp.ace_code
             """
         )
         holdings_params = {
@@ -70,7 +70,7 @@ def load_portfolio_valuation_inputs(
             """
             WITH anchors AS (
                 SELECT fund_id, MAX(month_end) AS anchor_month_end
-                FROM fundlab.fund_portfolio
+                FROM fundlab.fund_portfolio_ace
                 WHERE fund_id = ANY(:fund_ids)
                   AND asset_type = 'Domestic Equities'
                   AND month_end <= :end_date
@@ -80,16 +80,16 @@ def load_portfolio_valuation_inputs(
                 fp.fund_id,
                 fp.month_end::date AS holding_month_end,
                 a.anchor_month_end::date AS anchor_month_end,
-                fp.isin,
+                fp.ace_code,
                 fp.holding_weight AS weight_pct,
                 sm.is_financial
             FROM anchors a
-            JOIN fundlab.fund_portfolio fp
+            JOIN fundlab.fund_portfolio_ace fp
               ON fp.fund_id = a.fund_id
              AND fp.month_end = a.anchor_month_end
-            JOIN fundlab.stock_master sm ON sm.isin = fp.isin
+            JOIN fundlab.stock_master_ace sm ON sm.ace_code = fp.ace_code
             WHERE fp.asset_type = 'Domestic Equities'
-            ORDER BY fp.fund_id, fp.holding_weight DESC, fp.isin
+            ORDER BY fp.fund_id, fp.holding_weight DESC, fp.ace_code
             """
         )
         holdings_params = {"fund_ids": fund_ids, "end_date": end_date}
@@ -101,7 +101,7 @@ def load_portfolio_valuation_inputs(
         return _empty_inputs()
 
     holdings["fund_id"] = pd.to_numeric(holdings["fund_id"], errors="coerce")
-    holdings["isin"] = holdings["isin"].astype(str).str.strip()
+    holdings["ace_code"] = holdings["ace_code"].astype(str).str.strip()
     holdings["weight_pct"] = pd.to_numeric(holdings["weight_pct"], errors="coerce")
     holdings["is_financial"] = holdings["is_financial"].fillna(False).astype(bool)
     for column in ("holding_month_end", "anchor_month_end"):
@@ -111,34 +111,34 @@ def load_portfolio_valuation_inputs(
             .dt.to_timestamp("M")
         )
     holdings = holdings.dropna(
-        subset=["fund_id", "holding_month_end", "anchor_month_end", "isin", "weight_pct"]
+        subset=["fund_id", "holding_month_end", "anchor_month_end", "ace_code", "weight_pct"]
     )
     holdings["fund_id"] = holdings["fund_id"].astype(int)
     holdings = holdings[holdings["weight_pct"] > 0].copy()
     if holdings.empty:
         return _empty_inputs()
 
-    isins = sorted(holdings["isin"].unique().tolist())
+    ace_codes = sorted(holdings["ace_code"].unique().tolist())
     multiples_sql = text(
         """
-        SELECT isin, month_end::date AS month_end, ps, pe, pb
-        FROM fundlab.stock_monthly_valuations
-        WHERE isin = ANY(:isins)
+        SELECT ace_code, month_end::date AS month_end, ps, pe, pb
+        FROM fundlab.stock_monthly_valuations_ace
+        WHERE ace_code = ANY(:ace_codes)
           AND month_end BETWEEN :start_date AND :end_date
-        ORDER BY isin, month_end
+        ORDER BY ace_code, month_end
         """
     )
     with engine.begin() as conn:
         multiples = pd.read_sql(
             multiples_sql,
             conn,
-            params={"isins": isins, "start_date": start_date, "end_date": end_date},
+            params={"ace_codes": ace_codes, "start_date": start_date, "end_date": end_date},
         )
 
     if multiples.empty:
         return holdings[HOLDING_COLUMNS].reset_index(drop=True), pd.DataFrame(columns=MULTIPLE_COLUMNS)
 
-    multiples["isin"] = multiples["isin"].astype(str).str.strip()
+    multiples["ace_code"] = multiples["ace_code"].astype(str).str.strip()
     multiples["month_end"] = (
         pd.to_datetime(multiples["month_end"], errors="coerce")
         .dt.to_period("M")
@@ -146,13 +146,13 @@ def load_portfolio_valuation_inputs(
     )
     for column in ("ps", "pe", "pb"):
         multiples[column] = pd.to_numeric(multiples[column], errors="coerce")
-    multiples = multiples.dropna(subset=["isin", "month_end"])
+    multiples = multiples.dropna(subset=["ace_code", "month_end"])
     multiples["month_key"] = multiples["month_end"].dt.to_period("M")
     multiples = ensure_unique_monthly_rows(
         multiples,
-        key_cols=["isin", "month_key"],
+        key_cols=["ace_code", "month_key"],
         value_cols=["ps", "pe", "pb"],
-        context="fundlab.stock_monthly_valuations",
+        context="fundlab.stock_monthly_valuations_ace",
     ).drop(columns=["month_key"])
 
     return (
@@ -167,8 +167,8 @@ def cached_portfolio_valuation_inputs(
     start_date: dt.date,
     end_date: dt.date,
     mode: str,
-    data_version: str = "stock-multiples-v2",
+    data_version: str = "ace-stock-multiples-v3",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Cache the read-only input frames; calculations remain live and local."""
+    """Cache ACE-based input frames; calculations remain live and local."""
     del data_version
     return load_portfolio_valuation_inputs(list(fund_ids), start_date, end_date, mode)

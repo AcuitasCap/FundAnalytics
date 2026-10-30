@@ -39,7 +39,7 @@ def _run_attrib_smoke_test():
     focus_name = focus if focus in funds_df["fund_name"].tolist() else fallback_focus
     focus_id = int(funds_df.loc[funds_df["fund_name"] == focus_name, "fund_id"].iloc[0])
 
-    raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=lookback_years, data_version="v1")
+    raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=lookback_years, data_version="ace-v2")
     stock_df, hit_df, cat_df, diag = _compute_attribution(
         raw, start_me, end_me, bench_mode, lens=lens, universe_mode="Full holdings"
     )
@@ -109,7 +109,7 @@ def _run_attrib_smoke_test():
     if not results_ok:
         dom_debug = diag.get("domestic_decomp_debug", {})
         print("Diagnostics:")
-        print(f"- Domestic ISIN count: {diag.get('domestic_decomp_stock_count')}")
+        print(f"- Domestic ACE code count: {diag.get('domestic_decomp_stock_count')}")
         print(f"- Start multiple: {dom_debug.get('start_multiple')}")
         print(f"- End multiple: {dom_debug.get('end_multiple')}")
         print(f"- Start coverage weight: {dom_debug.get('start_coverage_weight')}")

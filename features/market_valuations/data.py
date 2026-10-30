@@ -11,7 +11,7 @@ from core.db import get_engine
 
 
 METRIC_COLUMNS = {"P/S": "ps", "P/E": "pe", "P/B": "pb"}
-COHORT_BANDS = {"Large caps": "Large", "Mid caps": "Mid", "Small caps": "Small"}
+COHORT_BANDS = {"Large caps": "Large", "Mid caps": "Mid", "Small caps": "Small", "Micro caps": "Micro"}
 SEGMENTS = {"Total", "Financials", "Non-financials"}
 NIFTY_50_ETF_NAME = "Nippon India ETF Nifty 50 BeES"
 
@@ -21,7 +21,7 @@ def market_valuation_bounds() -> tuple[dt.date | None, dt.date | None]:
     """Return the available monthly multiple range without loading stock rows."""
     query = text(
         "SELECT MIN(month_end)::date AS first_month, MAX(month_end)::date AS last_month "
-        "FROM fundlab.stock_monthly_valuations"
+        "FROM fundlab.stock_monthly_valuations_ace"
     )
     with get_engine().connect() as conn:
         first_month, last_month = conn.execute(query).one()
@@ -34,12 +34,12 @@ def nifty_50_holdings_bounds() -> tuple[dt.date | None, dt.date | None]:
     query = text(
         """
         SELECT MIN(fp.month_end)::date, MAX(fp.month_end)::date
-        FROM fundlab.fund_portfolio fp
+        FROM fundlab.fund_portfolio_ace fp
         JOIN fundlab.fund f ON f.fund_id = fp.fund_id
         WHERE f.fund_name = :fund_name
           AND fp.asset_type = 'Domestic Equities'
           AND fp.holding_weight > 0
-          AND fp.isin IS NOT NULL
+          AND fp.ace_code IS NOT NULL
         """
     )
     with get_engine().connect() as conn:
@@ -73,42 +73,42 @@ def load_market_stock_multiples(
         query = text(
             f"""
             WITH constituents AS (
-                SELECT DISTINCT fp.isin,
+                SELECT DISTINCT fp.ace_code,
                        date_trunc('month', fp.month_end)::date AS month_start
-                FROM fundlab.fund_portfolio fp
+                FROM fundlab.fund_portfolio_ace fp
                 JOIN fundlab.fund f ON f.fund_id = fp.fund_id
                 WHERE f.fund_name = :fund_name
                   AND fp.asset_type = 'Domestic Equities'
                   AND fp.holding_weight > 0
-                  AND fp.isin IS NOT NULL
+                  AND fp.ace_code IS NOT NULL
                   AND fp.month_end BETWEEN :start_date AND :end_date
             )
-            SELECT v.isin, v.month_end::date AS month_end,
+            SELECT v.ace_code, v.month_end::date AS month_end,
                    v.{metric_column} AS multiple
             FROM constituents c
-            JOIN fundlab.stock_monthly_valuations v
-              ON v.isin = c.isin
+            JOIN fundlab.stock_monthly_valuations_ace v
+              ON v.ace_code = c.ace_code
              AND v.month_end >= c.month_start
              AND v.month_end < c.month_start + INTERVAL '1 month'
-            JOIN fundlab.stock_master sm ON sm.isin = v.isin
+            JOIN fundlab.stock_master_ace sm ON sm.ace_code = v.ace_code
             WHERE (:segment = 'Total'
                    OR (:segment = 'Financials' AND sm.is_financial IS TRUE)
                    OR (:segment = 'Non-financials' AND sm.is_financial IS FALSE))
-            ORDER BY v.month_end, v.isin
+            ORDER BY v.month_end, v.ace_code
             """
         )
         params["fund_name"] = NIFTY_50_ETF_NAME
     else:
         query = text(
             f"""
-            SELECT v.isin, v.month_end::date AS month_end,
+            SELECT v.ace_code, v.month_end::date AS month_end,
                    v.{metric_column} AS multiple
-            FROM fundlab.stock_monthly_valuations v
-            JOIN fundlab.stock_master sm ON sm.isin = v.isin
+            FROM fundlab.stock_monthly_valuations_ace v
+            JOIN fundlab.stock_master_ace sm ON sm.ace_code = v.ace_code
             JOIN LATERAL (
                 SELECT band.size_band
-                FROM fundlab.stock_size_band band
-                WHERE band.isin = v.isin AND band.band_date <= v.month_end
+                FROM fundlab.stock_size_band_ace band
+                WHERE band.ace_code = v.ace_code AND band.band_date <= v.month_end
                 ORDER BY band.band_date DESC
                 LIMIT 1
             ) b ON TRUE
@@ -117,27 +117,27 @@ def load_market_stock_multiples(
               AND (:segment = 'Total'
                    OR (:segment = 'Financials' AND sm.is_financial IS TRUE)
                    OR (:segment = 'Non-financials' AND sm.is_financial IS FALSE))
-            ORDER BY v.month_end, v.isin
+            ORDER BY v.month_end, v.ace_code
             """
         )
         params["size_band"] = COHORT_BANDS[cohort]
     with get_engine().connect() as conn:
         frame = pd.read_sql(query, conn, params=params)
     if frame.empty:
-        return pd.DataFrame(columns=["isin", "month_end", "multiple"])
-    frame["isin"] = frame["isin"].astype(str).str.strip()
+        return pd.DataFrame(columns=["ace_code", "month_end", "multiple"])
+    frame["ace_code"] = frame["ace_code"].astype(str).str.strip()
     frame["month_end"] = (
         pd.to_datetime(frame["month_end"], errors="coerce")
         .dt.to_period("M")
         .dt.to_timestamp("M")
     )
     frame["multiple"] = pd.to_numeric(frame["multiple"], errors="coerce")
-    frame = frame.dropna(subset=["isin", "month_end"])
+    frame = frame.dropna(subset=["ace_code", "month_end"])
     return ensure_unique_monthly_rows(
         frame,
-        key_cols=["isin", "month_end"],
+        key_cols=["ace_code", "month_end"],
         value_cols=["multiple"],
-        context="fundlab.stock_monthly_valuations",
+        context="fundlab.stock_monthly_valuations_ace",
     ).reset_index(drop=True)
 
 
@@ -149,5 +149,5 @@ def cached_market_stock_multiples(
     start_date: dt.date,
     end_date: dt.date,
 ) -> pd.DataFrame:
-    """Cache read-only stock inputs; percentile calculations remain local."""
+    """Cache ACE-based stock inputs; percentile calculations remain local."""
     return load_market_stock_multiples(cohort, segment, metric, start_date, end_date)

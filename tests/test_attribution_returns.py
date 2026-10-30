@@ -20,8 +20,8 @@ def test_ma_market_cap_jump_does_not_drive_return_basis():
     months = _months((2024, 1, 31), (2024, 2, 29))
     prices_df = pd.DataFrame(
         [
-            {"isin": "INEA", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0, "market_cap": 1000.0},
-            {"isin": "INEA", "month_end": dt.date(2024, 2, 29), "adj_price": 102.0, "market_cap": 2000.0},
+            {"ace_code": "INEA", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0, "market_cap": 1000.0},
+            {"ace_code": "INEA", "month_end": dt.date(2024, 2, 29), "adj_price": 102.0, "market_cap": 2000.0},
         ]
     )
 
@@ -37,9 +37,9 @@ def test_bonus_split_adjusted_price_series_is_continuous_for_return_math():
     # Already adjusted series should not introduce artificial jumps.
     prices_df = pd.DataFrame(
         [
-            {"isin": "INEB", "month_end": dt.date(2020, 1, 31), "adj_price": 100.0},
-            {"isin": "INEB", "month_end": dt.date(2020, 2, 29), "adj_price": 102.0},
-            {"isin": "INEB", "month_end": dt.date(2020, 3, 31), "adj_price": 104.04},
+            {"ace_code": "INEB", "month_end": dt.date(2020, 1, 31), "adj_price": 100.0},
+            {"ace_code": "INEB", "month_end": dt.date(2020, 2, 29), "adj_price": 102.0},
+            {"ace_code": "INEB", "month_end": dt.date(2020, 3, 31), "adj_price": 104.04},
         ]
     )
 
@@ -54,12 +54,12 @@ def test_portfolio_identity_weighted_sum_matches_helper_returns():
     months = _months((2024, 1, 31), (2024, 2, 29), (2024, 3, 31))
     prices_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 105.0},
-            {"isin": "A", "month_end": dt.date(2024, 3, 31), "adj_price": 110.25},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 200.0},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 198.0},
-            {"isin": "B", "month_end": dt.date(2024, 3, 31), "adj_price": 201.96},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 105.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 3, 31), "adj_price": 110.25},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 200.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 198.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 3, 31), "adj_price": 201.96},
         ]
     )
 
@@ -81,8 +81,8 @@ def test_invalid_adj_price_rows_are_flagged_and_zeroed():
     months = _months((2024, 1, 31), (2024, 2, 29))
     prices_df = pd.DataFrame(
         [
-            {"isin": "INEC", "month_end": dt.date(2024, 1, 31), "adj_price": 0.0},
-            {"isin": "INEC", "month_end": dt.date(2024, 2, 29), "adj_price": 105.0},
+            {"ace_code": "INEC", "month_end": dt.date(2024, 1, 31), "adj_price": 0.0},
+            {"ace_code": "INEC", "month_end": dt.date(2024, 2, 29), "adj_price": 105.0},
         ]
     )
 
@@ -97,9 +97,9 @@ def test_dividend_yield_timing_uses_t0_yield_for_t0_to_t1_return():
     months = _months((2024, 1, 31), (2024, 2, 29), (2024, 3, 31))
     prices_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "dividend_yield": 0.01},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "dividend_yield": 0.02},
-            {"isin": "A", "month_end": dt.date(2024, 3, 31), "dividend_yield": 0.03},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "dividend_yield": 0.01},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "dividend_yield": 0.02},
+            {"ace_code": "A", "month_end": dt.date(2024, 3, 31), "dividend_yield": 0.03},
         ]
     )
 
@@ -115,9 +115,9 @@ def test_monthly_chaining_and_valuation_fundamental_identities_hold():
 
     multiples_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 3.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 11.0, "pb": 2.2, "ps": 3.3},
-            {"isin": "A", "month_end": dt.date(2024, 3, 31), "pe": 12.0, "pb": 2.4, "ps": 3.6},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 3.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 11.0, "pb": 2.2, "ps": 3.3},
+            {"ace_code": "A", "month_end": dt.date(2024, 3, 31), "pe": 12.0, "pb": 2.4, "ps": 3.6},
         ]
     )
     r_price_df = pd.DataFrame({"A": [0.10, 0.05]}, index=t1)
@@ -152,10 +152,10 @@ def test_portfolio_multiple_uses_single_inversion_of_weighted_implied_yield():
     w0_df = pd.DataFrame({"A": [0.6], "B": [0.4]}, index=months[:-1])
     multiples_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 1 / 0.03, "pb": 2.0, "ps": 5.0},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 50.0, "pb": 2.5, "ps": 10.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 25.0, "pb": 1 / 0.45, "ps": 1 / 0.22},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 100.0, "pb": 1 / 0.35, "ps": 1 / 0.12},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 1 / 0.03, "pb": 2.0, "ps": 5.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "pe": 50.0, "pb": 2.5, "ps": 10.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 25.0, "pb": 1 / 0.45, "ps": 1 / 0.22},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "pe": 100.0, "pb": 1 / 0.35, "ps": 1 / 0.12},
         ]
     )
 
@@ -184,10 +184,10 @@ def test_end_multiple_uses_drifted_weights_from_price_moves():
     r_price_df = pd.DataFrame({"A": [1.0], "B": [-0.05263157894736842]}, index=months[1:])
     multiples_df = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 20.0, "pb": 2.0, "ps": 5.0},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 5.0, "pb": 2.0, "ps": 5.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "pe": 10.0, "pb": 2.0, "ps": 5.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 20.0, "pb": 2.0, "ps": 5.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "pe": 5.0, "pb": 2.0, "ps": 5.0},
         ]
     )
 
@@ -206,19 +206,19 @@ def test_domestic_triangulation_valid_fundamental_growth_abs_and_cagr():
     w_abs = pd.DataFrame({"A": [1.0, 1.0]}, index=idx_abs)
     px_abs = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
         ]
     )
     yld_abs = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
         ]
     )
     tri_abs, summary_abs, _ = _compute_domestic_triangulation_tables(
         w0_dom_df=w_abs,
-        domestic_isins=["A"],
+        domestic_ace_codes=["A"],
         px_df=px_abs,
         yld_df=yld_abs,
         lens="Earnings (P/E)",
@@ -233,19 +233,19 @@ def test_domestic_triangulation_valid_fundamental_growth_abs_and_cagr():
     w_cagr = pd.DataFrame({"B": np.ones(len(idx_cagr))}, index=idx_cagr)
     px_cagr = pd.DataFrame(
         [
-            {"isin": "B", "month_end": idx_cagr[0].date(), "adj_price": 100.0},
-            {"isin": "B", "month_end": idx_cagr[-1].date(), "adj_price": 144.0},
+            {"ace_code": "B", "month_end": idx_cagr[0].date(), "adj_price": 100.0},
+            {"ace_code": "B", "month_end": idx_cagr[-1].date(), "adj_price": 144.0},
         ]
     )
     yld_cagr = pd.DataFrame(
         [
-            {"isin": "B", "month_end": idx_cagr[0].date(), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
-            {"isin": "B", "month_end": idx_cagr[-1].date(), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": idx_cagr[0].date(), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": idx_cagr[-1].date(), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
         ]
     )
     tri_cagr, _, _ = _compute_domestic_triangulation_tables(
         w0_dom_df=w_cagr,
-        domestic_isins=["B"],
+        domestic_ace_codes=["B"],
         px_df=px_cagr,
         yld_df=yld_cagr,
         lens="Earnings (P/E)",
@@ -261,19 +261,19 @@ def test_domestic_triangulation_invalid_fundamentals_mode_a_falls_back_to_price_
     w = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
     px = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
         ]
     )
     yld = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": -0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": -0.10, "pb": 0.50, "ps": 0.3333},
         ]
     )
     tri, summary, _ = _compute_domestic_triangulation_tables(
         w0_dom_df=w,
-        domestic_isins=["A"],
+        domestic_ace_codes=["A"],
         px_df=px,
         yld_df=yld,
         lens="Earnings (P/E)",
@@ -290,23 +290,23 @@ def test_domestic_triangulation_invalid_mode_b_excludes_and_rebases_weighted_ave
     w = pd.DataFrame({"A": [0.6, 0.6], "B": [0.4, 0.4]}, index=idx)
     px = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 130.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 110.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 130.0},
         ]
     )
     yld = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": -0.0833333333, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.0833333333, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "pe": -0.0833333333, "pb": 0.50, "ps": 0.3333},
         ]
     )
     tri, summary, coverage = _compute_domestic_triangulation_tables(
         w0_dom_df=w,
-        domestic_isins=["A", "B"],
+        domestic_ace_codes=["A", "B"],
         px_df=px,
         yld_df=yld,
         lens="Earnings (P/E)",
@@ -328,23 +328,23 @@ def test_domestic_triangulation_average_weights_sum_to_100_percent():
     w = pd.DataFrame({"A": [0.7, 0.7], "B": [0.3, 0.3]}, index=idx)
     px = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 101.0},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 101.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "adj_price": 101.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "adj_price": 100.0},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "adj_price": 101.0},
         ]
     )
     yld = pd.DataFrame(
         [
-            {"isin": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
-            {"isin": "B", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "A", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": dt.date(2024, 1, 31), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
+            {"ace_code": "B", "month_end": dt.date(2024, 2, 29), "pe": 0.10, "pb": 0.50, "ps": 0.3333},
         ]
     )
     tri, _, _ = _compute_domestic_triangulation_tables(
         w0_dom_df=w,
-        domestic_isins=["A", "B"],
+        domestic_ace_codes=["A", "B"],
         px_df=px,
         yld_df=yld,
         lens="Earnings (P/E)",

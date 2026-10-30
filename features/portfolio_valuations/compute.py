@@ -30,7 +30,7 @@ SERIES_COLUMNS = [
 
 def _top_half_by_weight(group: pd.DataFrame) -> pd.DataFrame:
     """Include descending holdings through the stock that crosses 50% weight."""
-    ranked = group.sort_values(["weight_pct", "isin"], ascending=[False, True]).copy()
+    ranked = group.sort_values(["weight_pct", "ace_code"], ascending=[False, True]).copy()
     weights = pd.to_numeric(ranked["weight_pct"], errors="coerce").fillna(0.0).clip(lower=0.0)
     total = float(weights.sum())
     if total <= 0:
@@ -74,7 +74,7 @@ def compute_fund_valuation_ranges(
     h["holding_month_end"] = pd.to_datetime(h["holding_month_end"], errors="coerce")
     h["anchor_month_end"] = pd.to_datetime(h["anchor_month_end"], errors="coerce")
     h["weight_pct"] = pd.to_numeric(h["weight_pct"], errors="coerce")
-    h = h.dropna(subset=["fund_id", "isin", "holding_month_end", "anchor_month_end", "weight_pct"])
+    h = h.dropna(subset=["fund_id", "ace_code", "holding_month_end", "anchor_month_end", "weight_pct"])
     h = h[h["weight_pct"] > 0].copy()
     h["is_financial"] = h["is_financial"].fillna(False).astype(bool)
 
@@ -111,8 +111,8 @@ def compute_fund_valuation_ranges(
     v["month_key"] = v["month_end"].dt.to_period("M")
     v[metric_column] = pd.to_numeric(v[metric_column], errors="coerce")
     joined = h.merge(
-        v[["isin", "month_key", metric_column]],
-        on=["isin", "month_key"],
+        v[["ace_code", "month_key", metric_column]],
+        on=["ace_code", "month_key"],
         how="left",
     )
 

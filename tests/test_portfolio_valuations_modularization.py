@@ -20,7 +20,7 @@ def _holdings(fund_id=1, anchor="2024-01-31", weights=None):
             "fund_id": [fund_id] * len(weights),
             "holding_month_end": pd.to_datetime([anchor] * len(weights)),
             "anchor_month_end": pd.to_datetime([anchor] * len(weights)),
-            "isin": [f"S{i}" for i in range(len(weights))],
+            "ace_code": [f"S{i}" for i in range(len(weights))],
             "weight_pct": weights,
             "is_financial": [False] * len(weights),
         }
@@ -33,7 +33,7 @@ def _multiples(months=("2024-01-31",), count=8, offset=1.0):
         for index in range(count):
             rows.append(
                 {
-                    "isin": f"S{index}",
+                    "ace_code": f"S{index}",
                     "month_end": pd.Timestamp(month),
                     "ps": offset + index,
                     "pe": 10 * (offset + index),

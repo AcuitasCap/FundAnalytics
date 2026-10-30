@@ -7,7 +7,7 @@ import numpy as np
 def compute_adj_price_returns(
     prices_df: pd.DataFrame,
     months: list[pd.Timestamp],
-    isins: list[str],
+    ace_codes: list[str],
     audit_rows: int = 500,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -15,44 +15,44 @@ def compute_adj_price_returns(
       r_t = (adj_price_t / adj_price_{t-1}) - 1
 
     Returns:
-      returns_df: index=t1 months, columns=isins
+      returns_df: index=t1 months, columns=ace_codes
       invalid_rows_df: rows where adj_price_t or adj_price_{t-1} is missing/non-positive
       audit_df: sample rows with adj_price_{t-1}, adj_price_t, return
     """
     t0 = months[:-1]
     t1 = months[1:]
 
-    returns_df = pd.DataFrame(index=t1, columns=isins, dtype=float)
-    if prices_df is None or prices_df.empty or not isins:
+    returns_df = pd.DataFrame(index=t1, columns=ace_codes, dtype=float)
+    if prices_df is None or prices_df.empty or not ace_codes:
         return returns_df.fillna(0.0), pd.DataFrame(), pd.DataFrame()
 
     px = prices_df.copy()
-    px["isin"] = px["isin"].astype(str)
-    px = px[px["isin"].isin(isins)].copy()
+    px["ace_code"] = px["ace_code"].astype(str)
+    px = px[px["ace_code"].isin(ace_codes)].copy()
     if px.empty:
         return returns_df.fillna(0.0), pd.DataFrame(), pd.DataFrame()
 
     px["month_end"] = pd.to_datetime(px["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
 
-    adj_piv = px.pivot_table(index="month_end", columns="isin", values="adj_price", aggfunc="last").reindex(months)
-    adj_piv = adj_piv.reindex(columns=isins)
+    adj_piv = px.pivot_table(index="month_end", columns="ace_code", values="adj_price", aggfunc="last").reindex(months)
+    adj_piv = adj_piv.reindex(columns=ace_codes)
 
-    p0 = adj_piv.loc[t0, isins].to_numpy(dtype=float)
-    p1 = adj_piv.loc[t1, isins].to_numpy(dtype=float)
+    p0 = adj_piv.loc[t0, ace_codes].to_numpy(dtype=float)
+    p1 = adj_piv.loc[t1, ace_codes].to_numpy(dtype=float)
     valid = np.isfinite(p0) & np.isfinite(p1) & (p0 > 0) & (p1 > 0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         r = (p1 / p0) - 1.0
     r = np.where(valid, r, 0.0)
-    returns_df.loc[:, isins] = r
+    returns_df.loc[:, ace_codes] = r
     returns_df = returns_df.fillna(0.0)
 
     # Invalid rows diagnostics
     invalid_mask = ~valid
     invalid_records = []
     for i, end_m in enumerate(t1):
-        for j, isin in enumerate(isins):
+        for j, ace_code in enumerate(ace_codes):
             if not invalid_mask[i, j]:
                 continue
             p0v = p0[i, j]
@@ -65,7 +65,7 @@ def compute_adj_price_returns(
                 reason = "invalid_adj_price_pair"
             invalid_records.append(
                 {
-                    "isin": isin,
+                    "ace_code": ace_code,
                     "month_start": t0[i].date(),
                     "month_end": end_m.date(),
                     "adj_price_t_minus_1": None if not np.isfinite(p0v) else float(p0v),
@@ -78,7 +78,7 @@ def compute_adj_price_returns(
     # Return audit sample
     audit_records = []
     for i, end_m in enumerate(t1):
-        for j, isin in enumerate(isins):
+        for j, ace_code in enumerate(ace_codes):
             if len(audit_records) >= audit_rows:
                 break
             p0v = p0[i, j]
@@ -86,7 +86,7 @@ def compute_adj_price_returns(
             rv = r[i, j]
             audit_records.append(
                 {
-                    "isin": isin,
+                    "ace_code": ace_code,
                     "month_start": t0[i].date(),
                     "month_end": end_m.date(),
                     "adj_price_t_minus_1": None if not np.isfinite(p0v) else float(p0v),
@@ -104,21 +104,21 @@ def compute_adj_price_returns(
 def compute_dividend_yield_returns(
     prices_df: pd.DataFrame,
     months: list[pd.Timestamp],
-    isins: list[str],
+    ace_codes: list[str],
 ) -> pd.DataFrame:
     """
     Compute monthly dividend return series aligned to return months (t1):
-      div_return[t1, isin] = dividend_yield observed at t0.
+      div_return[t1, ace_code] = dividend_yield observed at t0.
     Missing values are treated as 0.
     """
     t1 = months[1:]
-    out = pd.DataFrame(index=t1, columns=isins, dtype=float)
-    if prices_df is None or prices_df.empty or not isins:
+    out = pd.DataFrame(index=t1, columns=ace_codes, dtype=float)
+    if prices_df is None or prices_df.empty or not ace_codes:
         return out.fillna(0.0)
 
     px = prices_df.copy()
-    px["isin"] = px["isin"].astype(str)
-    px = px[px["isin"].isin(isins)].copy()
+    px["ace_code"] = px["ace_code"].astype(str)
+    px = px[px["ace_code"].isin(ace_codes)].copy()
     if px.empty:
         return out.fillna(0.0)
 
@@ -127,16 +127,16 @@ def compute_dividend_yield_returns(
     px["month_end"] = pd.to_datetime(px["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     px["dividend_yield"] = pd.to_numeric(px.get("dividend_yield"), errors="coerce")
 
-    div_piv = px.pivot_table(index="month_end", columns="isin", values="dividend_yield", aggfunc="last").reindex(months)
-    div_piv = div_piv.reindex(columns=isins)
-    out.loc[:, isins] = div_piv.shift(1).loc[t1, isins].to_numpy(dtype=float)
+    div_piv = px.pivot_table(index="month_end", columns="ace_code", values="dividend_yield", aggfunc="last").reindex(months)
+    div_piv = div_piv.reindex(columns=ace_codes)
+    out.loc[:, ace_codes] = div_piv.shift(1).loc[t1, ace_codes].to_numpy(dtype=float)
     return out.fillna(0.0)
 
 
 def compute_monthly_portfolio_multiples(
     multiples_df: pd.DataFrame,
     months: list[pd.Timestamp],
-    isins: list[str],
+    ace_codes: list[str],
     w0_df: pd.DataFrame,
     r_price_df: pd.DataFrame,
     lens: str,
@@ -170,7 +170,7 @@ def compute_monthly_portfolio_multiples(
     mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
     valid_rule = "positive_stock_multiple"
 
-    if multiples_df is None or multiples_df.empty or not isins:
+    if multiples_df is None or multiples_df.empty or not ace_codes:
         debug = {
             "mult_col": mult_col,
             "validity_rule": valid_rule,
@@ -185,8 +185,8 @@ def compute_monthly_portfolio_multiples(
         return m_start, m_end, debug
 
     mul = multiples_df.copy()
-    mul["isin"] = mul["isin"].astype(str)
-    mul = mul[mul["isin"].isin(isins)].copy()
+    mul["ace_code"] = mul["ace_code"].astype(str)
+    mul = mul[mul["ace_code"].isin(ace_codes)].copy()
     if mul.empty or mult_col not in mul.columns:
         debug = {
             "mult_col": mult_col,
@@ -206,16 +206,16 @@ def compute_monthly_portfolio_multiples(
     mul["month_end"] = pd.to_datetime(mul["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     mul[mult_col] = pd.to_numeric(mul[mult_col], errors="coerce")
 
-    m_piv = mul.pivot_table(index="month_end", columns="isin", values=mult_col, aggfunc="last").reindex(months)
-    m_piv = m_piv.reindex(columns=isins)
+    m_piv = mul.pivot_table(index="month_end", columns="ace_code", values=mult_col, aggfunc="last").reindex(months)
+    m_piv = m_piv.reindex(columns=ace_codes)
     # The database stores P/S, P/E and P/B.  Harmonic portfolio aggregation
     # operates on implied yields, so invert only valid positive multiples.
     multiple_vals = m_piv.to_numpy(dtype=float)
     y_vals = np.where(np.isfinite(multiple_vals) & (multiple_vals > 0), 1.0 / multiple_vals, np.nan)
 
-    w_aligned = w0_df.reindex(index=t0, columns=isins).fillna(0.0)
+    w_aligned = w0_df.reindex(index=t0, columns=ace_codes).fillna(0.0)
     w_mat = w_aligned.to_numpy(dtype=float)
-    r_price_aligned = r_price_df.reindex(index=t1, columns=isins).fillna(0.0)
+    r_price_aligned = r_price_df.reindex(index=t1, columns=ace_codes).fillna(0.0)
     r_price_mat = r_price_aligned.to_numpy(dtype=float)
 
     for i in range(n):

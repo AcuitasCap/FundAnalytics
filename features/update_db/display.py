@@ -48,17 +48,6 @@ def show_expected_format(upload_type: str):
             "Others Equities, ADRs & GDRs, and Cash. Tag other instruments as Cash "
             "in the source file."
         )
-    elif upload_type == "Stock ISIN, industry, financial/non-financial":
-        st.markdown("**Expected format (Stock industry.xlsx):**")
-        sample = pd.DataFrame(
-            {
-                "ISIN": ["INE002A01018"],
-                "Company name": ["Reliance Industries"],
-                "Industry": ["Petroleum"],
-                "Financial?": [False],
-            }
-        )
-        st.dataframe(sample)
     elif upload_type == "Update stock master":
         st.markdown("**Expected format (ACE stock master.xlsx):**")
         st.dataframe(pd.DataFrame({
@@ -177,8 +166,7 @@ def display_missing_portfolio_ace_codes(report: pd.DataFrame) -> None:
     )
     st.caption(
         "Use Update DB → Update stock master to add the missing ACE codes. "
-        "The older 'Stock ISIN, industry, financial/non-financial' option still "
-        "updates the legacy ISIN stock master."
+        "This updates the ACE-based stock master used by portfolio uploads."
     )
 
 

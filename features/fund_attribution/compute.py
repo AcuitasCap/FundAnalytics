@@ -18,7 +18,7 @@ from features.fund_attribution.data import (
 
 def _compute_domestic_triangulation_tables(
     w0_dom_df: pd.DataFrame,
-    domestic_isins: list[str],
+    domestic_ace_codes: list[str],
     px_df: pd.DataFrame,
     yld_df: pd.DataFrame,
     lens: str,
@@ -30,7 +30,7 @@ def _compute_domestic_triangulation_tables(
     mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
 
     out_cols = ["Stock name", "Average holding weight (%)", "Fundamental growth in holding period (%)", "Notes"]
-    if w0_dom_df is None or w0_dom_df.empty or not domestic_isins:
+    if w0_dom_df is None or w0_dom_df.empty or not domestic_ace_codes:
         summary = pd.DataFrame(
             [
                 {"Metric": "Weighted average fundamental growth (%)", "Value (%)": np.nan},
@@ -42,9 +42,9 @@ def _compute_domestic_triangulation_tables(
             "invalid_weight_sum": 0.0,
         }
 
-    w_dom = w0_dom_df.reindex(columns=domestic_isins).fillna(0.0).copy()
-    active_isins = [c for c in domestic_isins if bool((w_dom[c] > eps).any())]
-    if not active_isins:
+    w_dom = w0_dom_df.reindex(columns=domestic_ace_codes).fillna(0.0).copy()
+    active_ace_codes = [c for c in domestic_ace_codes if bool((w_dom[c] > eps).any())]
+    if not active_ace_codes:
         summary = pd.DataFrame(
             [
                 {"Metric": "Weighted average fundamental growth (%)", "Value (%)": np.nan},
@@ -56,31 +56,31 @@ def _compute_domestic_triangulation_tables(
             "invalid_weight_sum": 0.0,
         }
 
-    w_dom = w_dom.loc[:, active_isins]
+    w_dom = w_dom.loc[:, active_ace_codes]
     avg_w = w_dom.mean(axis=0).astype(float)
 
     px = px_df.copy()
     if "month_end" not in px.columns and "price_date" in px.columns:
         px["month_end"] = px["price_date"]
-    px["isin"] = px["isin"].astype(str)
+    px["ace_code"] = px["ace_code"].astype(str)
     px["month_end"] = pd.to_datetime(px["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
     price_piv = (
-        px[px["isin"].isin(active_isins)]
-        .pivot_table(index="month_end", columns="isin", values="adj_price", aggfunc="last")
-        .reindex(index=w_dom.index, columns=active_isins)
+        px[px["ace_code"].isin(active_ace_codes)]
+        .pivot_table(index="month_end", columns="ace_code", values="adj_price", aggfunc="last")
+        .reindex(index=w_dom.index, columns=active_ace_codes)
     )
 
     mul = yld_df.copy()
     if "month_end" not in mul.columns and "price_date" in mul.columns:
         mul["month_end"] = mul["price_date"]
-    mul["isin"] = mul["isin"].astype(str)
+    mul["ace_code"] = mul["ace_code"].astype(str)
     mul["month_end"] = pd.to_datetime(mul["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     mul[mult_col] = pd.to_numeric(mul.get(mult_col), errors="coerce")
     mult_piv = (
-        mul[mul["isin"].isin(active_isins)]
-        .pivot_table(index="month_end", columns="isin", values=mult_col, aggfunc="last")
-        .reindex(index=w_dom.index, columns=active_isins)
+        mul[mul["ace_code"].isin(active_ace_codes)]
+        .pivot_table(index="month_end", columns="ace_code", values=mult_col, aggfunc="last")
+        .reindex(index=w_dom.index, columns=active_ace_codes)
     )
 
     def _period_growth(v0: float, v1: float, n_hold_months: int) -> float:
@@ -92,12 +92,12 @@ def _compute_domestic_triangulation_tables(
         return (v1 / v0) ** (1.0 / years) - 1.0 if years > 0 else np.nan
 
     rows = []
-    for isin in active_isins:
-        w_ser = w_dom[isin].fillna(0.0)
+    for ace_code in active_ace_codes:
+        w_ser = w_dom[ace_code].fillna(0.0)
         held = w_ser > eps
         hold_months = list(w_ser.index[held])
         n_hold_months = int(held.sum())
-        avg_weight = float(avg_w.get(isin, 0.0))
+        avg_weight = float(avg_w.get(ace_code, 0.0))
 
         if n_hold_months <= 0:
             continue
@@ -105,12 +105,12 @@ def _compute_domestic_triangulation_tables(
         hold_start = hold_months[0]
         hold_end = hold_months[-1]
 
-        p_start = float(price_piv.loc[hold_start, isin]) if (hold_start in price_piv.index and isin in price_piv.columns) else np.nan
-        p_end = float(price_piv.loc[hold_end, isin]) if (hold_end in price_piv.index and isin in price_piv.columns) else np.nan
-        m_start = float(mult_piv.loc[hold_start, isin]) if (hold_start in mult_piv.index and isin in mult_piv.columns) else np.nan
-        m_end = float(mult_piv.loc[hold_end, isin]) if (hold_end in mult_piv.index and isin in mult_piv.columns) else np.nan
+        p_start = float(price_piv.loc[hold_start, ace_code]) if (hold_start in price_piv.index and ace_code in price_piv.columns) else np.nan
+        p_end = float(price_piv.loc[hold_end, ace_code]) if (hold_end in price_piv.index and ace_code in price_piv.columns) else np.nan
+        m_start = float(mult_piv.loc[hold_start, ace_code]) if (hold_start in mult_piv.index and ace_code in mult_piv.columns) else np.nan
+        m_end = float(mult_piv.loc[hold_end, ace_code]) if (hold_end in mult_piv.index and ace_code in mult_piv.columns) else np.nan
 
-        # P/M = fundamental, since stock_monthly_valuations now stores M
+        # P/M = fundamental, since stock_monthly_valuations_ace stores M
         # directly (P/S, P/E, or P/B), rather than its inverse yield.
         f_start = p_start / m_start if np.isfinite(p_start) and np.isfinite(m_start) and m_start > 0 else np.nan
         f_end = p_end / m_end if np.isfinite(p_end) and np.isfinite(m_end) and m_end > 0 else np.nan
@@ -155,7 +155,7 @@ def _compute_domestic_triangulation_tables(
 
         rows.append(
             {
-                "Stock name": name_map.get(isin, isin),
+                "Stock name": name_map.get(ace_code, ace_code),
                 "Average holding weight (%)": avg_weight * 100.0,
                 "Fundamental growth in holding period (%)": growth * 100.0 if np.isfinite(growth) else np.nan,
                 "Notes": note,
@@ -251,7 +251,7 @@ def _compute_attribution(
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
                 "error": "_compute_attribution(): prices dataframe missing month_end/price_date."
             }
-    px_missing = [c for c in ["isin", "adj_price", "dividend_yield", "month_end"] if c not in px.columns]
+    px_missing = [c for c in ["ace_code", "adj_price", "dividend_yield", "month_end"] if c not in px.columns]
     if px_missing:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
             "error": f"_compute_attribution(): prices dataframe missing columns: {px_missing}. "
@@ -265,7 +265,7 @@ def _compute_attribution(
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
                 "error": "_compute_attribution(): multiples dataframe missing month_end."
             }
-    yld_missing = [c for c in ["isin", "month_end", "pe", "pb", "ps"] if c not in yld.columns]
+    yld_missing = [c for c in ["ace_code", "month_end", "pe", "pb", "ps"] if c not in yld.columns]
     if yld_missing:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
             "error": f"_compute_attribution(): multiples dataframe missing columns: {yld_missing}. "
@@ -289,14 +289,14 @@ def _compute_attribution(
     if "instrument_key" not in h.columns:
         if "instrument_name" not in h.columns:
             h["instrument_name"] = ""
-        if "isin" not in h.columns:
-            h["isin"] = np.nan
+        if "ace_code" not in h.columns:
+            h["ace_code"] = np.nan
 
-        isin_str = h["isin"].astype(str)
+        ace_str = h["ace_code"].astype(str)
         h["instrument_key"] = np.where(
-            h["isin"].notna() & (isin_str.str.strip() != "") & (isin_str.str.lower() != "nan"),
-            isin_str.str.strip(),
-            "NOISIN::" + h["instrument_name"].astype(str)
+            h["ace_code"].notna() & (ace_str.str.strip() != "") & (ace_str.str.lower() != "nan"),
+            ace_str.str.strip(),
+            "NOACE::" + h["instrument_name"].astype(str)
         )
 
     # Canonicalise to calendar month-end label (your current convention)
@@ -351,7 +351,7 @@ def _compute_attribution(
     w0_df = w_piv.loc[t0, :].copy()
 
     # Adjusted-price return diagnostics
-    isins = [c for c in instr_cols if not c.startswith("NOISIN::") and not c.startswith("CASH::")]
+    ace_codes = [c for c in instr_cols if not c.startswith("NOACE::") and not c.startswith("CASH::")]
     invalid_price_rows_df = pd.DataFrame()
     price_return_audit_df = pd.DataFrame()
 
@@ -378,14 +378,14 @@ def _compute_attribution(
     r_mid150 = _bench_period_returns(BENCH_NAME_MID150)
     r_small250 = _bench_period_returns(BENCH_NAME_SMALL250)
 
-    # Size band lookup at t0 for ISINs
+    # Size band lookup at t0 for ACE codes
     size_lookup = {}
-    if not sz.empty and isins:
-        sz2 = sz[sz["isin"].astype(str).isin(isins)].copy()
+    if not sz.empty and ace_codes:
+        sz2 = sz[sz["ace_code"].astype(str).isin(ace_codes)].copy()
         sz2["month_end"] = pd.to_datetime(sz2["month_end"]).dt.to_period("M").dt.to_timestamp("M")
         sz2 = sz2[sz2["month_end"].isin(t0)]
         if not sz2.empty:
-            size_lookup = sz2.set_index(["month_end", "isin"])["size_band"].to_dict()
+            size_lookup = sz2.set_index(["month_end", "ace_code"])["size_band"].to_dict()
 
     asset_map = (
         w.sort_values(["instrument_key", "month_end"])
@@ -404,21 +404,21 @@ def _compute_attribution(
     r_div_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
     r_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
 
-    if isins:
-        r_isin_df, invalid_price_rows_df, price_return_audit_df = compute_adj_price_returns(
+    if ace_codes:
+        r_ace_df, invalid_price_rows_df, price_return_audit_df = compute_adj_price_returns(
             prices_df=px,
             months=months,
-            isins=isins,
+            ace_codes=ace_codes,
         )
-        div_isin_df = compute_dividend_yield_returns(px, months, isins)
-        for c in isins:
-            if c in r_isin_df.columns:
-                r_price_instr[c] = pd.to_numeric(r_isin_df[c], errors="coerce")
-            if c in div_isin_df.columns:
-                r_div_instr[c] = pd.to_numeric(div_isin_df[c], errors="coerce")
+        div_ace_df = compute_dividend_yield_returns(px, months, ace_codes)
+        for c in ace_codes:
+            if c in r_ace_df.columns:
+                r_price_instr[c] = pd.to_numeric(r_ace_df[c], errors="coerce")
+            if c in div_ace_df.columns:
+                r_div_instr[c] = pd.to_numeric(div_ace_df[c], errors="coerce")
 
     for c in instr_cols:
-        if c.startswith("NOISIN::"):
+        if c.startswith("NOACE::"):
             r_price_instr[c] = 0.0
             r_div_instr[c] = 0.0
 
@@ -449,7 +449,7 @@ def _compute_attribution(
         for c in instr_cols:
             if c in cash_keys or c.startswith("CASH::"):
                 r_bm[c] = r_instr[c].to_numpy(dtype=float)
-            elif c.startswith("NOISIN::"):
+            elif c.startswith("NOACE::"):
                 r_bm[c] = r_n50
             else:
                 vals = np.zeros(len(t1), dtype=float)
@@ -467,7 +467,7 @@ def _compute_attribution(
                 r_bm[c] = vals
 
         for c in instr_cols:
-            if c in cash_keys or c.startswith("CASH::") or c.startswith("NOISIN::"):
+            if c in cash_keys or c.startswith("CASH::") or c.startswith("NOACE::"):
                 continue
             at = str(asset_map.get(c, "")).strip()
             if at in {"Overseas Equities", "ADRs & GDRs", "Others Equities", "Other Equities"}:
@@ -502,11 +502,11 @@ def _compute_attribution(
     # Name map
     name_map = {}
     if not sm.empty:
-        name_map = dict(zip(sm["isin"].astype(str), sm["company_name"].astype(str)))
+        name_map = dict(zip(sm["ace_code"].astype(str), sm["company_name"].astype(str)))
 
     def _disp(instr: str) -> str:
-        if instr.startswith("NOISIN::"):
-            return instr.replace("NOISIN::", "")
+        if instr.startswith("NOACE::"):
+            return instr.replace("NOACE::", "")
         if instr.startswith("CASH::"):
             return "Cash (Residual)"
         if instr in cash_keys:
@@ -568,7 +568,7 @@ def _compute_attribution(
         start_m = t0[i]
         end_m = t1[i]
         for instr in instr_cols:
-            if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+            if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOACE::"):
                 cat = "Cash"
             else:
                 band = str(size_lookup.get((start_m, instr), "")).strip()
@@ -594,10 +594,10 @@ def _compute_attribution(
             members = []
             for instr in instr_cols:
                 if cat == "Cash":
-                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOACE::"):
                         members.append(instr)
                 else:
-                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOISIN::"):
+                    if instr in cash_keys or instr.startswith("CASH::") or instr.startswith("NOACE::"):
                         continue
                     band = str(size_lookup.get((start_m, instr), "")).strip()
                     band = band if band in {"Large", "Mid", "Small"} else "Large"
@@ -638,8 +638,8 @@ def _compute_attribution(
     # ============================================================
     # Domestic-equity sleeve decomposition (one-shot multiple backout)
     # ============================================================
-    domestic_isins = [c for c in isins if str(asset_map.get(c, "")).strip() == "Domestic Equities"]
-    domestic_isins = [c for c in domestic_isins if c in w0_df.columns]
+    domestic_ace_codes = [c for c in ace_codes if str(asset_map.get(c, "")).strip() == "Domestic Equities"]
+    domestic_ace_codes = [c for c in domestic_ace_codes if c in w0_df.columns]
 
     dom_decomp_summary_df = pd.DataFrame()
     dom_decomp_period_label = None
@@ -652,18 +652,18 @@ def _compute_attribution(
     dom_triangulation_coverage = {"valid_weight_sum": np.nan, "invalid_weight_sum": np.nan}
     dom_decomp_runtime_mode = "not_run"
 
-    if domestic_isins:
+    if domestic_ace_codes:
         # Domestic sleeve weights rebased to 1.0 each month (t0)
         # Use raw (no forward-fill) monthly weights for domestic sleeve
-        w0_dom_df = w0_df.loc[:, domestic_isins].copy()
+        w0_dom_df = w0_df.loc[:, domestic_ace_codes].copy()
         dom_sum = w0_dom_df.sum(axis=1).replace(0.0, np.nan)
         w0_dom_df = w0_dom_df.div(dom_sum, axis=0).fillna(0.0)
 
         # Monthly domestic returns: price from adj_price plus dividend yield shifted from t0 to t1.
-        r_price_dom_m = np.sum(w0_dom_df.to_numpy(dtype=float) * r_price_instr.loc[:, domestic_isins].to_numpy(dtype=float), axis=1)
-        div_isin_m = compute_dividend_yield_returns(px, months, domestic_isins)
-        div_mat = div_isin_m.reindex(index=t1, columns=domestic_isins).fillna(0.0).to_numpy(dtype=float)
-        w_dom_mat = w0_dom_df.reindex(index=t0, columns=domestic_isins).fillna(0.0).to_numpy(dtype=float)
+        r_price_dom_m = np.sum(w0_dom_df.to_numpy(dtype=float) * r_price_instr.loc[:, domestic_ace_codes].to_numpy(dtype=float), axis=1)
+        div_ace_m = compute_dividend_yield_returns(px, months, domestic_ace_codes)
+        div_mat = div_ace_m.reindex(index=t1, columns=domestic_ace_codes).fillna(0.0).to_numpy(dtype=float)
+        w_dom_mat = w0_dom_df.reindex(index=t0, columns=domestic_ace_codes).fillna(0.0).to_numpy(dtype=float)
         r_div_dom_m = np.sum(w_dom_mat * div_mat, axis=1)
         r_total_dom_m = r_price_dom_m + r_div_dom_m
 
@@ -674,9 +674,9 @@ def _compute_attribution(
             m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
                 multiples_df=yld,
                 months=months,
-                isins=domestic_isins,
+                ace_codes=domestic_ace_codes,
                 w0_df=w0_dom_df,
-                r_price_df=r_price_instr.loc[:, domestic_isins],
+                r_price_df=r_price_instr.loc[:, domestic_ace_codes],
                 lens=lens,
             )
         else:
@@ -688,7 +688,7 @@ def _compute_attribution(
             m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
                 multiples_df=yld,
                 months=months,
-                isins=domestic_isins,
+                ace_codes=domestic_ace_codes,
                 w0_df=w0_dom_df,
                 lens=lens,
             )
@@ -749,7 +749,7 @@ def _compute_attribution(
             "end_multiple": float(m_end_arr[-1]) if len(m_end_arr) else np.nan,
             "multiple_gross": gross_val,
             "domestic_gross": gross_total,
-            "multiple_source": "fundlab.stock_monthly_valuations",
+            "multiple_source": "fundlab.stock_monthly_valuations_ace",
             "multiple_column": mult_debug.get("mult_col"),
             "multiple_validity_rule": mult_debug.get("validity_rule"),
             "gross_price": gross_price,
@@ -776,7 +776,7 @@ def _compute_attribution(
         })
 
         # Stock-level diagnostics: average weight + exact chained contributions (no scaling)
-        r_stock_m = r_instr.loc[:, domestic_isins].to_numpy(dtype=float)
+        r_stock_m = r_instr.loc[:, domestic_ace_codes].to_numpy(dtype=float)
         w0_dom = w0_dom_df.to_numpy(dtype=float)
         r_dom_m = r_price_dom_m
 
@@ -789,7 +789,7 @@ def _compute_attribution(
         domestic_weight_avg = float(w0_dom_df.sum(axis=1).mean())
 
         dom_decomp_contrib_df = pd.DataFrame({
-            "Stock name": [name_map.get(x, x) for x in domestic_isins],
+            "Stock name": [name_map.get(x, x) for x in domestic_ace_codes],
             "Average holding weight (%)": np.round(avg_w * 100.0, 4),
             "Contribution (%)": np.round(contrib * 100.0, 4),
         }).sort_values("Contribution (%)", ascending=False).reset_index(drop=True)
@@ -803,7 +803,7 @@ def _compute_attribution(
 
         dom_triangulation_df, dom_triangulation_summary_df, dom_triangulation_coverage = _compute_domestic_triangulation_tables(
             w0_dom_df=w0_dom_df,
-            domestic_isins=domestic_isins,
+            domestic_ace_codes=domestic_ace_codes,
             px_df=px,
             yld_df=yld,
             lens=lens,
@@ -818,7 +818,7 @@ def _compute_attribution(
         "adj_price_return_audit_df": price_return_audit_df,
         "domestic_decomp_period_label": dom_decomp_period_label,
         "domestic_decomp_summary_df": dom_decomp_summary_df,
-        "domestic_decomp_stock_count": len(domestic_isins),
+        "domestic_decomp_stock_count": len(domestic_ace_codes),
         "domestic_decomp_lens": lens,
         "domestic_decomp_debug": dom_decomp_debug,
         "domestic_decomp_contrib_df": dom_decomp_contrib_df,

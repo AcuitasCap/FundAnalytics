@@ -18,12 +18,12 @@ def compute_market_valuation_ranges(
     if stock_multiples.empty:
         return pd.DataFrame(columns=RESULT_COLUMNS)
 
-    frame = stock_multiples[["isin", "month_end", "multiple"]].copy()
+    frame = stock_multiples[["ace_code", "month_end", "multiple"]].copy()
     frame["month_end"] = pd.to_datetime(frame["month_end"], errors="coerce")
     frame["multiple"] = pd.to_numeric(frame["multiple"], errors="coerce")
-    frame = frame.dropna(subset=["isin", "month_end", "multiple"])
+    frame = frame.dropna(subset=["ace_code", "month_end", "multiple"])
     frame = frame[np.isfinite(frame["multiple"]) & (frame["multiple"] > 0)]
-    frame = frame.drop_duplicates(subset=["isin", "month_end"])
+    frame = frame.drop_duplicates(subset=["ace_code", "month_end"])
     if frame.empty:
         return pd.DataFrame(columns=RESULT_COLUMNS)
 

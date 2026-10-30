@@ -37,10 +37,10 @@ def test_market_percentiles_are_unweighted_and_reference_is_median_of_medians():
 
     frame = pd.DataFrame(
         [
-            {"isin": f"A{i}", "month_end": "2025-01-31", "multiple": v}
+            {"ace_code": f"A{i}", "month_end": "2025-01-31", "multiple": v}
             for i, v in enumerate([1, 2, 3, 4, 100])
         ] + [
-            {"isin": f"A{i}", "month_end": "2025-02-28", "multiple": v}
+            {"ace_code": f"A{i}", "month_end": "2025-02-28", "multiple": v}
             for i, v in enumerate([10, 20, 30, 40, 50])
         ]
     )
@@ -58,10 +58,10 @@ def test_market_percentiles_ignore_invalid_multiples_and_sparse_months():
 
     frame = pd.DataFrame(
         [
-            {"isin": f"A{i}", "month_end": "2025-01-31", "multiple": v}
+            {"ace_code": f"A{i}", "month_end": "2025-01-31", "multiple": v}
             for i, v in enumerate([1, 2, 3, 4, 5, 0, -1, None])
         ] + [
-            {"isin": f"A{i}", "month_end": "2025-02-28", "multiple": v}
+            {"ace_code": f"A{i}", "month_end": "2025-02-28", "multiple": v}
             for i, v in enumerate([1, 2, 3, 4])
         ]
     )
@@ -90,7 +90,7 @@ def test_market_query_uses_only_historical_size_bands_and_safe_metric(monkeypatc
 
     def fake_read_sql(query, conn, params):
         statements.append((str(query), params))
-        return pd.DataFrame(columns=["isin", "month_end", "multiple"])
+        return pd.DataFrame(columns=["ace_code", "month_end", "multiple"])
 
     monkeypatch.setattr(data, "get_engine", lambda: Engine())
     monkeypatch.setattr(data.pd, "read_sql", fake_read_sql)
@@ -112,7 +112,7 @@ def test_market_query_uses_only_historical_size_bands_and_safe_metric(monkeypatc
         "Nifty 50", "Total", "P/E", params["start_date"], params["end_date"]
     )
     nifty_query, nifty_params = statements[1]
-    assert "fundlab.fund_portfolio" in nifty_query
+    assert "fundlab.fund_portfolio_ace" in nifty_query
     assert "fp.asset_type = 'Domestic Equities'" in nifty_query
     assert "fp.holding_weight > 0" in nifty_query
     assert "v.month_end >= c.month_start" in nifty_query
@@ -140,7 +140,7 @@ def test_market_data_groups_last_trading_day_into_calendar_month(monkeypatch):
     monkeypatch.setattr(
         data.pd, "read_sql",
         lambda *args, **kwargs: pd.DataFrame(
-            [{"isin": "INE000000001", "month_end": "2025-11-28", "multiple": 12.0}]
+            [{"ace_code": "INE000000001", "month_end": "2025-11-28", "multiple": 12.0}]
         ),
     )
     result = data.load_market_stock_multiples(

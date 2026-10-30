@@ -36,7 +36,7 @@ def market_valuations_page() -> None:
     months = list(range(1, 13))
     default_start_year = max(first_month.year, last_month.year - 5)
     with st.form("market_valuation_controls"):
-        cohort = st.radio("Market cohort", ["Nifty 50", "Large caps", "Mid caps", "Small caps"])
+        cohort = st.radio("Market cohort", ["Nifty 50", "Large caps", "Mid caps", "Small caps", "Micro caps"])
         segment = st.radio("Segment", ["Total", "Financials", "Non-financials"], horizontal=True)
         metric = st.radio("Valuation metric", ["P/S", "P/E", "P/B"], horizontal=True)
         start_col, end_col = st.columns(2)

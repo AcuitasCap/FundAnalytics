@@ -32,9 +32,9 @@ def _load_attrib_raw_window(
     fund_id: int,
     end_month_end: dt.date,
     lookback_years: int = 10,
-    data_version: str = "v1",
+    data_version: str = "ace-v2",
 ):
-    """Load raw inputs for attribution for a single fund over [end-LOOKBACK, end]."""
+    """Load ACE-keyed raw inputs for attribution for a single fund over [end-LOOKBACK, end]."""
     engine = get_engine()
     end_me = to_month_end(end_month_end)
     start_me = (pd.Timestamp(end_me) - pd.DateOffset(years=lookback_years)).to_period("M").to_timestamp("M").date()
@@ -45,9 +45,9 @@ def _load_attrib_raw_window(
                month_end::date AS month_end,
                instrument_name,
                asset_type,
-               isin,
+               ace_code,
                holding_weight
-        FROM fundlab.fund_portfolio
+        FROM fundlab.fund_portfolio_ace
         WHERE fund_id = :fund_id
           AND month_end BETWEEN :start_me AND :end_me
         ORDER BY month_end, instrument_name
@@ -90,80 +90,94 @@ def _load_attrib_raw_window(
 
         h["holding_weight"] = hw * weight_scale
 
-    # ISIN list (exclude null/blank)
-    isins = sorted([x for x in h["isin"].dropna().astype(str).unique().tolist() if x.strip()])
+    # ACE code list (exclude null/blank)
+    ace_codes = sorted([x for x in h["ace_code"].dropna().astype(str).unique().tolist() if x.strip()])
 
-    # Stock master (names)
-    if isins:
+    # ACE master has no name column. Use one deterministic mapped name per
+    # company, so multiple aliases cannot multiply holdings or return rows.
+    if ace_codes:
         q_sm = text("""
-            SELECT isin, company_name, industry, is_financial
-            FROM fundlab.stock_master
-            WHERE isin = ANY(:isins)
+            SELECT sm.ace_code, names.company_name, sm.industry, sm.is_financial
+            FROM fundlab.stock_master_ace sm
+            LEFT JOIN (
+                SELECT ace_code, MIN(company_name) AS company_name
+                FROM fundlab.company_name_acecode_map
+                WHERE ace_code = ANY(:ace_codes)
+                GROUP BY ace_code
+            ) names ON names.ace_code = sm.ace_code
+            WHERE sm.ace_code = ANY(:ace_codes)
         """)
-        sm = pd.read_sql(q_sm, engine, params={"isins": isins})
+        sm = pd.read_sql(q_sm, engine, params={"ace_codes": ace_codes})
+        holding_names = (
+            h.dropna(subset=["ace_code", "instrument_name"])
+            .sort_values(["month_end", "instrument_name"])
+            .drop_duplicates("ace_code", keep="last")
+            .set_index("ace_code")["instrument_name"]
+        )
+        sm["company_name"] = sm["company_name"].fillna(sm["ace_code"].map(holding_names)).fillna(sm["ace_code"])
     else:
-        sm = pd.DataFrame(columns=["isin", "company_name", "industry", "is_financial"])
+        sm = pd.DataFrame(columns=["ace_code", "company_name", "industry", "is_financial"])
 
     # Prices (monthly) with adjusted price (returns use adj_price basis)
-    if isins:
+    if ace_codes:
         q_px = text("""
-            SELECT isin,
+            SELECT ace_code,
                    price_date::date AS month_end,
                    adj_price,
                    price,
                    dividend_yield
-            FROM fundlab.stock_price
-            WHERE isin = ANY(:isins)
+            FROM fundlab.stock_price_ace
+            WHERE ace_code = ANY(:ace_codes)
               AND price_date BETWEEN :start_me AND :end_me
-            ORDER BY isin, price_date
+            ORDER BY ace_code, price_date
         """)
-        px = pd.read_sql(q_px, engine, params={"isins": isins, "start_me": start_me, "end_me": end_me})
+        px = pd.read_sql(q_px, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
         if not px.empty:
             px["month_end"] = pd.to_datetime(px["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
             px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
             px["price"] = pd.to_numeric(px["price"], errors="coerce")
             px["dividend_yield"] = pd.to_numeric(px["dividend_yield"], errors="coerce")
     else:
-        px = pd.DataFrame(columns=["isin", "month_end", "adj_price", "price", "dividend_yield"])
+        px = pd.DataFrame(columns=["ace_code", "month_end", "adj_price", "price", "dividend_yield"])
 
     # Stock valuation multiples (monthly): P/S, P/E and P/B computed on Supabase.
-    if isins:
+    if ace_codes:
         q_mul = text("""
             SELECT
-                isin,
+                ace_code,
                 month_end::date AS month_end,
                 ps,
                 pe,
                 pb
-            FROM fundlab.stock_monthly_valuations
-            WHERE isin = ANY(:isins)
+            FROM fundlab.stock_monthly_valuations_ace
+            WHERE ace_code = ANY(:ace_codes)
               AND month_end BETWEEN :start_me AND :end_me
-            ORDER BY isin, month_end
+            ORDER BY ace_code, month_end
         """)
-        yld = pd.read_sql(q_mul, engine, params={"isins": isins, "start_me": start_me, "end_me": end_me})
+        yld = pd.read_sql(q_mul, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
         if not yld.empty:
             yld["month_end"] = pd.to_datetime(yld["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
             for c in ["ps", "pe", "pb"]:
                 if c in yld.columns:
                     yld[c] = pd.to_numeric(yld[c], errors="coerce")
     else:
-        yld = pd.DataFrame(columns=["isin", "month_end", "ps", "pe", "pb"])
+        yld = pd.DataFrame(columns=["ace_code", "month_end", "ps", "pe", "pb"])
 
     # Size band (monthly)
-    if isins:
+    if ace_codes:
         q_sz = text("""
-            SELECT isin, band_date::date AS month_end, size_band
-            FROM fundlab.stock_size_band
-            WHERE isin = ANY(:isins)
+            SELECT ace_code, band_date::date AS month_end, size_band
+            FROM fundlab.stock_size_band_ace
+            WHERE ace_code = ANY(:ace_codes)
               AND band_date BETWEEN :start_me AND :end_me
-            ORDER BY isin, band_date
+            ORDER BY ace_code, band_date
         """)
-        sz = pd.read_sql(q_sz, engine, params={"isins": isins, "start_me": start_me, "end_me": end_me})
+        sz = pd.read_sql(q_sz, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
         if not sz.empty:
             sz["month_end"] = pd.to_datetime(sz["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
             sz["size_band"] = sz["size_band"].astype(str)
     else:
-        sz = pd.DataFrame(columns=["isin", "month_end", "size_band"])
+        sz = pd.DataFrame(columns=["ace_code", "month_end", "size_band"])
 
     # Benchmarks (monthly)
     wanted = [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250]

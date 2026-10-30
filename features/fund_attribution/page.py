@@ -95,7 +95,7 @@ def fund_attribution_page():
 
     # 10-year cache anchored to end period
     with st.spinner("Loading fund history (cached) ..."):
-        raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback), data_version="v1")
+        raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback), data_version="ace-v2")
 
     if raw.get("weight_scale") not in (None, 1.0):
         st.caption(f"Note: holding_weight scale detected as {raw['weight_scale']:.6f} and normalised accordingly.")

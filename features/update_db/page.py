@@ -23,14 +23,14 @@ from .validation import (
     validate_fund_manager_tenure,
     validate_fund_navs, validate_fund_portfolios, validate_quarterly_pat,
     validate_quarterly_sales, validate_roe_roce, validate_stock_dividends,
-    validate_stock_master, validate_stock_prices_mc,
+    validate_stock_prices_mc,
 )
 from .writes import (
     upload_ace_stock_master, upload_annual_book_value, upload_bench_navs,
     upload_corporate_actions,
     upload_fund_manager_tenure, upload_fund_navs, upload_fund_portfolios,
     upload_quarterly_pat, upload_quarterly_sales, upload_roe_roce,
-    upload_stock_dividends, upload_stock_master, upload_stock_prices_mc,
+    upload_stock_dividends, upload_stock_prices_mc,
 )
 
 def update_db_page():
@@ -44,7 +44,6 @@ def update_db_page():
             "Benchmark NAVs",
             "Fund portfolios",
             "Fund manager tenure",
-            "Stock ISIN, industry, financial/non-financial",
             "Update stock master",
             "Company RoE / RoCE",
             "Stock prices and market cap",
@@ -115,8 +114,6 @@ def update_db_page():
                 missing = find_missing_portfolio_ace_codes(df_clean)
                 if not missing.empty:
                     raise MissingPortfolioAceCodesError(missing)
-            elif upload_type == "Stock ISIN, industry, financial/non-financial":
-                df_clean, summary = validate_stock_master(df_raw)
             elif upload_type == "Update stock master":
                 df_clean, summary = validate_ace_stock_master(df_raw)
                 name_conflicts = find_company_name_ace_conflicts(df_clean)
@@ -287,8 +284,6 @@ def update_db_page():
                     upload_bench_navs(df_clean)
                 elif upload_type == "Fund portfolios":
                     upload_fund_portfolios(df_clean)
-                elif upload_type == "Stock ISIN, industry, financial/non-financial":
-                    upload_stock_master(df_clean)
                 elif upload_type == "Update stock master":
                     upload_ace_stock_master(df_clean, industry_classifications)
                 elif upload_type == "Company RoE / RoCE":
