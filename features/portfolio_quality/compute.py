@@ -13,8 +13,8 @@ def _empty_fundamentals() -> pd.DataFrame:
     return pd.DataFrame(columns=_FUNDAMENTAL_COLUMNS)
 
 
-def _median_metric(roe_roce_data: dict[str, pd.DataFrame], isin, eval_date, is_financial) -> float:
-    sub = roe_roce_data.get(isin)
+def _median_metric(roe_roce_data: dict[str, pd.DataFrame], ace_code, eval_date, is_financial) -> float:
+    sub = roe_roce_data.get(ace_code)
     if sub is None or sub.empty:
         return 0.0
     sub = sub.loc[sub["year_end_date"] < eval_date].tail(5)
@@ -35,7 +35,7 @@ def _portfolio_fundamentals(
     totals = df.groupby(keys)["weight_pct"].transform("sum")
     df["dom_weight"] = np.where(totals > 0, df["weight_pct"] / totals, 0.0)
     df["stock_metric"] = [
-        _median_metric(roe_roce_data, row.isin, row.month_end, bool(row.is_financial))
+        _median_metric(roe_roce_data, row.ace_code, row.month_end, bool(row.is_financial))
         for row in df.itertuples(index=False)
     ]
     records = []

@@ -15,9 +15,9 @@ from features.portfolio_quality.compute import (
 
 def _portfolio_rows():
     return pd.DataFrame([
-        {"fund_id": 1, "fund_name": "Focus", "month_end": date(2024, 3, 31), "isin": "FIN", "weight_pct": 60, "asset_type": "Domestic Equities", "is_financial": True},
-        {"fund_id": 1, "fund_name": "Focus", "month_end": date(2024, 3, 31), "isin": "NON", "weight_pct": 40, "asset_type": "Domestic Equities", "is_financial": False},
-        {"fund_id": 2, "fund_name": "Peer", "month_end": date(2024, 3, 31), "isin": "FIN", "weight_pct": 100, "asset_type": "Domestic Equities", "is_financial": True},
+        {"fund_id": 1, "fund_name": "Focus", "month_end": date(2024, 3, 31), "ace_code": "FIN", "weight_pct": 60, "asset_type": "Domestic Equities", "is_financial": True},
+        {"fund_id": 1, "fund_name": "Focus", "month_end": date(2024, 3, 31), "ace_code": "NON", "weight_pct": 40, "asset_type": "Domestic Equities", "is_financial": False},
+        {"fund_id": 2, "fund_name": "Peer", "month_end": date(2024, 3, 31), "ace_code": "FIN", "weight_pct": 100, "asset_type": "Domestic Equities", "is_financial": True},
     ])
 
 
