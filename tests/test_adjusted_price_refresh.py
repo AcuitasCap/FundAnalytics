@@ -28,22 +28,22 @@ def test_compute_action_multiplier_bonus_and_split():
 def test_map_actions_to_month_end_maps_to_month_max_price_date_and_flags_missing():
     price_df = pd.DataFrame(
         [
-            {"isin": "A", "price_date": dt.date(2020, 1, 30), "price": 100},
-            {"isin": "A", "price_date": dt.date(2020, 1, 31), "price": 101},
-            {"isin": "A", "price_date": dt.date(2020, 2, 28), "price": 110},
+            {"ace_code": "A", "price_date": dt.date(2020, 1, 30), "price": 100},
+            {"ace_code": "A", "price_date": dt.date(2020, 1, 31), "price": 101},
+            {"ace_code": "A", "price_date": dt.date(2020, 2, 28), "price": 110},
         ]
     )
     actions_df = pd.DataFrame(
         [
             {
-                "isin": "A",
+                "ace_code": "A",
                 "action_type": "BONUS",
                 "ex_date": dt.date(2020, 1, 15),
                 "denominator": 1,
                 "numerator": 1,
             },
             {
-                "isin": "B",
+                "ace_code": "B",
                 "action_type": "SPLIT",
                 "ex_date": dt.date(2020, 1, 20),
                 "denominator": 2,
@@ -56,33 +56,33 @@ def test_map_actions_to_month_end_maps_to_month_max_price_date_and_flags_missing
     month_multiplier_df, exceptions_df = map_actions_to_month_end(actions_df, month_end_map)
 
     assert len(month_multiplier_df) == 1
-    assert month_multiplier_df.iloc[0]["isin"] == "A"
+    assert month_multiplier_df.iloc[0]["ace_code"] == "A"
     assert month_multiplier_df.iloc[0]["mapped_month_end_price_date"] == dt.date(2020, 1, 31)
     assert month_multiplier_df.iloc[0]["month_multiplier"] == 2.0
 
     assert len(exceptions_df) == 1
-    assert exceptions_df.iloc[0]["isin"] == "B"
+    assert exceptions_df.iloc[0]["ace_code"] == "B"
     assert exceptions_df.iloc[0]["reason"] == "missing_stock_price_month_row"
 
 
 def test_map_actions_same_month_multipliers_are_multiplied():
     price_df = pd.DataFrame(
         [
-            {"isin": "A", "price_date": dt.date(2020, 1, 31), "price": 100},
-            {"isin": "A", "price_date": dt.date(2020, 2, 29), "price": 110},
+            {"ace_code": "A", "price_date": dt.date(2020, 1, 31), "price": 100},
+            {"ace_code": "A", "price_date": dt.date(2020, 2, 29), "price": 110},
         ]
     )
     actions_df = pd.DataFrame(
         [
             {
-                "isin": "A",
+                "ace_code": "A",
                 "action_type": "BONUS",
                 "ex_date": dt.date(2020, 1, 5),
                 "denominator": 1,
                 "numerator": 1,
             },
             {
-                "isin": "A",
+                "ace_code": "A",
                 "action_type": "SPLIT",
                 "ex_date": dt.date(2020, 1, 20),
                 "denominator": 2,
@@ -101,18 +101,18 @@ def test_map_actions_same_month_multipliers_are_multiplied():
 def test_compute_cumulative_multipliers_applies_from_effective_month_end_inclusive():
     price_df = pd.DataFrame(
         [
-            {"isin": "A", "price_date": dt.date(2019, 12, 31), "price": 100},
-            {"isin": "A", "price_date": dt.date(2020, 1, 31), "price": 120},
-            {"isin": "A", "price_date": dt.date(2020, 2, 29), "price": 130},
-            {"isin": "A", "price_date": dt.date(2021, 2, 26), "price": 200},
-            {"isin": "A", "price_date": dt.date(2021, 2, 28), "price": 210},
-            {"isin": "A", "price_date": dt.date(2021, 3, 31), "price": 220},
+            {"ace_code": "A", "price_date": dt.date(2019, 12, 31), "price": 100},
+            {"ace_code": "A", "price_date": dt.date(2020, 1, 31), "price": 120},
+            {"ace_code": "A", "price_date": dt.date(2020, 2, 29), "price": 130},
+            {"ace_code": "A", "price_date": dt.date(2021, 2, 26), "price": 200},
+            {"ace_code": "A", "price_date": dt.date(2021, 2, 28), "price": 210},
+            {"ace_code": "A", "price_date": dt.date(2021, 3, 31), "price": 220},
         ]
     )
     month_multiplier_df = pd.DataFrame(
         [
-            {"isin": "A", "mapped_month_end_price_date": dt.date(2020, 1, 31), "month_multiplier": 2.0},
-            {"isin": "A", "mapped_month_end_price_date": dt.date(2021, 2, 28), "month_multiplier": 5.0},
+            {"ace_code": "A", "mapped_month_end_price_date": dt.date(2020, 1, 31), "month_multiplier": 2.0},
+            {"ace_code": "A", "mapped_month_end_price_date": dt.date(2021, 2, 28), "month_multiplier": 5.0},
         ]
     )
 
@@ -135,12 +135,12 @@ def test_compute_cumulative_multipliers_applies_from_effective_month_end_inclusi
 
 def test_invalid_ratio_goes_to_exceptions():
     price_df = pd.DataFrame(
-        [{"isin": "A", "price_date": dt.date(2020, 1, 31), "price": 100}]
+        [{"ace_code": "A", "price_date": dt.date(2020, 1, 31), "price": 100}]
     )
     actions_df = pd.DataFrame(
         [
             {
-                "isin": "A",
+                "ace_code": "A",
                 "action_type": "BONUS",
                 "ex_date": dt.date(2020, 1, 15),
                 "denominator": 0,

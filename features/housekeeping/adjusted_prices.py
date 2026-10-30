@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from sqlalchemy import text
 
 EXCEPTION_COLUMNS = [
-    "isin",
+    "ace_code",
     "action_type",
     "ex_date",
     "denominator",
@@ -55,7 +55,7 @@ def build_month_end_map(price_df: pd.DataFrame) -> pd.DataFrame:
     p = p.dropna(subset=["price_date"])
     p["mapped_month_start"] = p["price_date"].apply(_to_month_start)
     map_df = (
-        p.groupby(["isin", "mapped_month_start"], as_index=False)["price_date"]
+        p.groupby(["ace_code", "mapped_month_start"], as_index=False)["price_date"]
         .max()
         .rename(columns={"price_date": "mapped_month_end_price_date"})
     )
@@ -64,7 +64,7 @@ def build_month_end_map(price_df: pd.DataFrame) -> pd.DataFrame:
 
 def map_actions_to_month_end(actions_df: pd.DataFrame, month_end_map: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if actions_df is None or actions_df.empty:
-        return pd.DataFrame(columns=["isin", "mapped_month_end_price_date", "computed_multiplier"]), _empty_exceptions_df()
+        return pd.DataFrame(columns=["ace_code", "mapped_month_end_price_date", "computed_multiplier"]), _empty_exceptions_df()
 
     a = actions_df.copy()
     a["action_type"] = a["action_type"].astype(str).str.strip().str.upper()
@@ -84,8 +84,8 @@ def map_actions_to_month_end(actions_df: pd.DataFrame, month_end_map: pd.DataFra
     a["invalid_ratio"] = invalid_ratio
 
     merged = a.merge(
-        month_end_map[["isin", "mapped_month_start", "mapped_month_end_price_date"]],
-        on=["isin", "mapped_month_start"],
+        month_end_map[["ace_code", "mapped_month_start", "mapped_month_end_price_date"]],
+        on=["ace_code", "mapped_month_start"],
         how="left",
     )
     merged["mapped_month_end_price_date"] = pd.to_datetime(
@@ -113,7 +113,7 @@ def map_actions_to_month_end(actions_df: pd.DataFrame, month_end_map: pd.DataFra
     ].copy()
 
     month_multiplier_df = (
-        valid_mapped.groupby(["isin", "mapped_month_end_price_date"], as_index=False)["computed_multiplier"]
+        valid_mapped.groupby(["ace_code", "mapped_month_end_price_date"], as_index=False)["computed_multiplier"]
         .prod()
         .rename(columns={"computed_multiplier": "month_multiplier"})
     )
@@ -122,31 +122,31 @@ def map_actions_to_month_end(actions_df: pd.DataFrame, month_end_map: pd.DataFra
 
 def compute_cumulative_multipliers(price_df: pd.DataFrame, month_multiplier_df: pd.DataFrame) -> pd.DataFrame:
     if price_df is None or price_df.empty:
-        return pd.DataFrame(columns=["isin", "price_date", "price", "adj_multiplier", "adj_price"])
+        return pd.DataFrame(columns=["ace_code", "price_date", "price", "adj_multiplier", "adj_price"])
 
     p = price_df.copy()
     p["price_date"] = pd.to_datetime(p["price_date"], errors="coerce").dt.date
     p["price"] = pd.to_numeric(p["price"], errors="coerce")
-    p = p.sort_values(["isin", "price_date"]).reset_index(drop=True)
+    p = p.sort_values(["ace_code", "price_date"]).reset_index(drop=True)
 
     mm = month_multiplier_df.copy()
     if mm.empty:
-        mm = pd.DataFrame(columns=["isin", "mapped_month_end_price_date", "month_multiplier"])
+        mm = pd.DataFrame(columns=["ace_code", "mapped_month_end_price_date", "month_multiplier"])
     mm["mapped_month_end_price_date"] = pd.to_datetime(mm["mapped_month_end_price_date"], errors="coerce").dt.date
     mm["month_multiplier"] = pd.to_numeric(mm["month_multiplier"], errors="coerce")
 
     month_mult_map: dict[tuple[str, dt.date], float] = {
-        (str(r["isin"]), r["mapped_month_end_price_date"]): float(r["month_multiplier"])
+        (str(r["ace_code"]), r["mapped_month_end_price_date"]): float(r["month_multiplier"])
         for _, r in mm.dropna(subset=["mapped_month_end_price_date", "month_multiplier"]).iterrows()
     }
 
     out_parts = []
-    for isin, sub in p.groupby("isin", sort=False):
+    for ace_code, sub in p.groupby("ace_code", sort=False):
         running = 1.0
         rows = sub.copy()
         multipliers = []
         for d in rows["price_date"]:
-            step = month_mult_map.get((str(isin), d))
+            step = month_mult_map.get((str(ace_code), d))
             if step is not None:
                 running *= float(step)
             multipliers.append(running)
@@ -156,22 +156,22 @@ def compute_cumulative_multipliers(price_df: pd.DataFrame, month_multiplier_df: 
         out_parts.append(rows)
 
     out = pd.concat(out_parts, ignore_index=True)
-    return out[["isin", "price_date", "price", "adj_multiplier", "adj_price"]]
+    return out[["ace_code", "price_date", "price", "adj_multiplier", "adj_price"]]
 
 
 def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
     price_sql = text(
         """
-        select isin, price_date::date as price_date, price
-        from fundlab.stock_price
-        order by isin, price_date
+        select ace_code, price_date::date as price_date, price
+        from fundlab.stock_price_ace
+        order by ace_code, price_date
         """
     )
     action_sql = text(
         """
-        select isin, action_type, ex_date::date as ex_date, denominator, numerator
-        from fundlab.stock_corporate_action
-        order by isin, ex_date
+        select ace_code, action_type, ex_date::date as ex_date, denominator, numerator
+        from fundlab.stock_corporate_action_ace
+        order by ace_code, ex_date
         """
     )
 
@@ -184,7 +184,7 @@ def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
             "actions_total": int(len(actions_df)),
             "actions_mapped": 0,
             "actions_unmapped": int(len(actions_df)),
-            "unique_isins_actions": int(actions_df["isin"].nunique()) if not actions_df.empty else 0,
+            "unique_ace_codes_actions": int(actions_df["ace_code"].nunique()) if not actions_df.empty else 0,
             "price_rows_total": 0,
             "price_rows_updated": 0,
             "min_price_date": None,
@@ -206,18 +206,18 @@ def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
 
     invariant_exceptions = []
     candidates = adjusted_df[adjusted_df["price"].notna()].copy()
-    unique_isins = candidates["isin"].dropna().astype(str).unique().tolist()
-    sample_size = min(5, len(unique_isins))
+    unique_ace_codes = candidates["ace_code"].dropna().astype(str).unique().tolist()
+    sample_size = min(5, len(unique_ace_codes))
     if sample_size > 0:
-        rng = pd.Series(unique_isins).sample(n=sample_size, random_state=42).tolist()
-        sample_rows = candidates[candidates["isin"].astype(str).isin(rng)].copy()
+        rng = pd.Series(unique_ace_codes).sample(n=sample_size, random_state=42).tolist()
+        sample_rows = candidates[candidates["ace_code"].astype(str).isin(rng)].copy()
         ratio = sample_rows["adj_price"] / sample_rows["price"]
         mismatch = (ratio - sample_rows["adj_multiplier"]).abs() > 1e-9
         bad_rows = sample_rows[mismatch].head(25)
         for _, r in bad_rows.iterrows():
             invariant_exceptions.append(
                 {
-                    "isin": r["isin"],
+                    "ace_code": r["ace_code"],
                     "action_type": "INVARIANT",
                     "ex_date": r["price_date"],
                     "denominator": pd.NA,
@@ -236,7 +236,7 @@ def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
         else:
             exceptions_df = pd.concat([exceptions_df, inv_df], ignore_index=True)
 
-    rows = adjusted_df[["isin", "price_date", "adj_multiplier", "adj_price"]].to_dict(orient="records")
+    rows = adjusted_df[["ace_code", "price_date", "adj_multiplier", "adj_price"]].to_dict(orient="records")
     chunk_size = 3000
     updated_rows = 0
 
@@ -248,20 +248,20 @@ def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
             params = {}
             values_sql = []
             for j, row in enumerate(chunk, start=1):
-                values_sql.append(f"(:isin{j}, :price_date{j}, :adj_multiplier{j}, :adj_price{j})")
-                params[f"isin{j}"] = row["isin"]
+                values_sql.append(f"(:ace_code{j}, :price_date{j}, :adj_multiplier{j}, :adj_price{j})")
+                params[f"ace_code{j}"] = row["ace_code"]
                 params[f"price_date{j}"] = row["price_date"]
                 params[f"adj_multiplier{j}"] = float(row["adj_multiplier"]) if pd.notna(row["adj_multiplier"]) else None
                 params[f"adj_price{j}"] = float(row["adj_price"]) if pd.notna(row["adj_price"]) else None
 
             update_sql = sa.text(
                 f"""
-                update fundlab.stock_price sp
+                update fundlab.stock_price_ace sp
                 set
                   adj_multiplier = v.adj_multiplier,
                   adj_price      = v.adj_price
-                from (values {", ".join(values_sql)}) as v(isin, price_date, adj_multiplier, adj_price)
-                where sp.isin = v.isin
+                from (values {", ".join(values_sql)}) as v(ace_code, price_date, adj_multiplier, adj_price)
+                where sp.ace_code = v.ace_code
                   and sp.price_date = v.price_date
                 """
             )
@@ -283,7 +283,7 @@ def refresh_adjusted_prices(engine: Any) -> tuple[dict, pd.DataFrame]:
         "actions_total": int(len(actions_df)),
         "actions_mapped": mapped_actions,
         "actions_unmapped": int(len(actions_df) - mapped_actions),
-        "unique_isins_actions": int(actions_df["isin"].nunique()) if not actions_df.empty else 0,
+        "unique_ace_codes_actions": int(actions_df["ace_code"].nunique()) if not actions_df.empty else 0,
         "price_rows_total": int(len(price_df)),
         "price_rows_updated": int(updated_rows),
         "min_price_date": str(pd.to_datetime(price_df["price_date"], errors="coerce").min().date()),

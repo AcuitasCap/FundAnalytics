@@ -114,6 +114,21 @@ def show_expected_format(upload_type: str):
             "in Excel to preserve any leading zeros. Ex Date must be a valid date; "
             "DPS must be non-negative."
         )
+    elif upload_type == "Stock corporate actions (Bonus/Split)":
+        st.markdown("**Expected format (CSV or Excel):**")
+        st.dataframe(pd.DataFrame({
+            "ACE code": ["100325"],
+            "Ex Date": ["2025-08-15"],
+            "Denominator (D)": [1],
+            "Numerator (N)": [1],
+        }))
+        st.info(
+            "Select BONUS or SPLIT above; the action type need not be a file column. "
+            "Keep ACE codes as text to preserve leading zeros; they must exist in "
+            "stock_master_ace. Ex Date must be valid, and D and N must be positive "
+            "whole numbers. BONUS: N additional shares per D existing shares. "
+            "SPLIT: N resulting shares per D existing shares."
+        )
     elif upload_type == "Company PAT (quarterly)":
         st.markdown(
             "- **3 columns**: ACE code, quarter-end in `YYYYMM`, adjusted PAT (absolute)\n"

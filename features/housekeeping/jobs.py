@@ -168,7 +168,7 @@ def refresh_precomputed_rolling_returns() -> dict:
 
 def refresh_adjusted_prices() -> tuple[dict, pd.DataFrame]:
     """
-    Full-history refresh of adjusted multipliers/prices in fundlab.stock_price.
+    Full-history refresh of adjusted multipliers/prices in fundlab.stock_price_ace.
     Updates only adj_multiplier and adj_price.
     """
     return _refresh_adjusted_prices_full(get_engine())

@@ -85,7 +85,7 @@ def housekeeping_page():
             st.session_state["adj_price_exceptions_preview"] = exceptions_df
     if "adj_price_summary" in st.session_state:
         summary = st.session_state["adj_price_summary"]
-        st.write("Summary:", {key: summary.get(key) for key in ("actions_total", "actions_mapped", "actions_unmapped", "unique_isins_actions", "price_rows_total", "price_rows_updated", "min_price_date", "max_price_date", "exceptions")})
+        st.write("Summary:", {key: summary.get(key) for key in ("actions_total", "actions_mapped", "actions_unmapped", "unique_ace_codes_actions", "price_rows_total", "price_rows_updated", "min_price_date", "max_price_date", "exceptions")})
     preview = st.session_state.get("adj_price_exceptions_preview")
     if isinstance(preview, pd.DataFrame) and not preview.empty:
         st.warning(f"Exceptions found: {len(preview):,}")
