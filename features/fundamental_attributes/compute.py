@@ -91,15 +91,16 @@ def stock_growth(financials, metric):
 
 
 def attach_stock_values(rows, facts, kind, metric, growth_values=None):
-    """Join exact-month multiples or the immediately preceding completed quarter."""
+    """Match valuations by ACE/month-year, or growth by completed quarter."""
     rows = rows.copy()
     if kind == "valuation":
         column = {"P/S": "ps", "P/E": "pe", "P/B": "pb"}.get(metric)
         if column is None:
             raise ValueError(f"Unsupported valuation metric: {metric}")
         values = facts[["ace_code", "month_end", column]].rename(columns={column: "value"}).copy()
-        values["month_end"] = pd.to_datetime(values["month_end"])
-        keys = ["ace_code", "month_end"]
+        rows["month_key"] = pd.to_datetime(rows["month_end"]).dt.to_period("M")
+        values["month_key"] = pd.to_datetime(values.pop("month_end")).dt.to_period("M")
+        keys = ["ace_code", "month_key"]
     elif kind == "growth":
         # At a quarter-end the same quarter's results are not yet available.
         rows["quarter_end"] = rows["month_end"].dt.to_period("Q").dt.start_time - pd.Timedelta(days=1)
@@ -124,7 +125,7 @@ def compute_attribute_comparison(holdings, members, facts, *, start_date, end_da
                                  mode, focus_id, focus_label, compare, segment, kind,
                                  metric, top_half=False, minimum_stocks=5):
     """Return focus/comparator median lines and per-fund coverage diagnostics."""
-    if minimum_stocks < 1 or start_date > end_date:
+    if minimum_stocks < 1 or pd.Period(start_date, freq="M") > pd.Period(end_date, freq="M"):
         raise ValueError("Check the selected period and minimum stock count.")
     h, grid = portfolio_rows(holdings, start_date, end_date, mode, focus_id, top_half)
     if h.empty:
@@ -159,7 +160,9 @@ def compute_attribute_comparison(holdings, members, facts, *, start_date, end_da
         comparison["valid_stock_count"] = np.nan
         comparison["peer_fund_count"] = comparison["peer_fund_count"].fillna(0)
     else:
-        cohort = select_segment(members[members["month_end"].isin(focus["month_end"])], segment)
+        cohort = members.copy()
+        cohort["month_end"] = pd.to_datetime(cohort["month_end"]).dt.to_period("M").dt.to_timestamp("M")
+        cohort = select_segment(cohort[cohort["month_end"].isin(focus["month_end"])], segment)
         cohort = attach_stock_values(cohort, facts, kind, metric, growth_values)
         summary = cohort.groupby("month_end").agg(median=("value", "median"),
                                                    valid_stock_count=("value", "count")).reset_index()

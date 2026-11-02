@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from core.dataframes import ensure_unique_monthly_rows
 from core.db import get_engine
-from . import BANDS, COMPARATORS, CURRENT, HISTORICAL
+from . import BANDS, COMPARATORS, CURRENT, DATA_VERSION, HISTORICAL
 
 
 HOLDING_COLUMNS = ["fund_id", "holding_month_end", "anchor_month_end", "holding_key",
@@ -24,8 +24,12 @@ def load_attribute_inputs(fund_ids, start_date, end_date, mode, compare, kind):
     """
     if mode not in {HISTORICAL, CURRENT} or compare not in COMPARATORS or kind not in {"valuation", "growth"}:
         raise ValueError("Unsupported fundamental attribute settings.")
-    if start_date > end_date:
+    if pd.Period(start_date, freq="M") > pd.Period(end_date, freq="M"):
         raise ValueError("Start date must be on or before end date.")
+    # Select entire months, including prices/holdings recorded on a trading day
+    # before the calendar month-end. Day-of-month is not an observation key.
+    start_date = pd.Period(start_date, freq="M").start_time.date()
+    end_date = pd.Period(end_date, freq="M").to_timestamp("M").date()
     fact_columns = (["ace_code", "month_end", "ps", "pe", "pb"] if kind == "valuation"
                     else ["ace_code", "period_end", "sales", "pat"])
     empty = (pd.DataFrame(columns=HOLDING_COLUMNS), pd.DataFrame(columns=MEMBER_COLUMNS),
@@ -122,6 +126,8 @@ def load_attribute_inputs(fund_ids, start_date, end_date, mode, compare, kind):
     members["month_end"] = pd.to_datetime(members["month_end"]).dt.to_period("M").dt.to_timestamp("M")
     date_column = "month_end" if kind == "valuation" else "period_end"
     facts[date_column] = pd.to_datetime(facts[date_column])
+    if kind == "valuation":
+        facts[date_column] = facts[date_column].dt.to_period("M").dt.to_timestamp("M")
     value_columns = ["ps", "pe", "pb"] if kind == "valuation" else ["sales", "pat"]
     for column in value_columns:
         facts[column] = pd.to_numeric(facts[column], errors="coerce")
@@ -132,5 +138,6 @@ def load_attribute_inputs(fund_ids, start_date, end_date, mode, compare, kind):
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def cached_attribute_inputs(fund_ids: tuple, start_date: dt.date, end_date: dt.date,
-                            mode: str, compare: str, kind: str):
+                            mode: str, compare: str, kind: str, data_version: str = DATA_VERSION):
+    del data_version
     return load_attribute_inputs(fund_ids, start_date, end_date, mode, compare, kind)

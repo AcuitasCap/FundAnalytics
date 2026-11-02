@@ -9,7 +9,7 @@ from core.fund_catalog import fetch_categories, fetch_funds_for_categories
 from core.navigation import home_button
 from features.portfolio_quality.page import render_quality_section
 from features.portfolio_valuations.display import display_anchor_months
-from . import COMPARATORS, CURRENT, HISTORICAL
+from . import COMPARATORS, CURRENT, DATA_VERSION, HISTORICAL
 from .compute import compute_attribute_comparison
 from .data import cached_attribute_inputs
 from .display import display_median_comparison
@@ -90,7 +90,7 @@ def period_selector(prefix, quarterly=False):
 def _render_comparison_section(context, kind):
     valuation = kind == "valuation"
     prefix = "fa_valuation" if valuation else "fa_growth"
-    signature = (tuple(sorted(context["selected_fund_ids"])), context["focus_fund_id"])
+    signature = (DATA_VERSION, tuple(sorted(context["selected_fund_ids"])), context["focus_fund_id"])
     with st.form(f"{prefix}_controls"):
         start, end = period_selector(prefix, quarterly=not valuation)
         mode = st.radio("Valuation mode", [HISTORICAL, CURRENT], key=f"{prefix}_mode") if valuation else HISTORICAL

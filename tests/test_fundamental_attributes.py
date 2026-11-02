@@ -116,6 +116,59 @@ def test_current_portfolio_keeps_actual_anchor_and_uses_monthly_valuations():
     assert series[series.series == "Focus"]["median"].tolist() == [35] * 3
 
 
+@pytest.mark.parametrize("mode", [HISTORICAL, CURRENT])
+@pytest.mark.parametrize("metric,expected", [("P/E", 35), ("P/B", 3.5), ("P/S", 7)])
+@pytest.mark.parametrize("comparator", ["Peers", "Midcaps"])
+def test_valuations_match_month_year_despite_different_days(mode, metric, expected, comparator):
+    h = pd.concat([holdings(dates=("2025-11-30",)), holdings(2, dates=("2025-11-27",))])
+    facts = multiples(dates=("2025-11-28",))
+    prior_year = multiples(dates=("2024-11-28",), values=(999,) * 6)
+    members = facts[["ace_code", "month_end"]].assign(is_financial=False)
+    series, stats = compare(h, facts=pd.concat([facts, prior_year]), members=members,
+                            mode=mode, compare=comparator, metric=metric, minimum_stocks=5,
+                            start_date=dt.date(2025, 11, 30), end_date=dt.date(2025, 11, 30))
+    assert series.month_end.tolist() == [pd.Timestamp("2025-11-30")] * 2
+    assert series["median"].tolist() == pytest.approx([expected, expected])
+    assert stats.valid_stock_count.tolist() == [6, 6]
+
+
+@pytest.mark.parametrize("mode", [HISTORICAL, CURRENT])
+def test_loader_includes_entire_selected_month_and_normalizes_valuation_dates(monkeypatch, mode):
+    events = []
+
+    class Connection:
+        def execute(self, query):
+            pass
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            yield Connection()
+
+    def read_sql(query, conn, params):
+        sql = str(query)
+        events.append((sql, params))
+        if "fund_portfolio_ace" in sql:
+            assert params["start_date"] == dt.date(2025, 11, 1)
+            assert params["end_date"] == dt.date(2025, 11, 30)
+            return holdings(dates=("2025-11-28",))
+        assert params["fact_start"] == dt.date(2025, 11, 1)
+        assert params["end_date"] == dt.date(2025, 11, 30)
+        rows = multiples(dates=("2025-11-28",))
+        return rows[rows.month_end.between(pd.Timestamp(params["fact_start"]), pd.Timestamp(params["end_date"]))]
+
+    monkeypatch.setattr(data, "get_engine", lambda: Engine())
+    monkeypatch.setattr(data.pd, "read_sql", read_sql)
+    # The day supplied by a selector/caller must not affect the monthly result.
+    h, members, facts = data.load_attribute_inputs(
+        [1], dt.date(2025, 11, 30), dt.date(2025, 11, 1), mode, "Peers", "valuation")
+    assert len(facts) == 6
+    assert facts.month_end.eq(pd.Timestamp("2025-11-30")).all()
+    series, _ = compare(h, facts=facts, mode=mode, minimum_stocks=5,
+                        start_date=dt.date(2025, 11, 1), end_date=dt.date(2025, 11, 30))
+    assert series.loc[series.series == "Focus", "median"].iloc[0] == 35
+
+
 def test_minimum_stock_rule_and_empty_segments_keep_missing_period_rows():
     _, stats = compare(facts=multiples(values=(10, 20, 30, 40)), minimum_stocks=5)
     assert stats.iloc[0].valid_stock_count == 4
