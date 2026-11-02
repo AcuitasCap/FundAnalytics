@@ -203,6 +203,9 @@ def validate_fund_portfolios(df_raw: pd.DataFrame):
     supplied_non_domestic = int(
         (df.loc[~domestic, "ace_code"].astype("string").str.strip().fillna("") != "").sum()
     )
+    # Excel may infer an integer/float column. Replace the whole column's dtype
+    # before assigning varchar identifiers or NULLs to individual row subsets.
+    df["ace_code"] = df["ace_code"].astype("string")
     df.loc[domestic, "ace_code"] = _normalize_ace_codes(df.loc[domestic, "ace_code"])
     df.loc[~domestic, "ace_code"] = pd.NA
 
@@ -322,12 +325,12 @@ def validate_roe_roce(df_raw: pd.DataFrame):
 
 
 def _normalize_ace_codes(series: pd.Series) -> pd.Series:
-    """Keep ACE identifiers as strings, including any leading zeros."""
-    codes = series.astype("string").str.strip().str.replace(r"\.0+$", "", regex=True)
-    invalid_codes = ~codes.str.fullmatch(r"[0-9]{1,10}").fillna(False)
+    """Normalize numeric Excel values and alphanumeric varchar(10) identifiers."""
+    codes = series.astype("string").str.strip().str.replace(r"^([0-9]+)\.0+$", r"\1", regex=True)
+    invalid_codes = ~codes.str.fullmatch(r"[A-Za-z0-9]{1,10}").fillna(False)
     if invalid_codes.any():
         raise ValueError(
-            "ACE codes must be nonblank numeric identifiers of at most 10 digits. "
+            "ACE codes must be nonblank alphanumeric identifiers of at most 10 characters. "
             f"Invalid rows: {(series.index[invalid_codes] + 2).tolist()[:20]}"
         )
     return codes
