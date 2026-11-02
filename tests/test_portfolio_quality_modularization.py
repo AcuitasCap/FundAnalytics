@@ -6,9 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def test_quality_page_is_registered_from_feature_package():
-    tree = ast.parse(Path("app13.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("features/fundamental_attributes/page.py").read_text(encoding="utf-8"))
     imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
-    assert any(node.module == "features.portfolio_quality.page" and any(alias.name == "portfolio_quality_page" for alias in node.names) for node in imports)
+    assert any(node.module == "features.portfolio_quality.page" and any(alias.name == "render_quality_section" for alias in node.names) for node in imports)
 
 
 def test_quality_feature_has_one_way_dependencies():

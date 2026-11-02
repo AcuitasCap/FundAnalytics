@@ -22,13 +22,14 @@ def test_market_valuation_modules_import_without_connecting(monkeypatch):
         importlib.import_module(module_name)
 
 
-def test_valuation_router_exposes_fund_and_market_subpages():
+def test_valuation_router_keeps_market_and_moves_funds_to_fundamentals():
     import app13
     from features.market_valuations.page import market_valuations_page
-    from features.portfolio_valuations.page import portfolio_valuations_page
+    from features.fundamental_attributes.page import fundamental_attributes_page
 
     assert app13.PAGE_HANDLERS["Valuations"] is app13.valuations_page
-    assert app13.PAGE_HANDLERS["Fund valuations"] is portfolio_valuations_page
+    assert app13.PAGE_HANDLERS["Fundamental attributes"] is fundamental_attributes_page
+    assert "Fund valuations" not in app13.PAGE_HANDLERS
     assert app13.PAGE_HANDLERS["Market valuations"] is market_valuations_page
 
 

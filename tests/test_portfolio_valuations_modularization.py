@@ -62,9 +62,10 @@ def test_valuations_feature_imports_without_creating_an_engine(monkeypatch):
 
 def test_router_uses_extracted_valuations_page_and_layers_are_one_way():
     import app13
-    from features.portfolio_valuations.page import portfolio_valuations_page
+    from features.fundamental_attributes.page import fundamental_attributes_page
 
-    assert app13.PAGE_HANDLERS["Fund valuations"] is portfolio_valuations_page
+    assert app13.PAGE_HANDLERS["Fundamental attributes"] is fundamental_attributes_page
+    assert "Fund valuations" not in app13.PAGE_HANDLERS
     tree = ast.parse((ROOT / "app13.py").read_text(encoding="utf-8"))
     functions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
     assert "portfolio_valuations_page" not in functions
@@ -73,10 +74,9 @@ def test_router_uses_extracted_valuations_page_and_layers_are_one_way():
 
 
 def test_ui_uses_ranges_and_no_stored_fund_valuation_or_aggregation_controls():
-    page_source = (ROOT / "features/portfolio_valuations/page.py").read_text(encoding="utf-8")
     active_source = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (ROOT / "features/portfolio_valuations").glob("*.py")
+        for path in (ROOT / "features/fundamental_attributes").glob("*.py")
     )
     for option in (
         "Valuations of historical portfolios",
@@ -87,10 +87,10 @@ def test_ui_uses_ranges_and_no_stored_fund_valuation_or_aggregation_controls():
         "P/S",
         "P/B",
         "P/E",
-        "Full valuation range",
-        "Valuation range of top 50% stocks",
+        "Full portfolio",
+        "Top 50% of portfolio",
     ):
-        assert option in page_source
+        assert option in active_source
     assert "Weighted average multiple" not in active_source
     assert "Median multiple" not in active_source
     assert "fund_monthly_valuations" not in active_source

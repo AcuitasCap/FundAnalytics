@@ -11,9 +11,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 EXPECTED_PAGES = {
     "Home",
     "Performance",
-    "Portfolio quality",
+    "Fundamental attributes",
     "Valuations",
-    "Fund valuations",
     "Market valuations",
     "Fund attribution",
     "Portfolio",

@@ -36,7 +36,7 @@ def display_quality_analysis(mode: str, result: pd.DataFrame, context: dict) -> 
         if result.empty:
             st.info("No quality bucket data available.")
             return
-        st.subheader("7. Quality quartile exposures (Q1–Q4)")
+        st.subheader("Quality quartile exposures (Q1–Q4)")
         st.markdown(f"**Fund:** {context['focus_fund_label']}")
         chart_df = result.drop(index="Total", errors="ignore").T.reset_index().rename(columns={"index": "month_end"})
         chart_df["month_end"] = pd.to_datetime(chart_df["month_end"])

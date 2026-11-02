@@ -11,7 +11,7 @@ def test_home_page_source_uses_intended_unicode_labels():
 
     assert "**Performance** \N{EN DASH} NAV-based rolling returns" in source
     assert 'st.button("\N{CHART WITH UPWARDS TREND} Performance")' in source
-    assert 'st.button("\N{BAR CHART} Portfolio quality")' in source
+    assert 'st.button("\N{BAR CHART} Fundamental attributes")' in source
     assert 'st.button("\N{BROOM} Housekeeping")' in source
 
 
