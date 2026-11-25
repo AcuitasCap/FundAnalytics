@@ -11,8 +11,8 @@ def compute_adj_price_returns(
     audit_rows: int = 500,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Compute monthly stock returns from adj_price:
-      r_t = (adj_price_t / adj_price_{t-1}) - 1
+    Compute adjusted price returns between consecutive supplied endpoints.
+    Endpoints can be monthly or farther apart when holdings are reported less often.
 
     Returns:
       returns_df: index=t1 months, columns=ace_codes
@@ -107,13 +107,14 @@ def compute_dividend_yield_returns(
     ace_codes: list[str],
 ) -> pd.DataFrame:
     """
-    Compute monthly dividend return series aligned to return months (t1):
-      div_return[t1, ace_code] = dividend_yield observed at t0.
-    Missing values are treated as 0.
+    Compute dividend returns in each interval, using the yield at the start
+    of each month. For longer intervals, each monthly dividend is measured
+    against the initial stock allocation using the intervening price change.
+    Missing yields contribute zero.
     """
     t1 = months[1:]
     out = pd.DataFrame(index=t1, columns=ace_codes, dtype=float)
-    if prices_df is None or prices_df.empty or not ace_codes:
+    if prices_df is None or prices_df.empty or not ace_codes or not t1:
         return out.fillna(0.0)
 
     px = prices_df.copy()
@@ -127,138 +128,25 @@ def compute_dividend_yield_returns(
     px["month_end"] = pd.to_datetime(px["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     px["dividend_yield"] = pd.to_numeric(px.get("dividend_yield"), errors="coerce")
 
-    div_piv = px.pivot_table(index="month_end", columns="ace_code", values="dividend_yield", aggfunc="last").reindex(months)
-    div_piv = div_piv.reindex(columns=ace_codes)
-    out.loc[:, ace_codes] = div_piv.shift(1).loc[t1, ace_codes].to_numpy(dtype=float)
+    div_piv = px.pivot_table(index="month_end", columns="ace_code", values="dividend_yield", aggfunc="last")
+    if len(pd.date_range(months[0], months[-1], freq="ME")) == len(months):
+        out.loc[:, ace_codes] = div_piv.reindex(index=months[:-1], columns=ace_codes).to_numpy(dtype=float)
+        return out.fillna(0.0)
+
+    adj_piv = pd.DataFrame()
+    if "adj_price" in px:
+        px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
+        adj_piv = px.pivot_table(index="month_end", columns="ace_code", values="adj_price", aggfunc="last")
+    for start, end in zip(months[:-1], t1):
+        accrual_months = pd.date_range(start, end, freq="ME", inclusive="left")
+        monthly_yields = div_piv.reindex(index=accrual_months, columns=ace_codes).fillna(0.0)
+        if len(accrual_months) == 1:
+            out.loc[end] = monthly_yields.iloc[0]
+            continue
+        prices = adj_piv.reindex(index=accrual_months, columns=ace_codes)
+        prices = prices.where(prices > 0)
+        drift = prices.div(prices.iloc[0]).replace([np.inf, -np.inf], np.nan)
+        # Starting yields are already expressed relative to the opening price.
+        drift.iloc[0] = 1.0
+        out.loc[end] = (monthly_yields * drift).sum(axis=0)
     return out.fillna(0.0)
-
-
-def compute_monthly_portfolio_multiples(
-    multiples_df: pd.DataFrame,
-    months: list[pd.Timestamp],
-    ace_codes: list[str],
-    w0_df: pd.DataFrame,
-    r_price_df: pd.DataFrame,
-    lens: str,
-) -> tuple[np.ndarray, np.ndarray, dict]:
-    """
-    Compute portfolio multiple at start/end of each month.
-
-    Start-of-month multiple uses t0 weights.
-    End-of-month multiple uses drifted end weights implied by monthly price moves,
-    before the next month's rebalance.
-
-    Returns:
-      M_start: len(t1), portfolio multiple at t0
-      M_end: len(t1), portfolio multiple at t1 with drifted end weights
-      debug: coverage/aggregation diagnostics
-    """
-    t0 = months[:-1]
-    t1 = months[1:]
-    n = len(t1)
-
-    m_start = np.full(n, np.nan, dtype=float)
-    m_end = np.full(n, np.nan, dtype=float)
-    agg_y0_arr = np.full(n, np.nan, dtype=float)
-    agg_y1_arr = np.full(n, np.nan, dtype=float)
-    cov0_arr = np.zeros(n, dtype=float)
-    cov1_arr = np.zeros(n, dtype=float)
-    valid0_n = np.zeros(n, dtype=int)
-    valid1_n = np.zeros(n, dtype=int)
-    end_weight_sum_arr = np.full(n, np.nan, dtype=float)
-
-    mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
-    valid_rule = "positive_stock_multiple"
-
-    if multiples_df is None or multiples_df.empty or not ace_codes:
-        debug = {
-            "mult_col": mult_col,
-            "validity_rule": valid_rule,
-            "agg_yield_start": agg_y0_arr,
-            "agg_yield_end": agg_y1_arr,
-            "coverage_start_weight": cov0_arr,
-            "coverage_end_weight": cov1_arr,
-            "valid_count_start": valid0_n,
-            "valid_count_end": valid1_n,
-            "drifted_end_weight_sum": end_weight_sum_arr,
-        }
-        return m_start, m_end, debug
-
-    mul = multiples_df.copy()
-    mul["ace_code"] = mul["ace_code"].astype(str)
-    mul = mul[mul["ace_code"].isin(ace_codes)].copy()
-    if mul.empty or mult_col not in mul.columns:
-        debug = {
-            "mult_col": mult_col,
-            "validity_rule": valid_rule,
-            "agg_yield_start": agg_y0_arr,
-            "agg_yield_end": agg_y1_arr,
-            "coverage_start_weight": cov0_arr,
-            "coverage_end_weight": cov1_arr,
-            "valid_count_start": valid0_n,
-            "valid_count_end": valid1_n,
-            "drifted_end_weight_sum": end_weight_sum_arr,
-        }
-        return m_start, m_end, debug
-
-    if "month_end" not in mul.columns and "price_date" in mul.columns:
-        mul["month_end"] = mul["price_date"]
-    mul["month_end"] = pd.to_datetime(mul["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
-    mul[mult_col] = pd.to_numeric(mul[mult_col], errors="coerce")
-
-    m_piv = mul.pivot_table(index="month_end", columns="ace_code", values=mult_col, aggfunc="last").reindex(months)
-    m_piv = m_piv.reindex(columns=ace_codes)
-    # The database stores P/S, P/E and P/B.  Harmonic portfolio aggregation
-    # operates on implied yields, so invert only valid positive multiples.
-    multiple_vals = m_piv.to_numpy(dtype=float)
-    y_vals = np.where(np.isfinite(multiple_vals) & (multiple_vals > 0), 1.0 / multiple_vals, np.nan)
-
-    w_aligned = w0_df.reindex(index=t0, columns=ace_codes).fillna(0.0)
-    w_mat = w_aligned.to_numpy(dtype=float)
-    r_price_aligned = r_price_df.reindex(index=t1, columns=ace_codes).fillna(0.0)
-    r_price_mat = r_price_aligned.to_numpy(dtype=float)
-
-    for i in range(n):
-        w = w_mat[i, :]
-        r_price = r_price_mat[i, :]
-        y0 = y_vals[i, :]
-        y1 = y_vals[i + 1, :]
-
-        m0 = np.isfinite(y0)
-        m1 = np.isfinite(y1)
-
-        gross_end = w * (1.0 + r_price)
-        gross_end_sum = float(np.sum(gross_end))
-        end_weight_sum_arr[i] = gross_end_sum
-        if np.isfinite(gross_end_sum) and gross_end_sum > 0.0:
-            w_end = gross_end / gross_end_sum
-        else:
-            w_end = np.zeros_like(w)
-
-        valid0_n[i] = int(m0.sum())
-        valid1_n[i] = int(m1.sum())
-        cov0_arr[i] = float(np.sum(w[m0])) if np.any(m0) else 0.0
-        cov1_arr[i] = float(np.sum(w_end[m1])) if np.any(m1) else 0.0
-
-        y0_filled = np.where(m0, y0, 0.0)
-        y1_filled = np.where(m1, y1, 0.0)
-        agg_y0 = float(np.sum(w * y0_filled))
-        agg_y1 = float(np.sum(w_end * y1_filled))
-        agg_y0_arr[i] = agg_y0
-        agg_y1_arr[i] = agg_y1
-
-        m_start[i] = (1.0 / agg_y0) if np.isfinite(agg_y0) and agg_y0 != 0.0 else np.nan
-        m_end[i] = (1.0 / agg_y1) if np.isfinite(agg_y1) and agg_y1 != 0.0 else np.nan
-
-    debug = {
-        "mult_col": mult_col,
-        "validity_rule": valid_rule,
-        "agg_yield_start": agg_y0_arr,
-        "agg_yield_end": agg_y1_arr,
-        "coverage_start_weight": cov0_arr,
-        "coverage_end_weight": cov1_arr,
-        "valid_count_start": valid0_n,
-        "valid_count_end": valid1_n,
-        "drifted_end_weight_sum": end_weight_sum_arr,
-    }
-    return m_start, m_end, debug

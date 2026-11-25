@@ -32,12 +32,15 @@ def _load_attrib_raw_window(
     fund_id: int,
     end_month_end: dt.date,
     lookback_years: int = 10,
-    data_version: str = "ace-v2",
+    data_version: str = "ace-v3",
 ):
     """Load ACE-keyed raw inputs for attribution for a single fund over [end-LOOKBACK, end]."""
     engine = get_engine()
     end_me = to_month_end(end_month_end)
     start_me = (pd.Timestamp(end_me) - pd.DateOffset(years=lookback_years)).to_period("M").to_timestamp("M").date()
+    # Records can use the last trading day while the selector uses calendar month-end.
+    # Include the entire first month in each query before normalizing to month-end.
+    bounds = {"start_me": start_me.replace(day=1), "end_me": end_me}
 
     # Holdings (all asset types)
     q_hold = text("""
@@ -52,15 +55,13 @@ def _load_attrib_raw_window(
           AND month_end BETWEEN :start_me AND :end_me
         ORDER BY month_end, instrument_name
     """)
-    h = pd.read_sql(q_hold, engine, params={"fund_id": fund_id, "start_me": start_me, "end_me": end_me})
+    h = pd.read_sql(q_hold, engine, params={"fund_id": fund_id, **bounds})
     if h.empty:
         return {
             "window_start": start_me,
             "window_end": end_me,
             "holdings": h,
             "prices": pd.DataFrame(),
-            "multiples": pd.DataFrame(),
-            "yields": pd.DataFrame(),
             "size_band": pd.DataFrame(),
             "bench_nav": pd.DataFrame(),
             "stock_master": pd.DataFrame(),
@@ -131,7 +132,7 @@ def _load_attrib_raw_window(
               AND price_date BETWEEN :start_me AND :end_me
             ORDER BY ace_code, price_date
         """)
-        px = pd.read_sql(q_px, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
+        px = pd.read_sql(q_px, engine, params={"ace_codes": ace_codes, **bounds})
         if not px.empty:
             px["month_end"] = pd.to_datetime(px["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
             px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
@@ -140,39 +141,24 @@ def _load_attrib_raw_window(
     else:
         px = pd.DataFrame(columns=["ace_code", "month_end", "adj_price", "price", "dividend_yield"])
 
-    # Stock valuation multiples (monthly): P/S, P/E and P/B computed on Supabase.
-    if ace_codes:
-        q_mul = text("""
-            SELECT
-                ace_code,
-                month_end::date AS month_end,
-                ps,
-                pe,
-                pb
-            FROM fundlab.stock_monthly_valuations_ace
-            WHERE ace_code = ANY(:ace_codes)
-              AND month_end BETWEEN :start_me AND :end_me
-            ORDER BY ace_code, month_end
-        """)
-        yld = pd.read_sql(q_mul, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
-        if not yld.empty:
-            yld["month_end"] = pd.to_datetime(yld["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
-            for c in ["ps", "pe", "pb"]:
-                if c in yld.columns:
-                    yld[c] = pd.to_numeric(yld[c], errors="coerce")
-    else:
-        yld = pd.DataFrame(columns=["ace_code", "month_end", "ps", "pe", "pb"])
-
-    # Size band (monthly)
+    # Include the last band before the window so the first snapshots can use it.
     if ace_codes:
         q_sz = text("""
+            WITH prior_bands AS (
+                SELECT DISTINCT ON (ace_code) ace_code, band_date, size_band
+                FROM fundlab.stock_size_band_ace
+                WHERE ace_code = ANY(:ace_codes) AND band_date < :start_me
+                ORDER BY ace_code, band_date DESC
+            )
             SELECT ace_code, band_date::date AS month_end, size_band
             FROM fundlab.stock_size_band_ace
             WHERE ace_code = ANY(:ace_codes)
               AND band_date BETWEEN :start_me AND :end_me
-            ORDER BY ace_code, band_date
+            UNION ALL
+            SELECT ace_code, band_date::date, size_band FROM prior_bands
+            ORDER BY ace_code, month_end
         """)
-        sz = pd.read_sql(q_sz, engine, params={"ace_codes": ace_codes, "start_me": start_me, "end_me": end_me})
+        sz = pd.read_sql(q_sz, engine, params={"ace_codes": ace_codes, **bounds})
         if not sz.empty:
             sz["month_end"] = pd.to_datetime(sz["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
             sz["size_band"] = sz["size_band"].astype(str)
@@ -193,7 +179,7 @@ def _load_attrib_raw_window(
           AND bn.nav_date BETWEEN :start_me AND :end_me
         ORDER BY b.bench_name, bn.nav_date
     """)
-    bn = pd.read_sql(q_b, engine, params={"names": wanted, "start_me": start_me, "end_me": end_me})
+    bn = pd.read_sql(q_b, engine, params={"names": wanted, **bounds})
     if not bn.empty:
         bn["month_end"] = pd.to_datetime(bn["month_end"]).dt.to_period("M").dt.to_timestamp("M").dt.date
         bn["nav_value"] = pd.to_numeric(bn["nav_value"], errors="coerce")
@@ -203,8 +189,6 @@ def _load_attrib_raw_window(
         "window_end": end_me,
         "holdings": h,
         "prices": px,
-        "multiples": yld,
-        "yields": yld,
         "size_band": sz,
         "bench_nav": bn,
         "stock_master": sm,

@@ -286,8 +286,8 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
       - market_cap
       - price
 
-    Logical key should be (ace_code, price_date). If the table currently allows
-    multiple rows for the same ACE code/date, valuation rebuilds can be distorted.
+    Primary key is (ace_code, price_date). Existing observations are retained,
+    even if a later upload supplies a different market cap or price.
     """
     engine = get_engine()
     with engine.begin() as conn:
@@ -295,8 +295,8 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
         if n == 0:
             return
 
-        # Match the table's exact-row uniqueness rule; reject duplicate ACE/date
-        # combinations within each upload during validation.
+        # Match the ACE/date primary key. Re-uploads cannot insert a second
+        # observation or overwrite the existing observation/derived fields.
         insert_sql = text("""
             INSERT INTO fundlab.stock_price_ace (
                 ace_code,
@@ -309,7 +309,7 @@ def upload_stock_prices_mc(df: pd.DataFrame, batch_size: int = 10000):
                 unnest(:dates)       AS price_date,
                 unnest(:mcaps)       AS market_cap,
                 unnest(:prices)      AS price
-            ON CONFLICT (ace_code, price_date, market_cap, price)
+            ON CONFLICT (ace_code, price_date)
             DO NOTHING
         """)
 

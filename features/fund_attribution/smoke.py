@@ -3,7 +3,7 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
-from core.dates import month_ends_between, to_month_end
+from core.dates import to_month_end
 from core.fund_catalog import fetch_categories, fetch_funds_for_categories
 from features.fund_attribution.data import BENCH_NAME_NIFTY50, _load_attrib_raw_window
 from features.fund_attribution.compute import _compute_attribution
@@ -25,7 +25,6 @@ def _run_attrib_smoke_test():
     start_me = to_month_end(dt.date(2020, 12, 1))
     end_me = to_month_end(dt.date(2025, 9, 1))
     bench_mode = "Vs NIFTY 50"
-    lens = "Earnings (P/E)"
 
     categories = fetch_categories()
     cat_list = [category] if category in categories else [fallback_category] if fallback_category in categories else categories
@@ -39,23 +38,20 @@ def _run_attrib_smoke_test():
     focus_name = focus if focus in funds_df["fund_name"].tolist() else fallback_focus
     focus_id = int(funds_df.loc[funds_df["fund_name"] == focus_name, "fund_id"].iloc[0])
 
-    raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=lookback_years, data_version="ace-v2")
+    raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=lookback_years)
     stock_df, hit_df, cat_df, diag = _compute_attribution(
-        raw, start_me, end_me, bench_mode, lens=lens, universe_mode="Full holdings"
+        raw, start_me, end_me, bench_mode, universe_mode="Full holdings"
     )
     if "error" in diag:
         raise AssertionError(diag["error"])
 
-    dom_sum = diag.get("domestic_decomp_summary_df", pd.DataFrame())
-    dom_total = np.nan
-    if isinstance(dom_sum, pd.DataFrame) and not dom_sum.empty and "Metric" in dom_sum.columns:
-        row = dom_sum.loc[dom_sum["Metric"] == "Domestic sleeve total return"]
-        if not row.empty:
-            dom_total = float(row["Total return (%)"].iloc[0])
+    summary = diag["portfolio_return_summary_df"].set_index("Series")["Total return (%)"]
+    required_return_metrics = {"Fund return (price and dividends)", "Price return", "Dividend yield return", "Benchmark"}
+    fund_total = float(summary.get("Fund return (price and dividends)", np.nan))
 
     # Benchmark total return from NAV series
     bench_name = BENCH_NAME_NIFTY50
-    months = month_ends_between(start_me, end_me)
+    months = diag["months"]
     bench_total = np.nan
     bn = raw.get("bench_nav", pd.DataFrame())
     if not bn.empty and "bench_name" in bn.columns:
@@ -80,13 +76,6 @@ def _run_attrib_smoke_test():
         winners_count = int((non_cash["Stock outperformance (pp)"] > 0).sum())
 
     non_cash_count = len(non_cash) if isinstance(stock_df, pd.DataFrame) and not stock_df.empty else 0
-    required_domestic_metrics = {
-        "Domestic sleeve total return",
-        "Price return",
-        "Dividend yield return",
-    }
-    available_domestic_metrics = set(dom_sum.get("Metric", pd.Series(dtype=str)).dropna().astype(str))
-
     results_ok = (
         isinstance(stock_df, pd.DataFrame)
         and not stock_df.empty
@@ -94,26 +83,18 @@ def _run_attrib_smoke_test():
         and not hit_df.empty
         and isinstance(cat_df, pd.DataFrame)
         and not cat_df.empty
-        and required_domestic_metrics.issubset(available_domestic_metrics)
-        and np.isfinite(dom_total)
+        and required_return_metrics.issubset(summary.index)
+        and np.isfinite(fund_total)
         and np.isfinite(bench_total)
         and 0 <= winners_count <= non_cash_count
     )
 
     print("Attribution smoke test:")
     print(f"- Period: {start_me} to {end_me}")
-    print(f"- Domestic sleeve total return (%): {dom_total:.2f}")
+    print(f"- Holdings-based fund total return (%): {fund_total:.2f}")
     print(f"- Benchmark return {bench_name} (%): {bench_total * 100.0:.2f}")
     print(f"- Winners count: {winners_count} / {non_cash_count} non-cash stocks")
 
     if not results_ok:
-        dom_debug = diag.get("domestic_decomp_debug", {})
-        print("Diagnostics:")
-        print(f"- Domestic ACE code count: {diag.get('domestic_decomp_stock_count')}")
-        print(f"- Start multiple: {dom_debug.get('start_multiple')}")
-        print(f"- End multiple: {dom_debug.get('end_multiple')}")
-        print(f"- Start coverage weight: {dom_debug.get('start_coverage_weight')}")
-        print(f"- End coverage weight: {dom_debug.get('end_coverage_weight')}")
-        print(f"- Benchmark series used: {bench_name}")
         raise AssertionError("Attribution smoke test returned incomplete or invalid results.")
 

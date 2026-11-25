@@ -3,65 +3,81 @@ import streamlit as st
 
 from features.fund_attribution.data import (
     BENCH_NAME_MID150, BENCH_NAME_NIFTY100, BENCH_NAME_NIFTY50,
-    BENCH_NAME_NIFTY500, BENCH_NAME_SMALL250,
+    BENCH_NAME_NIFTY500, BENCH_NAME_SMALL250, CASH_ANNUAL_RETURN,
 )
 
-def display_attribution_results(stock_df, hit_df, cat_df, diag, bench_mode):
-        # Benchmark warnings
-        miss = diag.get("missing_benchmarks", [])
-        if bench_mode == "Like-for-like":
-            needed = [BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250]
-            miss_needed = [x for x in needed if x in miss]
-            if miss_needed:
-                st.warning("Missing benchmark NAV series in DB (will default missing benchmark returns to 0): " + ", ".join(miss_needed))
+
+def display_attribution_results(
+    stock_df, hit_df, cat_df, diag, bench_mode, *, selected_keys, original_summary, editor_key,
+):
+    """Render the active run and return the checked keys when a button is submitted."""
+    start = diag["effective_start_month"]
+    if start != diag["requested_start_month"]:
+        st.info(f"The first portfolio in the selected period is {start:%b %Y}. Attribution starts there.")
+
+    benchmark_names = {"Vs NIFTY 50": BENCH_NAME_NIFTY50, "Vs NIFTY 500": BENCH_NAME_NIFTY500}
+    if bench_mode == "Like-for-like":
+        needed = [BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250, BENCH_NAME_NIFTY50]
+    else:
+        needed = [benchmark_names[bench_mode]]
+    missing = [name for name in needed if name in diag["missing_benchmarks"]]
+    if missing:
+        st.warning("Attribution uses zero returns where benchmark NAV is unavailable for " + ", ".join(missing) + ".")
+
+    invalid_prices = diag["adj_price_invalid_rows_df"]
+    if not invalid_prices.empty:
+        st.warning(f"Missing or non-positive adjusted prices were treated as zero return for {len(invalid_prices):,} stock periods.")
+
+    summary = diag["portfolio_return_summary_df"]
+    if original_summary is not None:
+        original = original_summary.set_index("Series")
+        comparison = summary.set_index("Series").join(
+            original.rename(columns={"Total return (%)": "Original total return (%)", "CAGR (%)": "Original CAGR (%)"})
+        )
+        comparison["Change in CAGR (pp)"] = (comparison["CAGR (%)"] - comparison["Original CAGR (%)"]).round(2)
+        summary = comparison.reset_index()
+        st.caption(
+            "Checked stocks match their benchmarks each period. Their rupee alpha can still vary because the fund "
+            "and benchmark compound from different balances."
+        )
+
+    st.dataframe(summary, width="stretch", hide_index=True)
+    if bench_mode in benchmark_names:
+        st.caption(f"Benchmark series is {benchmark_names[bench_mode]}. Cash earns {CASH_ANNUAL_RETURN:.0%} annually when included.")
+    else:
+        st.caption("Like-for-like uses Nifty 100 for large caps, Midcap 150 for mid caps, and Smallcap 250 for small caps. "
+                   "Other equities use Nifty 50.")
+
+    stock_rows = stock_df.index.isin(diag["equity_keys"])
+    selectable = stock_df.loc[stock_rows].copy()
+    selectable.insert(0, "Use benchmark", selectable.index.isin(selected_keys))
+
+    with st.form("fa_attribution_scenario_form"):
+        st.subheader("Stock-level attribution")
+        if selectable.empty:
+            st.info("There are no stock positions to substitute in this portfolio.")
         else:
-            needed = BENCH_NAME_NIFTY50 if bench_mode == "Vs NIFTY 50" else BENCH_NAME_NIFTY500
-            if needed in miss:
-                st.warning(f"Missing benchmark NAV series in DB for {needed} (benchmark returns will default to 0).")
-
-        adj_invalid = diag.get("adj_price_invalid_rows_df", pd.DataFrame())
-        if isinstance(adj_invalid, pd.DataFrame) and not adj_invalid.empty:
-            st.warning(
-                f"Rows with missing/non-positive adj_price were treated as 0 return: {len(adj_invalid):,} stock-month rows."
+            selectable = st.data_editor(
+                selectable, disabled=stock_df.columns.tolist(), width="stretch", hide_index=True,
+                column_config={"Use benchmark": st.column_config.CheckboxColumn("Use benchmark")}, key=editor_key,
             )
+        if (~stock_rows).any():
+            with st.expander("Cash and other positions"):
+                st.dataframe(stock_df.loc[~stock_rows], width="stretch", hide_index=True)
 
-        st.subheader("1) Stock-level attribution")
-        st.dataframe(stock_df, use_container_width=True)
+        st.subheader("Hit rate by rupee alpha")
+        st.dataframe(hit_df, width="stretch", hide_index=True)
+        st.subheader("Category-level attribution")
+        st.dataframe(cat_df, width="stretch", hide_index=True)
 
-        st.subheader("2) Hit-rate summary (alpha contribution based)")
-        st.dataframe(hit_df, use_container_width=True)
+        calculate, reset = st.columns([3, 1])
+        with calculate:
+            apply = st.form_submit_button("Calculate assuming benchmark returns", type="primary", disabled=selectable.empty)
+        with reset:
+            clear = st.form_submit_button("Reset")
 
-        st.subheader("3) Category-level attribution")
-        st.dataframe(cat_df, use_container_width=True)
-
-        dom_sum = diag.get("domestic_decomp_summary_df")
-        dom_period_label = diag.get("domestic_decomp_period_label")
-        dom_debug = diag.get("domestic_decomp_debug", {})
-        dom_contrib = diag.get("domestic_decomp_contrib_df")
-        dom_tri = diag.get("dom_triangulation_df")
-        dom_tri_summary = diag.get("dom_triangulation_summary_df")
-        dom_tri_mode = diag.get("dom_triangulation_mode")
-
-        if isinstance(dom_sum, pd.DataFrame) and not dom_sum.empty:
-            if isinstance(dom_period_label, str) and dom_period_label:
-                st.subheader(f"4) Domestic sleeve decomposition: {dom_period_label}")
-            else:
-                st.subheader("4) Domestic sleeve decomposition")
-            st.dataframe(dom_sum, use_container_width=True)
-
-            with st.expander("Diagnostics (domestic decomposition)"):
-                if isinstance(dom_debug, dict) and dom_debug:
-                    st.write({
-                        "start_multiple": dom_debug.get("start_multiple"),
-                        "end_multiple": dom_debug.get("end_multiple"),
-                    })
-                if isinstance(dom_contrib, pd.DataFrame) and not dom_contrib.empty:
-                    st.dataframe(dom_contrib, use_container_width=True)
-                if isinstance(dom_tri_mode, str) and dom_tri_mode:
-                    st.caption(f"Triangulation mode: {dom_tri_mode}")
-                if isinstance(dom_tri, pd.DataFrame) and not dom_tri.empty:
-                    st.markdown("**Triangulation (holding-window endpoint fundamentals)**")
-                    st.dataframe(dom_tri, use_container_width=True)
-                if isinstance(dom_tri_summary, pd.DataFrame) and not dom_tri_summary.empty:
-                    st.dataframe(dom_tri_summary, use_container_width=True)
-
+    if clear:
+        return ()
+    if apply:
+        return tuple(selectable.index[selectable["Use benchmark"]])
+    return None

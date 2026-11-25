@@ -1,5 +1,4 @@
 import datetime as dt
-import inspect
 
 import numpy as np
 import pandas as pd
@@ -7,242 +6,38 @@ import pandas as pd
 from .returns import (
     compute_adj_price_returns,
     compute_dividend_yield_returns,
-    compute_monthly_portfolio_multiples,
 )
-from core.dates import month_ends_between, to_month_end
+from core.dates import to_month_end
 from features.fund_attribution.data import (
     BENCH_NAME_MID150, BENCH_NAME_NIFTY100, BENCH_NAME_NIFTY50,
     BENCH_NAME_NIFTY500, BENCH_NAME_SMALL250, LIKE_FOR_LIKE_BENCH,
     _monthly_cash_return,
 )
 
-def _compute_domestic_triangulation_tables(
-    w0_dom_df: pd.DataFrame,
-    domestic_ace_codes: list[str],
-    px_df: pd.DataFrame,
-    yld_df: pd.DataFrame,
-    lens: str,
-    name_map: dict[str, str],
-    mode_label: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    eps = 1e-12
-    mode_a = str(mode_label).strip() == "Fallback to price growth"
-    mult_col = "ps" if str(lens).startswith("Sales") else ("pe" if str(lens).startswith("Earnings") else "pb")
-
-    out_cols = ["Stock name", "Average holding weight (%)", "Fundamental growth in holding period (%)", "Notes"]
-    if w0_dom_df is None or w0_dom_df.empty or not domestic_ace_codes:
-        summary = pd.DataFrame(
-            [
-                {"Metric": "Weighted average fundamental growth (%)", "Value (%)": np.nan},
-                {"Metric": "Median fundamental growth (%)", "Value (%)": np.nan},
-            ]
-        )
-        return pd.DataFrame(columns=out_cols), summary, {
-            "valid_weight_sum": 0.0,
-            "invalid_weight_sum": 0.0,
-        }
-
-    w_dom = w0_dom_df.reindex(columns=domestic_ace_codes).fillna(0.0).copy()
-    active_ace_codes = [c for c in domestic_ace_codes if bool((w_dom[c] > eps).any())]
-    if not active_ace_codes:
-        summary = pd.DataFrame(
-            [
-                {"Metric": "Weighted average fundamental growth (%)", "Value (%)": np.nan},
-                {"Metric": "Median fundamental growth (%)", "Value (%)": np.nan},
-            ]
-        )
-        return pd.DataFrame(columns=out_cols), summary, {
-            "valid_weight_sum": 0.0,
-            "invalid_weight_sum": 0.0,
-        }
-
-    w_dom = w_dom.loc[:, active_ace_codes]
-    avg_w = w_dom.mean(axis=0).astype(float)
-
-    px = px_df.copy()
-    if "month_end" not in px.columns and "price_date" in px.columns:
-        px["month_end"] = px["price_date"]
-    px["ace_code"] = px["ace_code"].astype(str)
-    px["month_end"] = pd.to_datetime(px["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
-    px["adj_price"] = pd.to_numeric(px["adj_price"], errors="coerce")
-    price_piv = (
-        px[px["ace_code"].isin(active_ace_codes)]
-        .pivot_table(index="month_end", columns="ace_code", values="adj_price", aggfunc="last")
-        .reindex(index=w_dom.index, columns=active_ace_codes)
-    )
-
-    mul = yld_df.copy()
-    if "month_end" not in mul.columns and "price_date" in mul.columns:
-        mul["month_end"] = mul["price_date"]
-    mul["ace_code"] = mul["ace_code"].astype(str)
-    mul["month_end"] = pd.to_datetime(mul["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
-    mul[mult_col] = pd.to_numeric(mul.get(mult_col), errors="coerce")
-    mult_piv = (
-        mul[mul["ace_code"].isin(active_ace_codes)]
-        .pivot_table(index="month_end", columns="ace_code", values=mult_col, aggfunc="last")
-        .reindex(index=w_dom.index, columns=active_ace_codes)
-    )
-
-    def _period_growth(v0: float, v1: float, n_hold_months: int) -> float:
-        if not (np.isfinite(v0) and np.isfinite(v1) and v0 > 0 and v1 > 0):
-            return np.nan
-        if n_hold_months < 12:
-            return (v1 / v0) - 1.0
-        years = n_hold_months / 12.0
-        return (v1 / v0) ** (1.0 / years) - 1.0 if years > 0 else np.nan
-
-    rows = []
-    for ace_code in active_ace_codes:
-        w_ser = w_dom[ace_code].fillna(0.0)
-        held = w_ser > eps
-        hold_months = list(w_ser.index[held])
-        n_hold_months = int(held.sum())
-        avg_weight = float(avg_w.get(ace_code, 0.0))
-
-        if n_hold_months <= 0:
-            continue
-
-        hold_start = hold_months[0]
-        hold_end = hold_months[-1]
-
-        p_start = float(price_piv.loc[hold_start, ace_code]) if (hold_start in price_piv.index and ace_code in price_piv.columns) else np.nan
-        p_end = float(price_piv.loc[hold_end, ace_code]) if (hold_end in price_piv.index and ace_code in price_piv.columns) else np.nan
-        m_start = float(mult_piv.loc[hold_start, ace_code]) if (hold_start in mult_piv.index and ace_code in mult_piv.columns) else np.nan
-        m_end = float(mult_piv.loc[hold_end, ace_code]) if (hold_end in mult_piv.index and ace_code in mult_piv.columns) else np.nan
-
-        # P/M = fundamental, since stock_monthly_valuations_ace stores M
-        # directly (P/S, P/E, or P/B), rather than its inverse yield.
-        f_start = p_start / m_start if np.isfinite(p_start) and np.isfinite(m_start) and m_start > 0 else np.nan
-        f_end = p_end / m_end if np.isfinite(p_end) and np.isfinite(m_end) and m_end > 0 else np.nan
-
-        if n_hold_months == 1:
-            growth = 0.0
-            note = "Held only 1 month"
-            fundamental_valid = True
-        else:
-            missing_ep = not (
-                np.isfinite(p_start)
-                and np.isfinite(p_end)
-                and np.isfinite(m_start)
-                and np.isfinite(m_end)
-                and m_start > 0
-                and m_end > 0
-                and np.isfinite(f_start)
-                and np.isfinite(f_end)
-            )
-            sign_or_zero = (not missing_ep) and ((f_start == 0.0) or (f_end == 0.0) or ((f_start * f_end) <= 0.0))
-            fundamental_valid = (not missing_ep) and (not sign_or_zero)
-            if fundamental_valid:
-                growth = _period_growth(float(f_start), float(f_end), n_hold_months)
-                note = ""
-            else:
-                reasons = []
-                if missing_ep:
-                    reasons.append("Missing endpoint data")
-                if sign_or_zero:
-                    reasons.append("Fundamental sign/zero issue")
-                reason_txt = ", ".join(reasons) if reasons else "Invalid fundamentals"
-                price_growth = _period_growth(float(p_start), float(p_end), n_hold_months)
-                if mode_a and np.isfinite(price_growth):
-                    growth = float(price_growth)
-                    note = f"{reason_txt}, assume price growth"
-                elif mode_a:
-                    growth = np.nan
-                    note = f"{reason_txt}, price fallback unavailable"
-                else:
-                    growth = np.nan
-                    note = f"{reason_txt}, excluded from weighted average"
-
-        rows.append(
-            {
-                "Stock name": name_map.get(ace_code, ace_code),
-                "Average holding weight (%)": avg_weight * 100.0,
-                "Fundamental growth in holding period (%)": growth * 100.0 if np.isfinite(growth) else np.nan,
-                "Notes": note,
-                "__avg_w": avg_weight,
-                "__fund_valid": bool(fundamental_valid),
-            }
-        )
-
-    dom_triangulation_df = pd.DataFrame(rows)
-    if dom_triangulation_df.empty:
-        summary = pd.DataFrame(
-            [
-                {"Metric": "Weighted average fundamental growth (%)", "Value (%)": np.nan},
-                {"Metric": "Median fundamental growth (%)", "Value (%)": np.nan},
-            ]
-        )
-        return pd.DataFrame(columns=out_cols), summary, {
-            "valid_weight_sum": 0.0,
-            "invalid_weight_sum": 0.0,
-        }
-
-    dom_triangulation_df = dom_triangulation_df.sort_values("Average holding weight (%)", ascending=False).reset_index(drop=True)
-    w_vec = dom_triangulation_df["__avg_w"].to_numpy(dtype=float)
-    g_vec = dom_triangulation_df["Fundamental growth in holding period (%)"].to_numpy(dtype=float) / 100.0
-    fund_valid_vec = dom_triangulation_df["__fund_valid"].astype(bool).to_numpy(dtype=bool)
-
-    valid_weight_sum = float(np.sum(w_vec[fund_valid_vec])) if len(w_vec) else 0.0
-    invalid_weight_sum = float(np.sum(w_vec[~fund_valid_vec])) if len(w_vec) else 0.0
-
-    m_wavg = np.isfinite(g_vec)
-    w_sum_wavg = float(np.sum(w_vec[m_wavg])) if np.any(m_wavg) else 0.0
-    if w_sum_wavg > 0:
-        w_norm = w_vec[m_wavg] / w_sum_wavg
-        weighted_avg = float(np.sum(w_norm * g_vec[m_wavg]))
-    else:
-        weighted_avg = np.nan
-
-    m_med = fund_valid_vec & np.isfinite(g_vec)
-    median_val = float(np.median(g_vec[m_med])) if np.any(m_med) else np.nan
-
-    dom_triangulation_summary_df = pd.DataFrame(
-        [
-            {"Metric": "Weighted average fundamental growth (%)", "Value (%)": round(weighted_avg * 100.0, 4) if np.isfinite(weighted_avg) else np.nan},
-            {"Metric": "Median fundamental growth (%)", "Value (%)": round(median_val * 100.0, 4) if np.isfinite(median_val) else np.nan},
-        ]
-    )
-
-    dom_triangulation_df = dom_triangulation_df[out_cols].copy()
-    dom_triangulation_df["Average holding weight (%)"] = dom_triangulation_df["Average holding weight (%)"].round(4)
-    dom_triangulation_df["Fundamental growth in holding period (%)"] = dom_triangulation_df[
-        "Fundamental growth in holding period (%)"
-    ].round(4)
-
-    return dom_triangulation_df, dom_triangulation_summary_df, {
-        "valid_weight_sum": valid_weight_sum,
-        "invalid_weight_sum": invalid_weight_sum,
-    }
-
-
 def _compute_attribution(
     raw: dict,
     start_date: dt.date,
     end_date: dt.date,
     bench_mode: str,
-    lens: str = "Earnings (P/E)",
     universe_mode: str = "Full holdings",
+    include_dividends: bool = True,
+    benchmark_stock_keys: tuple[str, ...] = (),
 ):
     """Return (stock_df, hit_df, category_df, diag). Contributions are Rs per 100 base."""
     start_me = to_month_end(start_date)
     end_me = to_month_end(end_date)
 
-    months = month_ends_between(start_me, end_me)
-    if len(months) < 2:
+    if start_me >= end_me:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"error": "Select at least two month-ends."}
 
     h = raw["holdings"].copy()
     px = raw["prices"].copy()
-    yld = raw.get("yields", raw.get("multiples", pd.DataFrame())).copy()
     sz = raw["size_band"].copy()
     bn = raw["bench_nav"].copy()
     sm = raw["stock_master"].copy()
 
-    # Required input checks for domestic sleeve monthly decomposition.
     if px is None or px.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"error": "_compute_attribution(): prices dataframe is empty."}
-    if yld is None or yld.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"error": "_compute_attribution(): multiples dataframe is empty."}
 
     if "month_end" not in px.columns:
         if "price_date" in px.columns:
@@ -251,30 +46,15 @@ def _compute_attribution(
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
                 "error": "_compute_attribution(): prices dataframe missing month_end/price_date."
             }
-    px_missing = [c for c in ["ace_code", "adj_price", "dividend_yield", "month_end"] if c not in px.columns]
+    px_required = ["ace_code", "adj_price", "month_end"]
+    if include_dividends:
+        px_required.append("dividend_yield")
+    px_missing = [c for c in px_required if c not in px.columns]
     if px_missing:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
             "error": f"_compute_attribution(): prices dataframe missing columns: {px_missing}. "
                      f"Available columns: {list(px.columns)}"
         }
-
-    if "month_end" not in yld.columns:
-        if "price_date" in yld.columns:
-            yld["month_end"] = yld["price_date"]
-        else:
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
-                "error": "_compute_attribution(): multiples dataframe missing month_end."
-            }
-    yld_missing = [c for c in ["ace_code", "month_end", "pe", "pb", "ps"] if c not in yld.columns]
-    if yld_missing:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
-            "error": f"_compute_attribution(): multiples dataframe missing columns: {yld_missing}. "
-                     f"Available columns: {list(yld.columns)}"
-        }
-
-    # Filter holdings to selected window (we will ffill)
-    h = h[(h["month_end"] >= months[0]) & (h["month_end"] <= months[-1])].copy()
-    h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
 
     missing = [c for c in ["month_end", "holding_weight"] if c not in h.columns]
     if missing:
@@ -282,6 +62,26 @@ def _compute_attribution(
             "error": f"_compute_attribution(): holdings dataframe missing columns: {missing}. "
                      f"Available columns: {list(h.columns)}"
         }
+
+    # Every reported snapshot opens a holding interval. The end month closes
+    # the final interval even when it has no snapshot of its own.
+    h["month_end"] = pd.to_datetime(h["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
+    start_month, end_month = pd.Timestamp(start_me), pd.Timestamp(end_me)
+    h = h[h["month_end"].between(start_month, end_month)].copy()
+    t0 = sorted(pd.Timestamp(month) for month in h.loc[h["month_end"] < end_month, "month_end"].unique())
+    if not t0:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+            "error": "No reported holdings at or after the selected start month and before the end month."
+        }
+    months = [*t0, end_month]
+    t1 = months[1:]
+    period_months = np.array([
+        (end.year - start.year) * 12 + end.month - start.month
+        for start, end in zip(t0, t1)
+    ])
+    years = float(period_months.sum()) / 12.0
+    h = h[h["month_end"] < end_month].copy()
+    h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
 
     if "asset_type" not in h.columns:
         h["asset_type"] = "Unknown"
@@ -299,14 +99,9 @@ def _compute_attribution(
             "NOACE::" + h["instrument_name"].astype(str)
         )
 
-    # Canonicalise to calendar month-end label (your current convention)
-    h["month_end"] = pd.to_datetime(h["month_end"]).dt.to_period("M").dt.to_timestamp("M")
-    months = [pd.Timestamp(m).to_period("M").to_timestamp("M") for m in months]
-    months = [pd.Timestamp(m) for m in months]
-
     # Attribution universe selection:
     # - Full holdings: current behavior (all asset types).
-    # - Domestic equities only: use only Domestic Equities and rebase sleeve to 100% each month.
+    # - Domestic equities only: use only Domestic Equities and rebase each snapshot to 100%.
     if str(universe_mode).strip() == "Domestic equities only":
         h = h[h["asset_type"].astype(str).str.strip() == "Domestic Equities"].copy()
 
@@ -324,8 +119,13 @@ def _compute_attribution(
         aggfunc="sum"
     )
 
-    # Use raw weights only (no forward-fill)
-    w_piv = w_piv.reindex(months).fillna(0.0)
+    # Explicit snapshots store zero weight for stocks absent from that snapshot.
+    w_piv = w_piv.reindex(t0).fillna(0.0)
+    w_piv = w_piv.loc[:, w_piv.ne(0).any(axis=0)]
+    if w_piv.empty and str(universe_mode).strip() == "Domestic equities only":
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+            "error": "No domestic-equity positions were held during the selected period."
+        }
 
     cash_keys = set(
         w.loc[w["asset_type"].astype(str).str.strip().str.lower() == "cash", "instrument_key"]
@@ -334,7 +134,7 @@ def _compute_attribution(
     )
 
     if str(universe_mode).strip() == "Domestic equities only":
-        # Rebase domestic sleeve to 100% each month.
+        # Rebase the domestic sleeve to 100% at each rebalance.
         dom_tot = w_piv.sum(axis=1).replace(0.0, np.nan)
         w_piv = w_piv.div(dom_tot, axis=0).fillna(0.0)
     else:
@@ -346,9 +146,7 @@ def _compute_attribution(
             cash_keys.add("CASH::RESIDUAL")
 
     instr_cols = w_piv.columns.tolist()
-    t0 = months[:-1]
-    t1 = months[1:]
-    w0_df = w_piv.loc[t0, :].copy()
+    w0_df = w_piv
 
     # Adjusted-price return diagnostics
     ace_codes = [c for c in instr_cols if not c.startswith("NOACE::") and not c.startswith("CASH::")]
@@ -358,19 +156,18 @@ def _compute_attribution(
     # Benchmark nav pivot
     bn_piv = pd.DataFrame(index=months)
     if not bn.empty:
+        bn["month_end"] = pd.to_datetime(bn["month_end"]).dt.to_period("M").dt.to_timestamp("M")
         bnp = bn.pivot_table(index="month_end", columns="bench_name", values="nav_value", aggfunc="last")
-        bnp.index = pd.to_datetime(bnp.index).to_period("M").to_timestamp("M")
         bn_piv = bnp.reindex(months)
 
     def _bench_period_returns(bench_name: str) -> np.ndarray:
         if bench_name not in bn_piv.columns:
-            return np.zeros(len(t1), dtype=float)
+            return np.full(len(t1), np.nan)
         v0 = bn_piv.loc[t0, bench_name].to_numpy(dtype=float)
         v1 = bn_piv.loc[t1, bench_name].to_numpy(dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
             r = (v1 / v0) - 1.0
-        r = np.where(np.isfinite(r), r, 0.0)
-        return r
+        return np.where(np.isfinite(r) & (v0 > 0) & (v1 > 0), r, np.nan)
 
     r_n50 = _bench_period_returns(BENCH_NAME_NIFTY50)
     r_n500 = _bench_period_returns(BENCH_NAME_NIFTY500)
@@ -378,14 +175,15 @@ def _compute_attribution(
     r_mid150 = _bench_period_returns(BENCH_NAME_MID150)
     r_small250 = _bench_period_returns(BENCH_NAME_SMALL250)
 
-    # Size band lookup at t0 for ACE codes
+    # Use the most recent size band available at each holding interval's start.
     size_lookup = {}
     if not sz.empty and ace_codes:
         sz2 = sz[sz["ace_code"].astype(str).isin(ace_codes)].copy()
         sz2["month_end"] = pd.to_datetime(sz2["month_end"]).dt.to_period("M").dt.to_timestamp("M")
-        sz2 = sz2[sz2["month_end"].isin(t0)]
         if not sz2.empty:
-            size_lookup = sz2.set_index(["month_end", "ace_code"])["size_band"].to_dict()
+            bands = sz2.pivot_table(index="month_end", columns="ace_code", values="size_band", aggfunc="last")
+            bands = bands.sort_index().ffill().reindex(t0, method="ffill")
+            size_lookup = bands.stack().to_dict()
 
     asset_map = (
         w.sort_values(["instrument_key", "month_end"])
@@ -393,16 +191,24 @@ def _compute_attribution(
          .last()
          .to_dict()
     )
+    equity_types = {"Domestic Equities", "Overseas Equities", "ADRs & GDRs", "Others Equities", "Other Equities"}
+    equity_keys = tuple(
+        c for c in instr_cols if c not in cash_keys and (
+            str(asset_map.get(c, "")).strip() in equity_types
+            or (asset_map.get(c) == "Unknown" and c in ace_codes)
+        )
+    )
+    selected = set(benchmark_stock_keys)
+    if selected.difference(equity_keys):
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"error": "Select stocks from the current attribution table."}
 
     # ----------------------------
     # Instrument returns
     # - price return from adj_price
-    # - dividend return uses month t yield for month t+1 return
-    # - stock attribution uses total return = price + dividend
+    # - dividend-inclusive attribution uses price plus interval dividends
     # ----------------------------
     r_price_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
     r_div_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
-    r_instr = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
 
     if ace_codes:
         r_ace_df, invalid_price_rows_df, price_return_audit_df = compute_adj_price_returns(
@@ -410,19 +216,27 @@ def _compute_attribution(
             months=months,
             ace_codes=ace_codes,
         )
-        div_ace_df = compute_dividend_yield_returns(px, months, ace_codes)
+        if include_dividends:
+            div_ace_df = compute_dividend_yield_returns(px, months, ace_codes)
+            r_div_instr.loc[:, ace_codes] = div_ace_df
         for c in ace_codes:
             if c in r_ace_df.columns:
                 r_price_instr[c] = pd.to_numeric(r_ace_df[c], errors="coerce")
-            if c in div_ace_df.columns:
-                r_div_instr[c] = pd.to_numeric(div_ace_df[c], errors="coerce")
+        if not invalid_price_rows_df.empty:
+            held_pairs = {
+                (month.date(), code) for month in t0 for code in ace_codes
+                if w0_df.at[month, code] != 0 and code not in cash_keys
+            }
+            invalid_price_rows_df = invalid_price_rows_df.loc[
+                invalid_price_rows_df.set_index(["month_start", "ace_code"]).index.isin(held_pairs)
+            ].copy()
 
     for c in instr_cols:
         if c.startswith("NOACE::"):
             r_price_instr[c] = 0.0
             r_div_instr[c] = 0.0
 
-    cash_r = _monthly_cash_return()
+    cash_r = (1.0 + _monthly_cash_return()) ** period_months - 1.0
     for c in cash_keys:
         if c in r_price_instr.columns:
             r_price_instr[c] = cash_r
@@ -430,10 +244,9 @@ def _compute_attribution(
 
     r_price_instr = r_price_instr.fillna(0.0)
     r_div_instr = r_div_instr.fillna(0.0)
-    r_instr = (r_price_instr + r_div_instr).fillna(0.0)
 
     # ----------------------------
-    # Benchmark returns per instrument (unchanged)
+    # Benchmark returns per instrument. Keep missing endpoints until after validating substitutions.
     # ----------------------------
     r_bm = pd.DataFrame(index=t1, columns=instr_cols, dtype=float)
 
@@ -448,7 +261,7 @@ def _compute_attribution(
     else:
         for c in instr_cols:
             if c in cash_keys or c.startswith("CASH::"):
-                r_bm[c] = r_instr[c].to_numpy(dtype=float)
+                r_bm[c] = r_price_instr[c]
             elif c.startswith("NOACE::"):
                 r_bm[c] = r_n50
             else:
@@ -473,7 +286,25 @@ def _compute_attribution(
             if at in {"Overseas Equities", "ADRs & GDRs", "Others Equities", "Other Equities"}:
                 r_bm[c] = r_n50
 
+    # Use stable instrument keys rather than names or row positions after sorting.
+    substitute = [key for key in equity_keys if key in selected]
+    for key in substitute:
+        missing_held = r_bm[key].isna().to_numpy() & w0_df[key].ne(0).to_numpy()
+        if missing_held.any():
+            name_rows = sm.loc[sm["ace_code"].astype(str).eq(key), "company_name"] if not sm.empty else pd.Series(dtype=str)
+            name = name_rows.iloc[0] if not name_rows.empty else key.removeprefix("NOACE::")
+            period = t1[np.flatnonzero(missing_held)[0]]
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+                "error": f"Benchmark NAV is missing for {name} in the interval ending {period:%b %Y}."
+            }
     r_bm = r_bm.fillna(0.0)
+    if substitute:
+        r_price_instr[substitute] = r_bm[substitute]
+        r_div_instr[substitute] = 0.0
+        if not invalid_price_rows_df.empty:
+            invalid_price_rows_df = invalid_price_rows_df.loc[~invalid_price_rows_df["ace_code"].isin(substitute)]
+
+    r_instr = r_price_instr + r_div_instr
 
     # ----------------------------
     # Brinson-style attribution (unchanged)
@@ -499,6 +330,23 @@ def _compute_attribution(
     total_bench = contrib_bm.sum(axis=0)
     total_alpha = total_fund - total_bench
 
+    gross_fund = float(np.prod(1.0 + rp))
+    gross_price = float(np.prod(1.0 + np.sum(w0 * r_price_instr.to_numpy(dtype=float), axis=1)))
+    gross_dividend = gross_fund / gross_price if gross_price > 0 else np.nan
+    portfolio_return_summary_df = pd.DataFrame([
+        {
+            "Series": label,
+            "Total return (%)": round((gross - 1.0) * 100.0, 2),
+            "CAGR (%)": round((gross ** (1.0 / years) - 1.0) * 100.0, 2) if gross > 0 else np.nan,
+        }
+        for label, gross in [
+            ("Fund return (price and dividends)" if include_dividends else "Fund price return", gross_fund),
+            ("Benchmark", float(np.prod(1.0 + rbp))),
+            ("Price return", gross_price),
+            ("Dividend yield return", gross_dividend),
+        ]
+    ])
+
     # Name map
     name_map = {}
     if not sm.empty:
@@ -513,19 +361,18 @@ def _compute_attribution(
             return "Cash"
         return name_map.get(instr, instr)
 
-    held_mask = (w0_df > 0).to_numpy()
-    held_months = held_mask.sum(axis=0).astype(int)
+    held_mask = w0_df.ne(0).to_numpy()
+    held_months = held_mask.T @ period_months
     holding_years = held_months / 12.0
 
     def _masked_cagr(ret_mat: np.ndarray, mask: np.ndarray) -> np.ndarray:
         out = np.full(ret_mat.shape[1], np.nan, dtype=float)
         for j in range(ret_mat.shape[1]):
             m = mask[:, j]
-            n = int(m.sum())
-            if n <= 0:
+            if not m.any():
                 continue
             gross = float(np.prod(1.0 + ret_mat[m, j]))
-            yrs = n / 12.0
+            yrs = holding_years[j]
             if yrs > 0 and gross > 0:
                 out[j] = gross ** (1.0 / yrs) - 1.0
         return out
@@ -543,18 +390,23 @@ def _compute_attribution(
         "Stock CAGR": np.round(stock_cagr * 100.0, 2),
         "Benchmark CAGR": np.round(bench_cagr * 100.0, 2),
         "Stock outperformance (pp)": np.round(outperf * 100.0, 2),
-    }).sort_values("Alpha contribution (Rs.)", ascending=False).reset_index(drop=True)
+    }, index=pd.Index(instr_cols, name="instrument_key"))
 
-    winners = stock_df.loc[stock_df["Alpha contribution (Rs.)"] > 0]
-    losers = stock_df.loc[stock_df["Alpha contribution (Rs.)"] <= 0]
+    equity_rows = stock_df.index.isin(equity_keys)
+    winners = equity_rows & (total_alpha > 0)
+    losers = equity_rows & (total_alpha <= 0)
+
+    def _mean_or_nan(values: np.ndarray, selected: np.ndarray) -> float:
+        return round(float(values[selected].mean()), 2) if selected.any() else np.nan
 
     hit_df = pd.DataFrame([{
-        "Hit-rate (winners/total)": f"{len(winners)} / {len(stock_df)}" if len(stock_df) else "0 / 0",
-        "Avg holding period winners (yrs)": round(float(winners["Holding period (years)"].mean()), 2) if len(winners) else np.nan,
-        "Avg holding period losers (yrs)": round(float(losers["Holding period (years)"].mean()), 2) if len(losers) else np.nan,
-        "Avg alpha contribution on winners (Rs.)": round(float(winners["Alpha contribution (Rs.)"].mean()), 2) if len(winners) else np.nan,
-        "Avg alpha contribution on losers (Rs.)": round(float(losers["Alpha contribution (Rs.)"].mean()), 2) if len(losers) else np.nan,
+        "Hit-rate (winners/total)": f"{int(winners.sum())} / {int(equity_rows.sum())}",
+        "Avg holding period winners (yrs)": _mean_or_nan(holding_years, winners),
+        "Avg holding period losers (yrs)": _mean_or_nan(holding_years, losers),
+        "Avg alpha contribution on winners (Rs.)": _mean_or_nan(total_alpha, winners),
+        "Avg alpha contribution on losers (Rs.)": _mean_or_nan(total_alpha, losers),
     }])
+    stock_df = stock_df.sort_values("Alpha contribution (Rs.)", ascending=False)
 
     # Category-level attribution (unchanged)
     categories = ["Large", "Mid", "Small", "Cash"]
@@ -615,7 +467,7 @@ def _compute_attribution(
 
             gross_cat *= (1.0 + r_cat)
             gross_bm_cat *= (1.0 + r_cat_bm)
-            m_count += 1
+            m_count += period_months[i]
 
         if m_count > 0:
             yrs = m_count / 12.0
@@ -635,198 +487,15 @@ def _compute_attribution(
         "Category outperformance (pp)": round((cat_cagr[c] - cat_bm_cagr[c]) * 100.0, 2) if pd.notna(cat_cagr[c]) else np.nan,
     } for c in categories])
 
-    # ============================================================
-    # Domestic-equity sleeve decomposition (one-shot multiple backout)
-    # ============================================================
-    domestic_ace_codes = [c for c in ace_codes if str(asset_map.get(c, "")).strip() == "Domestic Equities"]
-    domestic_ace_codes = [c for c in domestic_ace_codes if c in w0_df.columns]
-
-    dom_decomp_summary_df = pd.DataFrame()
-    dom_decomp_period_label = None
-    dom_decomp_debug = {}
-    dom_decomp_contrib_df = pd.DataFrame()
-    dom_decomp_monthly_audit_df = pd.DataFrame()
-    dom_triangulation_df = pd.DataFrame()
-    dom_triangulation_summary_df = pd.DataFrame()
-    dom_triangulation_mode = str(raw.get("dom_triangulation_mode", "Fallback to price growth"))
-    dom_triangulation_coverage = {"valid_weight_sum": np.nan, "invalid_weight_sum": np.nan}
-    dom_decomp_runtime_mode = "not_run"
-
-    if domestic_ace_codes:
-        # Domestic sleeve weights rebased to 1.0 each month (t0)
-        # Use raw (no forward-fill) monthly weights for domestic sleeve
-        w0_dom_df = w0_df.loc[:, domestic_ace_codes].copy()
-        dom_sum = w0_dom_df.sum(axis=1).replace(0.0, np.nan)
-        w0_dom_df = w0_dom_df.div(dom_sum, axis=0).fillna(0.0)
-
-        # Monthly domestic returns: price from adj_price plus dividend yield shifted from t0 to t1.
-        r_price_dom_m = np.sum(w0_dom_df.to_numpy(dtype=float) * r_price_instr.loc[:, domestic_ace_codes].to_numpy(dtype=float), axis=1)
-        div_ace_m = compute_dividend_yield_returns(px, months, domestic_ace_codes)
-        div_mat = div_ace_m.reindex(index=t1, columns=domestic_ace_codes).fillna(0.0).to_numpy(dtype=float)
-        w_dom_mat = w0_dom_df.reindex(index=t0, columns=domestic_ace_codes).fillna(0.0).to_numpy(dtype=float)
-        r_div_dom_m = np.sum(w_dom_mat * div_mat, axis=1)
-        r_total_dom_m = r_price_dom_m + r_div_dom_m
-
-        # Monthly valuation and residual fundamental decomposition from stock-level multiples.
-        helper_sig = inspect.signature(compute_monthly_portfolio_multiples)
-        if "r_price_df" in helper_sig.parameters:
-            dom_decomp_runtime_mode = "monthly_drifted_end_weights"
-            m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
-                multiples_df=yld,
-                months=months,
-                ace_codes=domestic_ace_codes,
-                w0_df=w0_dom_df,
-                r_price_df=r_price_instr.loc[:, domestic_ace_codes],
-                lens=lens,
-            )
-        else:
-            dom_decomp_runtime_mode = "legacy_start_weight_end_multiple"
-            print(
-                "WARN: compute_monthly_portfolio_multiples imported without r_price_df support; "
-                "falling back to legacy valuation decomposition."
-            )
-            m_start_arr, m_end_arr, mult_debug = compute_monthly_portfolio_multiples(
-                multiples_df=yld,
-                months=months,
-                ace_codes=domestic_ace_codes,
-                w0_df=w0_dom_df,
-                lens=lens,
-            )
-        with np.errstate(divide="ignore", invalid="ignore"):
-            r_val_raw = (m_end_arr / m_start_arr) - 1.0
-        r_val_m = np.where(np.isfinite(r_val_raw), r_val_raw, 0.0)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            r_fund_raw = ((1.0 + r_price_dom_m) / (1.0 + r_val_m)) - 1.0
-        r_fund_m = np.where(np.isfinite(r_fund_raw), r_fund_raw, 0.0)
-
-        n_months = int(len(t1))
-        years = n_months / 12.0
-
-        gross_total = float(np.prod(1.0 + r_total_dom_m)) if n_months > 0 else np.nan
-        gross_price = float(np.prod(1.0 + r_price_dom_m)) if n_months > 0 else np.nan
-        gross_div = (gross_total / gross_price) if np.isfinite(gross_total) and np.isfinite(gross_price) and gross_price > 0 else np.nan
-        gross_fund = float(np.prod(1.0 + r_fund_m)) if n_months > 0 else np.nan
-        gross_val = (gross_price / gross_fund) if np.isfinite(gross_price) and np.isfinite(gross_fund) and gross_fund > 0 else np.nan
-
-        total_return = gross_total - 1.0 if np.isfinite(gross_total) else np.nan
-        price_return = gross_price - 1.0 if np.isfinite(gross_price) else np.nan
-        div_return = gross_div - 1.0 if np.isfinite(gross_div) else np.nan
-        fund_return = gross_fund - 1.0 if np.isfinite(gross_fund) else np.nan
-        val_return = gross_val - 1.0 if np.isfinite(gross_val) else np.nan
-
-        def _cagr_if_gt_1y(gross: float) -> float:
-            if years > 1.0 and np.isfinite(gross) and gross > 0:
-                return gross ** (1.0 / years) - 1.0
-            return np.nan
-
-        total_cagr = _cagr_if_gt_1y(gross_total)
-        price_cagr = _cagr_if_gt_1y(gross_price)
-        div_cagr = _cagr_if_gt_1y(gross_div)
-        val_cagr = _cagr_if_gt_1y(gross_val)
-        fund_cagr = _cagr_if_gt_1y(gross_fund)
-
-        dom_decomp_summary_df = pd.DataFrame([
-            {"Metric": "Domestic sleeve total return", "Total return (%)": round(total_return * 100.0, 2) if pd.notna(total_return) else np.nan, "CAGR (%)": round(total_cagr * 100.0, 2) if pd.notna(total_cagr) else np.nan},
-            {"Metric": "Price return", "Total return (%)": round(price_return * 100.0, 2) if pd.notna(price_return) else np.nan, "CAGR (%)": round(price_cagr * 100.0, 2) if pd.notna(price_cagr) else np.nan},
-            {"Metric": "Dividend yield return", "Total return (%)": round(div_return * 100.0, 2) if pd.notna(div_return) else np.nan, "CAGR (%)": round(div_cagr * 100.0, 2) if pd.notna(div_cagr) else np.nan},
-            {"Metric": "Valuation change", "Total return (%)": round(val_return * 100.0, 2) if pd.notna(val_return) else np.nan, "CAGR (%)": round(val_cagr * 100.0, 2) if pd.notna(val_cagr) else np.nan},
-            {"Metric": "Fundamental growth", "Total return (%)": round(fund_return * 100.0, 2) if pd.notna(fund_return) else np.nan, "CAGR (%)": round(fund_cagr * 100.0, 2) if pd.notna(fund_cagr) else np.nan},
-        ])
-
-        start_label = t0[0].strftime("%b %Y")
-        end_label = t1[-1].strftime("%b %Y")
-        dom_decomp_period_label = f"{start_label} to {end_label}"
-
-        dom_decomp_debug = {
-            "start_month": t0[0],
-            "end_month": t1[-1],
-            "start_agg_yield": float(mult_debug["agg_yield_start"][0]) if len(mult_debug.get("agg_yield_start", [])) else np.nan,
-            "end_agg_yield": float(mult_debug["agg_yield_end"][-1]) if len(mult_debug.get("agg_yield_end", [])) else np.nan,
-            "start_coverage_weight": float(mult_debug["coverage_start_weight"][0]) if len(mult_debug.get("coverage_start_weight", [])) else np.nan,
-            "end_coverage_weight": float(mult_debug["coverage_end_weight"][-1]) if len(mult_debug.get("coverage_end_weight", [])) else np.nan,
-            "start_multiple": float(m_start_arr[0]) if len(m_start_arr) else np.nan,
-            "end_multiple": float(m_end_arr[-1]) if len(m_end_arr) else np.nan,
-            "multiple_gross": gross_val,
-            "domestic_gross": gross_total,
-            "multiple_source": "fundlab.stock_monthly_valuations_ace",
-            "multiple_column": mult_debug.get("mult_col"),
-            "multiple_validity_rule": mult_debug.get("validity_rule"),
-            "gross_price": gross_price,
-            "gross_dividend": gross_div,
-            "gross_fundamental": gross_fund,
-            "runtime_mode": dom_decomp_runtime_mode,
-            "helper_signature": str(helper_sig),
-        }
-
-        dom_decomp_monthly_audit_df = pd.DataFrame({
-            "month_end": [x.date() for x in t1],
-            "price_return": r_price_dom_m,
-            "dividend_return": r_div_dom_m,
-            "total_return": r_total_dom_m,
-            "valuation_change": r_val_m,
-            "fundamental_return": r_fund_m,
-            "M_start": m_start_arr,
-            "M_end": m_end_arr,
-            "coverage_start_weight": mult_debug.get("coverage_start_weight"),
-            "coverage_end_weight": mult_debug.get("coverage_end_weight"),
-            "valid_count_start": mult_debug.get("valid_count_start"),
-            "valid_count_end": mult_debug.get("valid_count_end"),
-            "drifted_end_weight_sum": mult_debug.get("drifted_end_weight_sum"),
-        })
-
-        # Stock-level diagnostics: average weight + exact chained contributions (no scaling)
-        r_stock_m = r_instr.loc[:, domestic_ace_codes].to_numpy(dtype=float)
-        w0_dom = w0_dom_df.to_numpy(dtype=float)
-        r_dom_m = r_price_dom_m
-
-        link_dom = np.ones(len(r_dom_m), dtype=float)
-        for i in range(1, len(r_dom_m)):
-            link_dom[i] = link_dom[i-1] * (1.0 + r_dom_m[i-1])
-
-        contrib = np.sum((w0_dom * r_stock_m) * link_dom[:, None], axis=0)
-        avg_w = w0_dom_df.mean(axis=0).to_numpy(dtype=float)
-        domestic_weight_avg = float(w0_dom_df.sum(axis=1).mean())
-
-        dom_decomp_contrib_df = pd.DataFrame({
-            "Stock name": [name_map.get(x, x) for x in domestic_ace_codes],
-            "Average holding weight (%)": np.round(avg_w * 100.0, 4),
-            "Contribution (%)": np.round(contrib * 100.0, 4),
-        }).sort_values("Contribution (%)", ascending=False).reset_index(drop=True)
-
-        total_row = pd.DataFrame([{
-            "Stock name": "TOTAL (sum of contributions)",
-            "Average holding weight (%)": np.round(domestic_weight_avg * 100.0, 4),
-            "Contribution (%)": np.round(contrib.sum() * 100.0, 4),
-        }])
-        dom_decomp_contrib_df = pd.concat([dom_decomp_contrib_df, total_row], ignore_index=True)
-
-        dom_triangulation_df, dom_triangulation_summary_df, dom_triangulation_coverage = _compute_domestic_triangulation_tables(
-            w0_dom_df=w0_dom_df,
-            domestic_ace_codes=domestic_ace_codes,
-            px_df=px,
-            yld_df=yld,
-            lens=lens,
-            name_map=name_map,
-            mode_label=dom_triangulation_mode,
-        )
-
     diag = {
         "months": months,
+        "period_months": period_months,
+        "requested_start_month": start_month,
+        "effective_start_month": t0[0],
+        "portfolio_return_summary_df": portfolio_return_summary_df,
+        "equity_keys": equity_keys,
         "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
         "adj_price_invalid_rows_df": invalid_price_rows_df,
         "adj_price_return_audit_df": price_return_audit_df,
-        "domestic_decomp_period_label": dom_decomp_period_label,
-        "domestic_decomp_summary_df": dom_decomp_summary_df,
-        "domestic_decomp_stock_count": len(domestic_ace_codes),
-        "domestic_decomp_lens": lens,
-        "domestic_decomp_debug": dom_decomp_debug,
-        "domestic_decomp_contrib_df": dom_decomp_contrib_df,
-        "domestic_decomp_monthly_audit_df": dom_decomp_monthly_audit_df,
-        "dom_triangulation_df": dom_triangulation_df,
-        "dom_triangulation_summary_df": dom_triangulation_summary_df,
-        "dom_triangulation_mode": dom_triangulation_mode,
-        "dom_triangulation_valid_weight_sum": dom_triangulation_coverage.get("valid_weight_sum"),
-        "dom_triangulation_invalid_weight_sum": dom_triangulation_coverage.get("invalid_weight_sum"),
     }
     return stock_df, hit_df, cat_df, diag

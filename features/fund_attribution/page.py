@@ -1,6 +1,5 @@
 import datetime as dt
 
-import pandas as pd
 import streamlit as st
 
 from core.dates import to_month_end
@@ -69,55 +68,74 @@ def fund_attribution_page():
             end_month = st.selectbox("End month", months, index=today.month - 1, format_func=_mname, key="fa_end_month")
 
         lookback = st.selectbox("Lookback window (years)", options=[5, 10, 15], index=1, key="fa_lookback")
-        lens = st.radio(
-            "7. Decomposition lens (domestic equities only)",
-            options=["Earnings (P/E)", "Sales (P/S)", "Book (P/B)"],
+        return_basis = st.radio(
+            "Stock return basis",
+            options=["Price only", "Price and dividends"],
             horizontal=True,
-            key="fa_lens",
-        )
-        dom_triangulation_mode = st.radio(
-            "Invalid fundamentals handling (triangulation)",
-            options=["Fallback to price growth", "Exclude invalid from weighted average"],
-            horizontal=True,
-            key="fa_dom_triangulation_mode",
+            key="fa_return_basis",
         )
         submit = st.form_submit_button("Submit", type="primary")
 
-    if not submit:
+    start_me = to_month_end(dt.date(int(start_year), int(start_month), 1))
+    end_me = to_month_end(dt.date(int(end_year), int(end_month), 1))
+    compute_args = (start_me, end_me, bench_mode, universe_mode, return_basis == "Price and dividends")
+    settings = (focus_id, lookback, *compute_args)
+    state_key = "fa_attribution_run"
+    revision_key = "fa_attribution_editor_revision"
+
+    if submit:
+        st.session_state.pop(state_key, None)
+        if start_me >= end_me:
+            st.error("Start period must be before end period.")
+            return
+
+        with st.spinner("Loading fund history ..."):
+            raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback))
+
+        if raw["holdings"].empty:
+            st.warning("No holdings data found for this fund in the selected window.")
+            return
+        if start_me < raw["window_start"]:
+            st.warning(f"Start period {start_me} is older than the available window. Increase the lookback window.")
+            return
+
+        with st.spinner("Computing attribution ..."):
+            original = _compute_attribution(raw, *compute_args)
+        if "error" in original[3]:
+            st.error(original[3]["error"])
+            return
+
+        st.session_state[state_key] = {
+            "settings": settings, "raw": raw, "original": original, "scenario": None, "selected": (),
+        }
+        st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
+
+    run = st.session_state.get(state_key)
+    if run is None or run["settings"] != settings:
         st.info("Select inputs above and click Submit.")
         return
 
-    start_me = to_month_end(dt.date(int(start_year), int(start_month), 1))
-    end_me = to_month_end(dt.date(int(end_year), int(end_month), 1))
-    if start_me > end_me:
-        st.error("Start period must be before end period.")
+    scale = run["raw"].get("weight_scale")
+    if scale not in (None, 1.0):
+        st.caption(f"Holding weights were normalized using a scale of {scale:.6f}.")
+
+    results = run["scenario"] or run["original"]
+    original_summary = run["original"][3]["portfolio_return_summary_df"] if run["scenario"] else None
+    selection = display_attribution_results(
+        *results, bench_mode, selected_keys=run["selected"], original_summary=original_summary,
+        editor_key=f"fa_attribution_stock_selection_{st.session_state[revision_key]}",
+    )
+    if selection is None:
         return
 
-    # 10-year cache anchored to end period
-    with st.spinner("Loading fund history (cached) ..."):
-        raw = _load_attrib_raw_window(focus_id, end_me, lookback_years=int(lookback), data_version="ace-v2")
+    scenario = None
+    if selection:
+        with st.spinner("Recalculating attribution ..."):
+            scenario = _compute_attribution(run["raw"], *compute_args, benchmark_stock_keys=selection)
+        if "error" in scenario[3]:
+            st.error(scenario[3]["error"])
+            return
 
-    if raw.get("weight_scale") not in (None, 1.0):
-        st.caption(f"Note: holding_weight scale detected as {raw['weight_scale']:.6f} and normalised accordingly.")
-
-
-    if raw["holdings"].empty:
-        st.warning("No holdings data found for this fund in the selected window.")
-        return
-
-    if start_me < raw["window_start"]:
-        st.warning(f"Start period {start_me} is older than cached window start {raw['window_start']}. Increase lookback window.")
-        return
-
-    with st.spinner("Computing attribution ..."):
-        raw["dom_triangulation_mode"] = dom_triangulation_mode
-        stock_df, hit_df, cat_df, diag = _compute_attribution(
-            raw, start_me, end_me, bench_mode, lens=lens, universe_mode=universe_mode
-        )
-
-
-    if "error" in diag:
-        st.error(diag["error"])
-        return
-
-    display_attribution_results(stock_df, hit_df, cat_df, diag, bench_mode)
+    st.session_state[state_key] = {**run, "scenario": scenario, "selected": selection}
+    st.session_state[revision_key] += 1
+    st.rerun()

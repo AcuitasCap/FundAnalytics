@@ -55,7 +55,7 @@ def test_attribution_layers_preserve_the_ui_and_dependency_contract():
     assert "@st.cache_data(ttl=3600, show_spinner=False)" in data_source
     assert "def _load_attrib_raw_window(" in data_source
     assert "def _compute_attribution(" in compute_source
-    assert "def _compute_domestic_triangulation_tables(" in compute_source
+    assert "stock_monthly_valuations" not in data_source
     assert "get_engine" not in compute_source
     assert "streamlit" not in compute_source
     assert "def display_attribution_results(" in display_source
@@ -63,10 +63,9 @@ def test_attribution_layers_preserve_the_ui_and_dependency_contract():
     for value in (
         "fa_category", "fa_focus_fund", "fa_bench_mode", "fa_universe_mode",
         "fa_form", "fa_start_year", "fa_start_month", "fa_end_year", "fa_end_month",
-        "fa_lookback", "fa_lens", "fa_dom_triangulation_mode",
+        "fa_lookback", "fa_return_basis",
         "Vs NIFTY 50", "Vs NIFTY 500", "Like-for-like",
-        "Domestic equities only", "Full holdings", "Earnings (P/E)", "Sales (P/S)",
-        "Book (P/B)", "Fallback to price growth", "Exclude invalid from weighted average",
+        "Domestic equities only", "Full holdings", "Price only", "Price and dividends",
     ):
         assert value in page_source
 
@@ -75,7 +74,7 @@ def test_attribution_smoke_check_validates_live_result_structure_not_frozen_mark
     smoke_source = (ROOT / "features/fund_attribution/smoke.py").read_text(encoding="utf-8")
 
     assert "structural smoke test" in smoke_source
-    assert "required_domestic_metrics" in smoke_source
+    assert "required_return_metrics" in smoke_source
     assert "exp_dom" not in smoke_source
     assert "exp_bench" not in smoke_source
     assert "exp_winners" not in smoke_source
