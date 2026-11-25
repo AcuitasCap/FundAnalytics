@@ -99,10 +99,8 @@ def _compute_attribution(
             "NOACE::" + h["instrument_name"].astype(str)
         )
 
-    # Attribution universe selection:
-    # - Full holdings: current behavior (all asset types).
-    # - Domestic equities only: use only Domestic Equities and rebase each snapshot to 100%.
-    if str(universe_mode).strip() == "Domestic equities only":
+    domestic_only = str(universe_mode).strip() == "Domestic equities only"
+    if domestic_only:
         h = h[h["asset_type"].astype(str).str.strip() == "Domestic Equities"].copy()
 
     # Aggregate weights by month/instrument
@@ -122,7 +120,7 @@ def _compute_attribution(
     # Explicit snapshots store zero weight for stocks absent from that snapshot.
     w_piv = w_piv.reindex(t0).fillna(0.0)
     w_piv = w_piv.loc[:, w_piv.ne(0).any(axis=0)]
-    if w_piv.empty and str(universe_mode).strip() == "Domestic equities only":
+    if w_piv.empty and domestic_only:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
             "error": "No domestic-equity positions were held during the selected period."
         }
@@ -133,7 +131,7 @@ def _compute_attribution(
          .tolist()
     )
 
-    if str(universe_mode).strip() == "Domestic equities only":
+    if domestic_only:
         # Rebase the domestic sleeve to 100% at each rebalance.
         dom_tot = w_piv.sum(axis=1).replace(0.0, np.nan)
         w_piv = w_piv.div(dom_tot, axis=0).fillna(0.0)
@@ -333,6 +331,8 @@ def _compute_attribution(
     gross_fund = float(np.prod(1.0 + rp))
     gross_price = float(np.prod(1.0 + np.sum(w0 * r_price_instr.to_numpy(dtype=float), axis=1)))
     gross_dividend = gross_fund / gross_price if gross_price > 0 else np.nan
+    portfolio_label = "Domestic equity sleeve" if domestic_only else "Fund"
+    return_label = "return (price and dividends)" if include_dividends else "price return"
     portfolio_return_summary_df = pd.DataFrame([
         {
             "Series": label,
@@ -340,7 +340,7 @@ def _compute_attribution(
             "CAGR (%)": round((gross ** (1.0 / years) - 1.0) * 100.0, 2) if gross > 0 else np.nan,
         }
         for label, gross in [
-            ("Fund return (price and dividends)" if include_dividends else "Fund price return", gross_fund),
+            (f"{portfolio_label} {return_label}", gross_fund),
             ("Benchmark", float(np.prod(1.0 + rbp))),
             ("Price return", gross_price),
             ("Dividend yield return", gross_dividend),

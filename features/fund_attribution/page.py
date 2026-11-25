@@ -43,9 +43,10 @@ def fund_attribution_page():
     )
     universe_mode = st.radio(
         "4. Attribution holdings universe",
-        options=["Domestic equities only", "Full holdings"],
+        options=["Full holdings", "Domestic equities only"],
         horizontal=True,
         key="fa_universe_mode",
+        help="Full holdings includes cash and other reported assets. Domestic equities only rescales the domestic stocks to 100% at each rebalance.",
     )
 
     # 5) Start/end period below radio
