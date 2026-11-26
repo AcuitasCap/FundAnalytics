@@ -14,6 +14,7 @@ from features.fund_attribution.fundamentals import build_fundamental_growth_tabl
 
 
 logger = logging.getLogger(__name__)
+FUNDAMENTAL_WINDOW_BASIS = "reported-holdings-v1"
 
 def fund_attribution_page():
     home_button()
@@ -86,7 +87,7 @@ def fund_attribution_page():
     start_me = to_month_end(dt.date(int(start_year), int(start_month), 1))
     end_me = to_month_end(dt.date(int(end_year), int(end_month), 1))
     compute_args = (start_me, end_me, bench_mode, universe_mode, return_basis == "Price and dividends")
-    settings = (focus_id, lookback, *compute_args)
+    settings = (focus_id, lookback, *compute_args, FUNDAMENTAL_WINDOW_BASIS)
     state_key = "fa_attribution_run"
     revision_key = "fa_attribution_editor_revision"
 

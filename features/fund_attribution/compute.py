@@ -68,7 +68,8 @@ def _compute_attribution(
     h["month_end"] = pd.to_datetime(h["month_end"], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
     start_month, end_month = pd.Timestamp(start_me), pd.Timestamp(end_me)
     h = h[h["month_end"].between(start_month, end_month)].copy()
-    t0 = sorted(pd.Timestamp(month) for month in h.loc[h["month_end"] < end_month, "month_end"].unique())
+    reported_months = pd.DatetimeIndex(h["month_end"].unique()).sort_values()
+    t0 = reported_months[reported_months < end_month].tolist()
     if not t0:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
             "error": "No reported holdings at or after the selected start month and before the end month."
@@ -80,7 +81,6 @@ def _compute_attribution(
         for start, end in zip(t0, t1)
     ])
     years = float(period_months.sum()) / 12.0
-    h = h[h["month_end"] < end_month].copy()
     h["holding_weight"] = pd.to_numeric(h["holding_weight"], errors="coerce").fillna(0.0)
 
     if "asset_type" not in h.columns:
@@ -104,13 +104,14 @@ def _compute_attribution(
         h = h[h["asset_type"].astype(str).str.strip() == "Domestic Equities"].copy()
 
     # Aggregate weights by month/instrument
-    w = (
+    reported_weights = (
         h.groupby(["month_end", "instrument_key", "asset_type"], as_index=False)["holding_weight"]
          .sum()
     )
+    w = reported_weights.loc[reported_weights["month_end"] < end_month]
 
     # Pivot weights: month x instrument
-    w_piv = w.pivot_table(
+    snapshot_weights = reported_weights.pivot_table(
         index="month_end",
         columns="instrument_key",
         values="holding_weight",
@@ -118,7 +119,7 @@ def _compute_attribution(
     )
 
     # Explicit snapshots store zero weight for stocks absent from that snapshot.
-    w_piv = w_piv.reindex(t0).fillna(0.0)
+    w_piv = snapshot_weights.reindex(t0).fillna(0.0)
     w_piv = w_piv.loc[:, w_piv.ne(0).any(axis=0)]
     if w_piv.empty and domestic_only:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
@@ -490,18 +491,24 @@ def _compute_attribution(
         "Category outperformance (pp)": round((cat_cagr[c] - cat_bm_cagr[c]) * 100.0, 2) if pd.notna(cat_cagr[c]) else np.nan,
     } for c in categories])
 
+    # Fundamental endpoints come from reports that actually list the stock.
+    # Price attribution still runs each opening snapshot through the next rebalance.
+    reported_positions = snapshot_weights.reindex(index=reported_months, columns=equity_keys).fillna(0.0).ne(0)
+    report_gaps = np.diff(reported_months.to_period("M").asi8)
     fundamental_windows = []
-    for j, instrument in enumerate(instr_cols):
-        if instrument not in equity_keys or held_months[j] <= 12:
+    for instrument in equity_keys:
+        listed = reported_positions[instrument].to_numpy()
+        months_held = int(report_gaps[listed[:-1] & listed[1:]].sum())
+        if months_held <= 12:
             continue
-        held_intervals = np.flatnonzero(held_mask[:, j])
+        held_reports = reported_months[listed]
         fundamental_windows.append({
             "instrument_key": instrument,
             "stock_name": _disp(instrument),
             "ace_code": instrument if instrument in ace_codes else None,
-            "holding_months": int(held_months[j]),
-            "first_month": t0[held_intervals[0]].date(),
-            "last_month": t1[held_intervals[-1]].date(),
+            "holding_months": months_held,
+            "first_month": held_reports[0].date(),
+            "last_month": held_reports[-1].date(),
         })
 
     diag = {
