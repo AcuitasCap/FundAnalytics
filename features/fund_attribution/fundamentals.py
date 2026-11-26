@@ -33,7 +33,7 @@ def _format_growth(start, end, years, multiple_trades=False):
 
 def build_fundamental_growth_table(windows, values):
     """Annualize endpoint growth over the full span, including gaps between trades."""
-    columns = ["Stock name", "Holding period (years)", *METRICS]
+    columns = ["Stock name", "Average weight (%)", *METRICS]
     if not windows:
         return pd.DataFrame(columns=columns)
 
@@ -46,7 +46,7 @@ def build_fundamental_growth_table(windows, values):
     lookup = values.set_index(keys).to_dict("index")
 
     rows = []
-    for window in sorted(windows, key=lambda item: (-item["holding_months"], item["stock_name"])):
+    for window in sorted(windows, key=lambda item: (-item["average_weight_pct"], item["stock_name"])):
         first_month = to_month_end(window["first_month"])
         last_month = to_month_end(window["last_month"])
         span_months = (last_month.year - first_month.year) * 12 + last_month.month - first_month.month
@@ -57,7 +57,7 @@ def build_fundamental_growth_table(windows, values):
         rows.append({
             "instrument_key": window["instrument_key"],
             "Stock name": window["stock_name"],
-            "Holding period (years)": window["holding_months"] / 12,
+            "Average weight (%)": window["average_weight_pct"],
             **{label: _format_growth(start.get(metric, math.nan), end.get(metric, math.nan),
                                      span_months / 12, multiple_trades)
                for label, metric in METRICS.items()},
