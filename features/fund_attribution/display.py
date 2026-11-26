@@ -74,8 +74,11 @@ def display_attribution_results(
         else:
             st.caption("Growth is annualized from the first entry to the end of the final holding period, including gaps between trades. "
                        "The holding-period column counts only time actually held. PAT and sales use trailing 12 months.")
-            st.dataframe(fundamentals, width="stretch", hide_index=True, column_config={
+            fundamentals_with_cagr = fundamentals.copy()
+            fundamentals_with_cagr.insert(2, "Stock CAGR", stock_df["Stock return (%)"])
+            st.dataframe(fundamentals_with_cagr, width="stretch", hide_index=True, column_config={
                 "Holding period (years)": st.column_config.NumberColumn(format="%.2f"),
+                "Stock CAGR": st.column_config.NumberColumn(format="%.2f%%"),
             })
 
         st.subheader("Hit rate by rupee alpha")

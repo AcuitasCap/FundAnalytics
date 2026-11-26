@@ -496,6 +496,7 @@ def _compute_attribution(
             continue
         held_intervals = np.flatnonzero(held_mask[:, j])
         fundamental_windows.append({
+            "instrument_key": instrument,
             "stock_name": _disp(instrument),
             "ace_code": instrument if instrument in ace_codes else None,
             "holding_months": int(held_months[j]),

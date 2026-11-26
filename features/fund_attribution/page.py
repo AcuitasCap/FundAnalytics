@@ -125,12 +125,12 @@ def fund_attribution_page():
             fundamentals = None
         st.session_state[state_key] = {
             "settings": settings, "raw": raw, "original": original, "scenario": None, "selected": (),
-            "fundamentals": fundamentals,
+            "fundamentals_by_instrument": fundamentals,
         }
         st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
 
     run = st.session_state.get(state_key)
-    if run is None or run["settings"] != settings or "fundamentals" not in run:
+    if run is None or run["settings"] != settings or "fundamentals_by_instrument" not in run:
         st.info("Select inputs above and click Submit.")
         return
 
@@ -143,7 +143,7 @@ def fund_attribution_page():
     selection = display_attribution_results(
         *results, bench_mode, selected_keys=run["selected"], original_summary=original_summary,
         editor_key=f"fa_attribution_stock_selection_{st.session_state[revision_key]}",
-        fundamentals=run["fundamentals"],
+        fundamentals=run["fundamentals_by_instrument"],
     )
     if selection is None:
         return

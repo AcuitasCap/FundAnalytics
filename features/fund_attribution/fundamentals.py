@@ -55,10 +55,11 @@ def build_fundamental_growth_table(windows, values):
         start = lookup.get((code, first_month), {})
         end = lookup.get((code, last_month), {})
         rows.append({
+            "instrument_key": window["instrument_key"],
             "Stock name": window["stock_name"],
             "Holding period (years)": window["holding_months"] / 12,
             **{label: _format_growth(start.get(metric, math.nan), end.get(metric, math.nan),
                                      span_months / 12, multiple_trades)
                for label, metric in METRICS.items()},
         })
-    return pd.DataFrame(rows, columns=columns)
+    return pd.DataFrame(rows, columns=["instrument_key", *columns]).set_index("instrument_key")
