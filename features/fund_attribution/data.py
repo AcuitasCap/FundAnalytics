@@ -197,9 +197,8 @@ def _load_attrib_raw_window(
     }
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_attrib_fundamental_endpoints(endpoints: tuple[tuple[str, dt.date], ...]) -> pd.DataFrame:
-    """Load just the requested ACE/month-year pairs, including last trading day records."""
+    """Read current values for the requested ACE/month pairs on each submission."""
     columns = ["ace_code", "month_end", "ttm_pat", "ttm_sales", "book_value"]
     if not endpoints:
         return pd.DataFrame(columns=columns)

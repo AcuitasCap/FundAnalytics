@@ -13,12 +13,18 @@ FUNDAMENTAL_FIELDS = {"PAT": "ttm_pat", "Sales": "ttm_sales", "Book value": "boo
 METRICS = {f"{label} growth": field for label, field in FUNDAMENTAL_FIELDS.items()}
 
 
-def _format_growth(start, end, years, multiple_trades=False):
+def _format_growth(start, end, years, multiple_trades=False, *, first_month, last_month):
     prefix = "Multiple trades, " if multiple_trades else ""
-    if not (math.isfinite(start) and math.isfinite(end)):
-        return f"{prefix}N/A"
+    missing_months = [
+        month.strftime("%b %Y")
+        for value, month in ((start, first_month), (end, last_month))
+        if not math.isfinite(value)
+    ]
+    if missing_months:
+        label = "missing data for" if multiple_trades else "Missing data for"
+        return f"{prefix}{label} {' and '.join(missing_months)}"
     if start == 0:
-        return f"{prefix}N/A (zero start)"
+        return f"{prefix}0 to {end:,.2f} (zero starting value)"
     if start < 0 and end < 0:
         losses = "Multiple trades, losses" if multiple_trades else "Losses"
         if end > start:
@@ -60,9 +66,13 @@ def build_fundamental_growth_table(windows, values):
             "instrument_key": window["instrument_key"],
             "Stock name": window["stock_name"],
             "Average weight (%)": window["average_weight_pct"],
-            **{label: _format_growth(start.get(metric, math.nan), end.get(metric, math.nan),
-                                     span_months / 12, multiple_trades)
-               for label, metric in METRICS.items()},
+            **{
+                label: _format_growth(
+                    start.get(metric, math.nan), end.get(metric, math.nan),
+                    span_months / 12, multiple_trades, first_month=first_month, last_month=last_month,
+                )
+                for label, metric in METRICS.items()
+            },
         })
     return pd.DataFrame(rows, columns=["instrument_key", *columns]).set_index("instrument_key")
 
