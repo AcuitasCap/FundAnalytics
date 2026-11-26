@@ -518,6 +518,18 @@ def _compute_attribution(
             "last_month": held_reports[-1].date(),
         })
 
+    # Include stocks first reported at the end of the review, even though they
+    # did not have a price attribution interval inside the window.
+    review_assets = reported_weights["asset_type"].astype(str).str.strip()
+    review_keys = reported_weights["instrument_key"]
+    identified = ~review_keys.str.startswith(("NOACE::", "CASH::"))
+    review_equities = review_assets.isin(equity_types) | (review_assets.eq("Unknown") & identified)
+    review_stocks = tuple(
+        (_disp(key), key if not key.startswith("NOACE::") else None)
+        for key in review_keys[review_equities & reported_weights["holding_weight"].ne(0)].unique()
+        if key not in cash_keys and not key.startswith("CASH::")
+    )
+
     diag = {
         "months": months,
         "period_months": period_months,
@@ -527,6 +539,7 @@ def _compute_attribution(
         "equity_keys": equity_keys,
         "average_portfolio_weights_pct": average_weights_pct,
         "fundamental_windows": fundamental_windows,
+        "fundamental_review_stocks": review_stocks,
         "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
         "adj_price_invalid_rows_df": invalid_price_rows_df,
         "adj_price_return_audit_df": price_return_audit_df,

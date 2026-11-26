@@ -1,6 +1,7 @@
 """Stock fundamental growth across actual holding endpoints."""
 
 import math
+from io import BytesIO
 
 import pandas as pd
 
@@ -8,7 +9,8 @@ from core.dataframes import ensure_unique_monthly_rows
 from core.dates import to_month_end
 
 
-METRICS = {"PAT growth": "ttm_pat", "Sales growth": "ttm_sales", "Book value growth": "book_value"}
+FUNDAMENTAL_FIELDS = {"PAT": "ttm_pat", "Sales": "ttm_sales", "Book value": "book_value"}
+METRICS = {f"{label} growth": field for label, field in FUNDAMENTAL_FIELDS.items()}
 
 
 def _format_growth(start, end, years, multiple_trades=False):
@@ -63,3 +65,44 @@ def build_fundamental_growth_table(windows, values):
                for label, metric in METRICS.items()},
         })
     return pd.DataFrame(rows, columns=["instrument_key", *columns]).set_index("instrument_key")
+
+
+def build_fundamental_history_workbook(stocks, start_month, end_month, metric, values) -> bytes:
+    """Export the source values with a calendar month column and a row for every stock."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    months = pd.period_range(start_month, end_month, freq="M")
+    values = values.copy()
+    values["month"] = pd.to_datetime(values["month_end"]).dt.to_period("M")
+    values["value"] = pd.to_numeric(values["value"], errors="coerce")
+    keys = ["ace_code", "month"]
+    values = ensure_unique_monthly_rows(values, keys, ["value"], "Fundamental history export")
+    lookup = values.set_index(keys)["value"].dropna().to_dict()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = metric
+    sheet.freeze_panes = "B2"
+    sheet.append(["Stock name", *months.to_timestamp("M").date])
+    longest_name = max((len(name) for name, _ in stocks), default=0)
+    sheet.column_dimensions["A"].width = max(18, min(longest_name + 3, 255))
+    for cell in sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="243B53")
+        cell.font = Font(bold=True, color="FFFFFF")
+        if cell.column > 1:
+            cell.number_format = "mmm yyyy"
+            sheet.column_dimensions[get_column_letter(cell.column)].width = 16
+
+    for name, code in sorted(stocks, key=lambda stock: stock[0].casefold()):
+        sheet.append([name, *(lookup.get((code, month)) for month in months)])
+        row = sheet[sheet.max_row]
+        row[0].data_type = "s"  # Stock names are literal text, even if a name starts with '='.
+        for cell in row[1:]:
+            cell.number_format = "#,##0.00"
+    sheet.auto_filter.ref = sheet.dimensions
+
+    with BytesIO() as output:
+        workbook.save(output)
+        return output.getvalue()

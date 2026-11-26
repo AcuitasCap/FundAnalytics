@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.52
 pandas
 SQLAlchemy
 psycopg2-binary

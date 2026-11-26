@@ -4,7 +4,9 @@ import streamlit as st
 from features.fund_attribution.data import (
     BENCH_NAME_MID150, BENCH_NAME_NIFTY100, BENCH_NAME_NIFTY50,
     BENCH_NAME_NIFTY500, BENCH_NAME_SMALL250, CASH_ANNUAL_RETURN,
+    load_attrib_fundamental_history,
 )
+from features.fund_attribution.fundamentals import FUNDAMENTAL_FIELDS, build_fundamental_history_workbook
 
 
 def display_attribution_results(
@@ -98,3 +100,24 @@ def display_attribution_results(
     if apply:
         return tuple(selectable.index[selectable["Use benchmark"]])
     return None
+
+
+def display_fundamental_data_download(stocks, start_month, end_month, fund_id):
+    st.subheader("Review underlying fundamental data")
+    metric = st.radio("Metric", list(FUNDAMENTAL_FIELDS), horizontal=True, key="fa_fundamental_review_metric")
+    if not stocks:
+        st.info("No stocks were reported in the selected period.")
+        return
+
+    def prepare_workbook():
+        ace_codes = tuple(sorted({code for _, code in stocks if code is not None}))
+        values = load_attrib_fundamental_history(ace_codes, start_month, end_month, metric)
+        return build_fundamental_history_workbook(stocks, start_month, end_month, metric, values)
+
+    metric_slug = metric.lower().replace(" ", "_")
+    st.download_button(
+        "Download", data=prepare_workbook, on_click="ignore",
+        file_name=f"fund_{fund_id}_{metric_slug}_{start_month:%Y-%m}_to_{end_month:%Y-%m}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"fa_fundamental_review_download_{metric_slug}",
+    )

@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from core.db import get_engine
 from core.dates import to_month_end
+from features.fund_attribution.fundamentals import FUNDAMENTAL_FIELDS
 
 # ======================== Fund Attribution Page ========================
 
@@ -214,4 +215,22 @@ def load_attrib_fundamental_endpoints(endpoints: tuple[tuple[str, dt.date], ...]
     """)
     return pd.read_sql(query, get_engine(), params={
         "ace_codes": list(ace_codes), "month_starts": [date.replace(day=1) for date in dates],
+    })
+
+
+def load_attrib_fundamental_history(ace_codes, start_month, end_month, metric):
+    """Read the selected metric for a stock universe and inclusive month range."""
+    field = FUNDAMENTAL_FIELDS[metric]
+    if not ace_codes:
+        return pd.DataFrame(columns=["ace_code", "month_end", "value"])
+
+    query = text(f"""
+        SELECT ace_code, month_end, {field} AS value
+        FROM fundlab.stock_monthly_valuations_ace
+        WHERE ace_code = ANY(:ace_codes) AND month_end BETWEEN :start_date AND :end_date
+    """)
+    return pd.read_sql(query, get_engine(), params={
+        "ace_codes": list(ace_codes),
+        "start_date": to_month_end(start_month).replace(day=1),
+        "end_date": to_month_end(end_month),
     })

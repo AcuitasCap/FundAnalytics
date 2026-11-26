@@ -9,12 +9,12 @@ from core.fund_catalog import fetch_categories, fetch_funds_for_categories
 from core.navigation import home_button
 from features.fund_attribution.data import _load_attrib_raw_window, load_attrib_fundamental_endpoints
 from features.fund_attribution.compute import _compute_attribution
-from features.fund_attribution.display import display_attribution_results
+from features.fund_attribution.display import display_attribution_results, display_fundamental_data_download
 from features.fund_attribution.fundamentals import build_fundamental_growth_table
 
 
 logger = logging.getLogger(__name__)
-FUNDAMENTAL_WINDOW_BASIS = "reported-holdings-v2"
+FUNDAMENTAL_WINDOW_BASIS = "reported-holdings-v3"
 
 def fund_attribution_page():
     home_button()
@@ -146,6 +146,7 @@ def fund_attribution_page():
         editor_key=f"fa_attribution_stock_selection_{st.session_state[revision_key]}",
         fundamentals=run["fundamentals_by_instrument"],
     )
+    display_fundamental_data_download(run["original"][3]["fundamental_review_stocks"], start_me, end_me, focus_id)
     if selection is None:
         return
 
