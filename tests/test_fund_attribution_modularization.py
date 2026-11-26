@@ -55,7 +55,7 @@ def test_attribution_layers_preserve_the_ui_and_dependency_contract():
     assert "@st.cache_data(ttl=3600, show_spinner=False)" in data_source
     assert "def _load_attrib_raw_window(" in data_source
     assert "def _compute_attribution(" in compute_source
-    assert "stock_monthly_valuations" not in data_source
+    assert "stock_monthly_valuations" not in data_source.split("def load_attrib_fundamental_endpoints(")[0]
     assert "get_engine" not in compute_source
     assert "streamlit" not in compute_source
     assert "def display_attribution_results(" in display_source

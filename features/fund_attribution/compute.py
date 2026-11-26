@@ -365,21 +365,23 @@ def _compute_attribution(
     held_months = held_mask.T @ period_months
     holding_years = held_months / 12.0
 
-    def _masked_cagr(ret_mat: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _holding_returns(ret_mat: np.ndarray) -> np.ndarray:
         out = np.full(ret_mat.shape[1], np.nan, dtype=float)
-        for j in range(ret_mat.shape[1]):
-            m = mask[:, j]
-            if not m.any():
+        for j, years_held in enumerate(holding_years):
+            if years_held <= 0:
                 continue
-            gross = float(np.prod(1.0 + ret_mat[m, j]))
-            yrs = holding_years[j]
-            if yrs > 0 and gross > 0:
-                out[j] = gross ** (1.0 / yrs) - 1.0
+            gross = float(np.prod(1.0 + ret_mat[held_mask[:, j], j]))
+            if not np.isfinite(gross):
+                continue
+            if held_months[j] < 12:
+                out[j] = gross - 1.0
+            elif gross >= 0:
+                out[j] = gross ** (1.0 / years_held) - 1.0
         return out
 
-    stock_cagr = _masked_cagr(r0, held_mask)
-    bench_cagr = _masked_cagr(rb, held_mask)
-    outperf = stock_cagr - bench_cagr
+    stock_return = _holding_returns(r0)
+    bench_return = _holding_returns(rb)
+    outperf = stock_return - bench_return
 
     stock_df = pd.DataFrame({
         "Stock name": [_disp(c) for c in instr_cols],
@@ -387,8 +389,9 @@ def _compute_attribution(
         "Benchmark contribution (Rs.)": np.round(total_bench, 2),
         "Alpha contribution (Rs.)": np.round(total_alpha, 2),
         "Holding period (years)": np.round(holding_years, 2),
-        "Stock CAGR": np.round(stock_cagr * 100.0, 2),
-        "Benchmark CAGR": np.round(bench_cagr * 100.0, 2),
+        "Stock return (%)": np.round(stock_return * 100.0, 2),
+        "Benchmark return (%)": np.round(bench_return * 100.0, 2),
+        "Return basis": np.where(held_months < 12, "Cumulative", "Annualized"),
         "Stock outperformance (pp)": np.round(outperf * 100.0, 2),
     }, index=pd.Index(instr_cols, name="instrument_key"))
 
@@ -487,6 +490,19 @@ def _compute_attribution(
         "Category outperformance (pp)": round((cat_cagr[c] - cat_bm_cagr[c]) * 100.0, 2) if pd.notna(cat_cagr[c]) else np.nan,
     } for c in categories])
 
+    fundamental_windows = []
+    for j, instrument in enumerate(instr_cols):
+        if instrument not in equity_keys or held_months[j] <= 12:
+            continue
+        held_intervals = np.flatnonzero(held_mask[:, j])
+        fundamental_windows.append({
+            "stock_name": _disp(instrument),
+            "ace_code": instrument if instrument in ace_codes else None,
+            "holding_months": int(held_months[j]),
+            "first_month": t0[held_intervals[0]].date(),
+            "last_month": t1[held_intervals[-1]].date(),
+        })
+
     diag = {
         "months": months,
         "period_months": period_months,
@@ -494,6 +510,7 @@ def _compute_attribution(
         "effective_start_month": t0[0],
         "portfolio_return_summary_df": portfolio_return_summary_df,
         "equity_keys": equity_keys,
+        "fundamental_windows": fundamental_windows,
         "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
         "adj_price_invalid_rows_df": invalid_price_rows_df,
         "adj_price_return_audit_df": price_return_audit_df,

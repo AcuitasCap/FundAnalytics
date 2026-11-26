@@ -194,3 +194,24 @@ def _load_attrib_raw_window(
         "stock_master": sm,
         "weight_scale": float(weight_scale),
     }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_attrib_fundamental_endpoints(endpoints: tuple[tuple[str, dt.date], ...]) -> pd.DataFrame:
+    """Load just the requested ACE/month-year pairs, including last trading day records."""
+    columns = ["ace_code", "month_end", "ttm_pat", "ttm_sales", "book_value"]
+    if not endpoints:
+        return pd.DataFrame(columns=columns)
+
+    ace_codes, dates = zip(*endpoints)
+    query = text("""
+        SELECT v.ace_code, v.month_end, v.ttm_pat, v.ttm_sales, v.book_value
+        FROM unnest(CAST(:ace_codes AS text[]), CAST(:month_starts AS date[])) AS e(ace_code, month_start)
+        JOIN fundlab.stock_monthly_valuations_ace v
+          ON v.ace_code = e.ace_code
+         AND v.month_end >= e.month_start
+         AND v.month_end < e.month_start + INTERVAL '1 month'
+    """)
+    return pd.read_sql(query, get_engine(), params={
+        "ace_codes": list(ace_codes), "month_starts": [date.replace(day=1) for date in dates],
+    })

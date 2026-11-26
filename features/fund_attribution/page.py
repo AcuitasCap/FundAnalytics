@@ -1,13 +1,19 @@
 import datetime as dt
+import logging
 
 import streamlit as st
+from sqlalchemy.exc import SQLAlchemyError
 
 from core.dates import to_month_end
 from core.fund_catalog import fetch_categories, fetch_funds_for_categories
 from core.navigation import home_button
-from features.fund_attribution.data import _load_attrib_raw_window
+from features.fund_attribution.data import _load_attrib_raw_window, load_attrib_fundamental_endpoints
 from features.fund_attribution.compute import _compute_attribution
 from features.fund_attribution.display import display_attribution_results
+from features.fund_attribution.fundamentals import build_fundamental_growth_table
+
+
+logger = logging.getLogger(__name__)
 
 def fund_attribution_page():
     home_button()
@@ -106,13 +112,25 @@ def fund_attribution_page():
             st.error(original[3]["error"])
             return
 
+        windows = original[3]["fundamental_windows"]
+        endpoints = tuple(sorted({
+            (window["ace_code"], window[boundary])
+            for window in windows if window["ace_code"]
+            for boundary in ("first_month", "last_month")
+        }))
+        try:
+            fundamentals = build_fundamental_growth_table(windows, load_attrib_fundamental_endpoints(endpoints))
+        except (SQLAlchemyError, ValueError):
+            logger.exception("Unable to load stock fundamentals for attribution")
+            fundamentals = None
         st.session_state[state_key] = {
             "settings": settings, "raw": raw, "original": original, "scenario": None, "selected": (),
+            "fundamentals": fundamentals,
         }
         st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
 
     run = st.session_state.get(state_key)
-    if run is None or run["settings"] != settings:
+    if run is None or run["settings"] != settings or "fundamentals" not in run:
         st.info("Select inputs above and click Submit.")
         return
 
@@ -125,6 +143,7 @@ def fund_attribution_page():
     selection = display_attribution_results(
         *results, bench_mode, selected_keys=run["selected"], original_summary=original_summary,
         editor_key=f"fa_attribution_stock_selection_{st.session_state[revision_key]}",
+        fundamentals=run["fundamentals"],
     )
     if selection is None:
         return

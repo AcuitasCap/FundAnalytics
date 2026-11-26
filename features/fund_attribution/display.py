@@ -8,7 +8,7 @@ from features.fund_attribution.data import (
 
 
 def display_attribution_results(
-    stock_df, hit_df, cat_df, diag, bench_mode, *, selected_keys, original_summary, editor_key,
+    stock_df, hit_df, cat_df, diag, bench_mode, *, selected_keys, original_summary, editor_key, fundamentals,
 ):
     """Render the active run and return the checked keys when a button is submitted."""
     start = diag["effective_start_month"]
@@ -54,6 +54,7 @@ def display_attribution_results(
 
     with st.form("fa_attribution_scenario_form"):
         st.subheader("Stock-level attribution")
+        st.caption("Stock and benchmark returns are cumulative for holdings under one year and annualized from one year onward.")
         if selectable.empty:
             st.info("There are no stock positions to substitute in this portfolio.")
         else:
@@ -64,6 +65,18 @@ def display_attribution_results(
         if (~stock_rows).any():
             with st.expander("Cash and other positions"):
                 st.dataframe(stock_df.loc[~stock_rows], width="stretch", hide_index=True)
+
+        st.subheader("Stock fundamentals during holding periods")
+        if fundamentals is None:
+            st.warning("Stock fundamentals could not be loaded.")
+        elif fundamentals.empty:
+            st.info("No stocks were held for more than one year in the selected period.")
+        else:
+            st.caption("Growth is annualized from the first entry to the end of the final holding period, including gaps between trades. "
+                       "The holding-period column counts only time actually held. PAT and sales use trailing 12 months.")
+            st.dataframe(fundamentals, width="stretch", hide_index=True, column_config={
+                "Holding period (years)": st.column_config.NumberColumn(format="%.2f"),
+            })
 
         st.subheader("Hit rate by rupee alpha")
         st.dataframe(hit_df, width="stretch", hide_index=True)
