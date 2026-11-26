@@ -99,6 +99,12 @@ def _compute_attribution(
             "NOACE::" + h["instrument_name"].astype(str)
         )
 
+    # The same report count applies to every position, so an absence adds zero.
+    # Averaging before filtering to equities preserves the weights in the full fund.
+    average_weights_pct = h.groupby("instrument_key")["holding_weight"].sum() * (100 / len(reported_months))
+    # Balance reported weights with cash, including any negative residual.
+    average_weights_pct["CASH::RESIDUAL"] = 100.0 - average_weights_pct.sum()
+
     domestic_only = str(universe_mode).strip() == "Domestic equities only"
     if domestic_only:
         h = h[h["asset_type"].astype(str).str.strip() == "Domestic Equities"].copy()
@@ -507,6 +513,7 @@ def _compute_attribution(
             "stock_name": _disp(instrument),
             "ace_code": instrument if instrument in ace_codes else None,
             "holding_months": months_held,
+            "average_weight_pct": float(average_weights_pct[instrument]),
             "first_month": held_reports[0].date(),
             "last_month": held_reports[-1].date(),
         })
@@ -518,6 +525,7 @@ def _compute_attribution(
         "effective_start_month": t0[0],
         "portfolio_return_summary_df": portfolio_return_summary_df,
         "equity_keys": equity_keys,
+        "average_portfolio_weights_pct": average_weights_pct,
         "fundamental_windows": fundamental_windows,
         "missing_benchmarks": [x for x in [BENCH_NAME_NIFTY50, BENCH_NAME_NIFTY500, BENCH_NAME_NIFTY100, BENCH_NAME_MID150, BENCH_NAME_SMALL250] if x not in bn_piv.columns],
         "adj_price_invalid_rows_df": invalid_price_rows_df,

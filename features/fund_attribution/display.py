@@ -72,13 +72,13 @@ def display_attribution_results(
         elif fundamentals.empty:
             st.info("No stocks were held for more than one year in the selected period.")
         else:
-            st.caption("Growth uses the first and last reports that list the stock, including gaps between trades. "
-                       "The holding-period column sums the spans covered by consecutive reports that list it. "
-                       "PAT and sales use trailing 12 months.")
+            st.caption("Average weights are shares of the full fund across all reports in the review period. "
+                       "Stocks absent from a report count as zero. Growth uses the first and last reports that list the stock, "
+                       "including gaps between trades. PAT and sales use trailing 12 months.")
             fundamentals_with_cagr = fundamentals.copy()
             fundamentals_with_cagr.insert(2, "Stock CAGR", stock_df["Stock return (%)"])
             st.dataframe(fundamentals_with_cagr, width="stretch", hide_index=True, column_config={
-                "Holding period (years)": st.column_config.NumberColumn(format="%.2f"),
+                "Average weight (%)": st.column_config.NumberColumn(format="%.2f%%"),
                 "Stock CAGR": st.column_config.NumberColumn(format="%.2f%%", help="Matches the stock return in the attribution table above."),
             })
 

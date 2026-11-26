@@ -14,7 +14,7 @@ from features.fund_attribution.fundamentals import build_fundamental_growth_tabl
 
 
 logger = logging.getLogger(__name__)
-FUNDAMENTAL_WINDOW_BASIS = "reported-holdings-v1"
+FUNDAMENTAL_WINDOW_BASIS = "reported-holdings-v2"
 
 def fund_attribution_page():
     home_button()
