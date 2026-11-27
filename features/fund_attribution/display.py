@@ -47,8 +47,11 @@ def display_attribution_results(
     if bench_mode in benchmark_names:
         st.caption(f"Benchmark series is {benchmark_names[bench_mode]}. Cash earns {CASH_ANNUAL_RETURN:.0%} annually when included.")
     else:
-        st.caption("Like-for-like uses Nifty 100 for large caps, Midcap 150 for mid caps, and Smallcap 250 for small caps. "
-                   "Other equities use Nifty 50.")
+        st.caption(
+            "Like-for-like uses Nifty 100 TRI for large caps and Nifty Midcap 150 TRI for mid caps. "
+            "Small caps, microcaps, and stocks without a size band or ACE code use Nifty Smallcap 250 TRI. "
+            "Mapped overseas and other equities use Nifty 50 TRI."
+        )
 
     stock_rows = stock_df.index.isin(diag["equity_keys"])
     selectable = stock_df.loc[stock_rows].copy()

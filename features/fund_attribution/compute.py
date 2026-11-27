@@ -264,24 +264,22 @@ def _compute_attribution(
         for c in instr_cols:
             r_bm[c] = broad
     else:
+        size_benchmark_returns = {
+            BENCH_NAME_NIFTY100: r_n100,
+            BENCH_NAME_MID150: r_mid150,
+            BENCH_NAME_SMALL250: r_small250,
+        }
         for c in instr_cols:
             if c in cash_keys or c.startswith("CASH::"):
                 r_bm[c] = r_price_instr[c]
             elif c.startswith("NOACE::"):
-                r_bm[c] = r_n50
+                r_bm[c] = r_small250
             else:
                 vals = np.zeros(len(t1), dtype=float)
                 for i in range(len(t1)):
                     band = str(size_lookup.get((t0[i], c), "")).strip()
-                    bench_name = LIKE_FOR_LIKE_BENCH.get(band, BENCH_NAME_NIFTY50)
-                    if bench_name == BENCH_NAME_NIFTY100:
-                        vals[i] = r_n100[i]
-                    elif bench_name == BENCH_NAME_MID150:
-                        vals[i] = r_mid150[i]
-                    elif bench_name == BENCH_NAME_SMALL250:
-                        vals[i] = r_small250[i]
-                    else:
-                        vals[i] = r_n50[i]
+                    bench_name = LIKE_FOR_LIKE_BENCH.get(band, BENCH_NAME_SMALL250)
+                    vals[i] = size_benchmark_returns[bench_name][i]
                 r_bm[c] = vals
 
         for c in instr_cols:
